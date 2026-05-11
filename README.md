@@ -73,6 +73,35 @@ Then run `/castor-status` to confirm everything is wired up.
 
 ---
 
+## Claude Desktop App
+
+To use Claude Castor in the Claude desktop app, edit the config file at
+`~/Library/Application Support/Claude/claude_desktop_config.json` and add an
+entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "claude-castor": {
+      "command": "/absolute/path/to/uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/claude-castor",
+        "server.py"
+      ]
+    }
+  }
+}
+```
+
+Get your `uv` path with `which uv`. Restart the desktop app after saving.
+
+If you already completed the Google OAuth step for Claude Code, authentication
+carries over — no extra steps needed.
+
+---
+
 ## Slash Commands
 
 | Command | Description |
