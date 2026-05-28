@@ -147,7 +147,11 @@ def _inline_directory(directory: str) -> str:
     return result
 
 
-def _run_gemini(prompt: str, trust: bool = False) -> str:
+def _run_gemini(
+    prompt: str,
+    trust: bool = False,
+    cwd: str | None = None
+) -> str:
     cmd = ["gemini", "--skip-trust"]
     env = None
     if trust:
@@ -160,7 +164,8 @@ def _run_gemini(prompt: str, trust: bool = False) -> str:
             capture_output=True,
             text=True,
             timeout=300,
-            env=env
+            env=env,
+            cwd=cwd
         )
     except FileNotFoundError:
         return (
@@ -186,6 +191,7 @@ def gemini_prompt(
     directory: str | None = None,
     raw: bool = False,
     trust: bool = False,
+    cwd: str | None = None,
 ) -> str:
     """Send a prompt to Gemini and return the response.
 
@@ -206,6 +212,10 @@ def gemini_prompt(
         trust: If True, run Gemini in full agent mode with filesystem
             access. Only use after the user has completed OAuth via
             `gemini_setup`. Default is False (safe headless mode).
+        cwd: Working directory for the Gemini subprocess. Required when
+            using trust=True so Gemini's filesystem access is rooted in
+            the correct project directory. Pass the absolute path of the
+            user's current project.
     """
     parts: list[str] = []
 
@@ -220,7 +230,7 @@ def gemini_prompt(
     if directory:
         parts.append(_inline_directory(directory))
 
-    return _run_gemini("\n\n".join(parts), trust=trust)
+    return _run_gemini("\n\n".join(parts), trust=trust, cwd=cwd)
 
 
 @mcp.tool()
