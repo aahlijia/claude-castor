@@ -9,6 +9,8 @@ from pathlib import Path
 REPO_DIR = Path(__file__).parent.resolve()
 COMMANDS_SRC = REPO_DIR / "commands"
 COMMANDS_DEST = Path.home() / ".claude" / "commands"
+GEMINI_MD_SRC = REPO_DIR / "GEMINI.md"
+GEMINI_MD_DEST = Path.home() / ".claude" / "GEMINI.md"
 
 
 def find_uv() -> Path:
@@ -60,6 +62,9 @@ def install_commands() -> None:
         dest = COMMANDS_DEST / src.name
         shutil.copy(src, dest)
         print(f"  /{src.stem}")
+
+    shutil.copy(GEMINI_MD_SRC, GEMINI_MD_DEST)
+    print(f"  GEMINI.md → {GEMINI_MD_DEST}")
 
 
 def main() -> None:
