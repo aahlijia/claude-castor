@@ -1,7 +1,8 @@
 Perform a full codebase exploration using Gemini in agent mode.
 
-Read GEMINI.md first for prompting guidance, then call `gemini_prompt` with:
+Read `~/.claude/GEMINI.md` first for prompting guidance, then call `gemini_prompt` with:
 - `trust=True` (full agent mode — Gemini navigates the filesystem on its own)
+- `cwd` set to the absolute path of the current working directory
 - No `files` or `directory` — Gemini will explore independently
 - A prompt that includes:
   - The current working directory path
