@@ -2,8 +2,9 @@ Research a specific topic, feature, symbol, or file in the codebase using Gemini
 
 The research target is: $ARGUMENTS
 
-Read GEMINI.md first for prompting guidance, then call `gemini_prompt` with:
+Read `~/.claude/GEMINI.md` first for prompting guidance, then call `gemini_prompt` with:
 - `trust=True` (full agent mode — Gemini can search, grep, and follow imports)
+- `cwd` set to the absolute path of the current working directory
 - No `files` or `directory` — let Gemini locate what it needs
 - A prompt that includes:
   - The current working directory path
