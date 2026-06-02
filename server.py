@@ -50,20 +50,24 @@ MAX_FILE_BYTES = 100 * 1024  # 100 KB per file
 MAX_TOTAL_BYTES = 800 * 1024  # 800 KB total inline content
 
 
-def _is_binary(path: Path) -> bool:
+def _read_bytes(path: Path) -> bytes | None:
+    """Read a file's raw bytes, returning None on read error."""
     try:
         with open(path, "rb") as f:
-            return b"\x00" in f.read(8192)
+            return f.read()
     except OSError:
-        return True
+        return None
 
 
-def _file_block(path: Path) -> str:
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-        return f"[FILE: {path}]\n{content}\n"
-    except OSError as e:
-        return f"[FILE: {path}]\n[read error: {e}]\n"
+def _is_binary_bytes(data: bytes) -> bool:
+    """Detect binary content by scanning the first 8 KB for a null byte."""
+    return b"\x00" in data[:8192]
+
+
+def _decode_block(path: Path, data: bytes) -> str:
+    """Format already-read bytes as a labeled file block."""
+    content = data.decode("utf-8", errors="replace")
+    return f"[FILE: {path}]\n{content}\n"
 
 
 def _load_gitignore(root: Path) -> list[str]:
@@ -92,10 +96,14 @@ def _inline_files(paths: list[str]) -> str:
             blocks.append(f"[FILE: {raw}]\n[skipped: not a file]\n")
         elif p.stat().st_size > MAX_FILE_BYTES:
             blocks.append(f"[FILE: {raw}]\n[skipped: >{limit_kb}KB]\n")
-        elif _is_binary(p):
-            blocks.append(f"[FILE: {raw}]\n[skipped: binary]\n")
         else:
-            blocks.append(_file_block(p))
+            data = _read_bytes(p)
+            if data is None:
+                blocks.append(f"[FILE: {raw}]\n[read error]\n")
+            elif _is_binary_bytes(data):
+                blocks.append(f"[FILE: {raw}]\n[skipped: binary]\n")
+            else:
+                blocks.append(_decode_block(p, data))
     return "\n".join(blocks)
 
 
@@ -108,7 +116,8 @@ def _inline_directory(directory: str) -> str:
 
     for rel_root, dirs, files in os.walk(root):
         dirs[:] = [
-            d for d in dirs
+            d
+            for d in dirs
             if d not in SKIP_DIRS
             and not any(
                 fnmatch.fnmatch(d, p.rstrip("/")) for p in ignore_patterns
@@ -126,13 +135,15 @@ def _inline_directory(directory: str) -> str:
                 continue
             if file_path.suffix in SKIP_EXTENSIONS:
                 continue
-            if _is_binary(file_path):
-                continue
             if file_path.stat().st_size > MAX_FILE_BYTES:
                 skipped.append(rel)
                 continue
 
-            block = _file_block(file_path)
+            data = _read_bytes(file_path)
+            if data is None or _is_binary_bytes(data):
+                continue
+
+            block = _decode_block(file_path, data)
             if total + len(block) > MAX_TOTAL_BYTES:
                 skipped.append(rel)
                 continue
@@ -148,9 +159,7 @@ def _inline_directory(directory: str) -> str:
 
 
 def _run_gemini(
-    prompt: str,
-    trust: bool = False,
-    cwd: str | None = None
+    prompt: str, trust: bool = False, cwd: str | None = None
 ) -> str:
     cmd = ["gemini", "--skip-trust"]
     env = None
@@ -165,7 +174,7 @@ def _run_gemini(
             text=True,
             timeout=300,
             env=env,
-            cwd=cwd
+            cwd=cwd,
         )
     except FileNotFoundError:
         return (
@@ -217,6 +226,13 @@ def gemini_prompt(
             the correct project directory. Pass the absolute path of the
             user's current project.
     """
+    if trust and not cwd:
+        return (
+            "[Error: cwd is required when trust=True so Gemini's "
+            "filesystem access is rooted in the correct project "
+            "directory. Pass the absolute path of the user's project.]"
+        )
+
     parts: list[str] = []
 
     if not raw:
@@ -270,10 +286,7 @@ def gemini_status() -> str:
     """
     try:
         version_result = subprocess.run(
-            ["gemini", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["gemini", "--version"], capture_output=True, text=True, timeout=10
         )
     except FileNotFoundError:
         return (
@@ -295,7 +308,7 @@ def gemini_status() -> str:
             input="Reply with exactly the word: OK",
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
         )
     except FileNotFoundError:
         return "NOT INSTALLED: `gemini` CLI not found."

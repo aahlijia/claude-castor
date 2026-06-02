@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install claude-castor: registers the MCP server and installs slash commands."""
+"""Register the claude-castor MCP server and install slash commands."""
 
 import shutil
 import subprocess
@@ -42,9 +42,18 @@ def register_mcp(claude: str, uv: Path) -> None:
     print("Registering MCP server...")
     result = subprocess.run(
         [
-            claude, "mcp", "add", "-s", "user", "claude-castor",
-            str(uv), "--",
-            "run", "--directory", str(REPO_DIR), "server.py",
+            claude,
+            "mcp",
+            "add",
+            "-s",
+            "user",
+            "claude-castor",
+            str(uv),
+            "--",
+            "run",
+            "--directory",
+            str(REPO_DIR),
+            "server.py",
         ],
         capture_output=True,
         text=True,
