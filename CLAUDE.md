@@ -75,6 +75,7 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `continue_session` | `bool` | Resume agy's prior conversation instead of re-exploring (default: false) |
 | `conversation_id` | `str \| None` | Resume a specific agy conversation by ID (takes precedence over `continue_session`) |
 | `model` | `str \| None` | Select the agy model (see `gemini_models`; defaults to agy's default) |
+| `sandbox` | `bool` | Explore under terminal restrictions — safe middle tier (default: false; ignored when `trust=True`) |
 
 ### `gemini_reset`
 
@@ -143,7 +144,7 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
 
 - Persistent chat sessions with `gemini_reset` tool (agy `--continue`) — **done**
 - Model selection (`model` param + `gemini_models` tool) — **done**
-- Sandbox tier (`--sandbox`) between read-only and full trust
+- Sandbox tier (`--sandbox`) between read-only and full trust — **done**
 - Directory structure map when content is truncated
 - Enhanced `gemini_status` diagnostics (account, model version)
 - Streaming output (async subprocess)

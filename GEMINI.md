@@ -92,18 +92,25 @@ directories without inlining them.
 
 ---
 
-## Trust Mode (Agent Mode)
+## Access Tiers
 
-By default, `gemini_prompt` runs read-only (`trust=False`) — agy answers from the
-workspace and pre-loaded content without modifying anything.
+`gemini_prompt` runs at one of three access levels. They are mutually exclusive —
+`trust` wins over `sandbox` if both are set.
 
-With `trust=True`, agy runs with `--dangerously-skip-permissions`: it actively
-explores the filesystem, greps for patterns, follows imports, and auto-approves tool
-actions on its own. This produces significantly better results for deep research.
+| Tier | Flag | What agy can do |
+|---|---|---|
+| read-only (default) | — | Answers from inlined content; no filesystem actions |
+| sandbox | `sandbox=True` | Explores the filesystem under terminal restrictions; does not blindly auto-approve actions |
+| trust | `trust=True` | Full agent mode (`--dangerously-skip-permissions`); explores, greps, follows imports, and auto-approves all tool actions |
 
-**Prerequisites:**
-- `cwd` is **required** — pass the absolute project path so agy's workspace is rooted
-  correctly. The call errors without it.
+`sandbox=True` is the safe middle ground: agy actively explores (so you get
+agent-quality results) but cannot run unrestricted commands. Prefer it over `trust`
+unless the task genuinely needs agy to write files or run arbitrary commands.
+
+**Prerequisites for sandbox and trust:**
+- `cwd` is **required** for `trust=True` — pass the absolute project path so agy's
+  workspace is rooted correctly. The call errors without it. Pass `cwd` for `sandbox`
+  too so agy is rooted in the right project.
 - The user must be signed in to Antigravity. If `gemini_status` reports NOT SIGNED IN,
   call the `gemini_auth` tool (it returns the `! agy -p "ok"` sign-in instruction).
 
@@ -111,6 +118,7 @@ Use `trust=True` when:
 - The user explicitly asks for deep research or full codebase exploration
 - The task requires following chains of imports or cross-file symbol resolution
 - Pre-loading files would be insufficient or impractical
+- The work needs agy to write files or run commands (otherwise prefer `sandbox=True`)
 
 ---
 
@@ -155,6 +163,7 @@ trading speed for capability — otherwise the default is fine.
 | User mentions a specific file | `gemini_prompt` with that file in `files` |
 | User says "explore the project" | `gemini_prompt` with `trust=True` + `cwd`, no files |
 | Need raw output | `gemini_prompt` with `raw=True` |
+| Explore safely (no writes/commands) | `gemini_prompt` with `sandbox=True` + `cwd` |
 | Follow-up on the same codebase | `gemini_prompt` with `continue_session=True` |
 | Start a fresh session | `gemini_reset` |
 | Pick a specific model | `gemini_prompt` with `model=...` |

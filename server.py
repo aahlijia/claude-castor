@@ -189,6 +189,39 @@ def _needs_auth(text: str) -> bool:
     return any(marker in low for marker in _AUTH_MARKERS)
 
 
+def _build_agy_cmd(
+    trust: bool,
+    add_dirs: list[str] | None,
+    continue_session: bool,
+    conversation_id: str | None,
+    model: str | None,
+    sandbox: bool,
+) -> list[str]:
+    """Assemble the agy print-mode command with the requested flags.
+
+    Access tier is mutually exclusive: trust (--dangerously-skip-
+    permissions) wins over sandbox (--sandbox); session resume by
+    conversation_id wins over continue_session.
+
+    Returns:
+        The full argv list for the agy subprocess.
+    """
+    cmd = ["agy", "--print", "--print-timeout", PRINT_TIMEOUT]
+    if trust:
+        cmd.append("--dangerously-skip-permissions")
+    elif sandbox:
+        cmd.append("--sandbox")
+    for directory in add_dirs or []:
+        cmd.extend(["--add-dir", directory])
+    if conversation_id:
+        cmd.extend(["--conversation", conversation_id])
+    elif continue_session:
+        cmd.append("--continue")
+    if model:
+        cmd.extend(["--model", model])
+    return cmd
+
+
 def _run_agy(
     prompt: str,
     trust: bool = False,
@@ -197,6 +230,7 @@ def _run_agy(
     continue_session: bool = False,
     conversation_id: str | None = None,
     model: str | None = None,
+    sandbox: bool = False,
 ) -> str:
     """Run an agy print-mode prompt and return its stdout.
 
@@ -218,21 +252,21 @@ def _run_agy(
             continue_session.
         model: If set, pass --model <model> to select the agy model.
             Call gemini_models for the available names.
+        sandbox: If True, pass --sandbox so agy explores with terminal
+            restrictions instead of auto-approving everything. Ignored
+            when trust is True (trust is the broader grant).
 
     Returns:
         agy's stdout, or a bracketed error/status string.
     """
-    cmd = ["agy", "--print", "--print-timeout", PRINT_TIMEOUT]
-    if trust:
-        cmd.append("--dangerously-skip-permissions")
-    for directory in add_dirs or []:
-        cmd.extend(["--add-dir", directory])
-    if conversation_id:
-        cmd.extend(["--conversation", conversation_id])
-    elif continue_session:
-        cmd.append("--continue")
-    if model:
-        cmd.extend(["--model", model])
+    cmd = _build_agy_cmd(
+        trust=trust,
+        add_dirs=add_dirs,
+        continue_session=continue_session,
+        conversation_id=conversation_id,
+        model=model,
+        sandbox=sandbox,
+    )
 
     try:
         result = subprocess.run(
@@ -276,6 +310,7 @@ def gemini_prompt(
     continue_session: bool = False,
     conversation_id: str | None = None,
     model: str | None = None,
+    sandbox: bool = False,
 ) -> str:
     """Send a prompt to Antigravity (agy) and return the response.
 
@@ -316,6 +351,10 @@ def gemini_prompt(
             summarization, a stronger one for deep reasoning). Call
             gemini_models for the available names. Defaults to agy's
             configured default.
+        sandbox: If True, agy explores the filesystem (like trust) but
+            runs under terminal restrictions and does not blindly
+            auto-approve actions — the safe middle ground between
+            read-only and trust. Ignored when trust=True.
     """
     if trust and not cwd:
         return (
@@ -347,6 +386,7 @@ def gemini_prompt(
         continue_session=resume,
         conversation_id=conversation_id,
         model=model,
+        sandbox=sandbox,
     )
     # Bracketed returns are errors/status, not real conversations, so
     # only mark a session active when agy actually responded.

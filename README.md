@@ -146,6 +146,7 @@ over via the system keyring — no extra steps needed.
 | `continue_session` | `bool` | `false` | Resume agy's prior conversation instead of re-exploring |
 | `conversation_id` | `str` | `None` | Resume a specific agy conversation by ID |
 | `model` | `str` | `None` | Select the agy model (see `gemini_models`) |
+| `sandbox` | `bool` | `false` | Explore under terminal restrictions (safe middle tier; ignored if `trust`) |
 
 ---
 
@@ -156,7 +157,12 @@ By default, agy runs read-only and responds in Q&A mode. With `trust=True`
 read files, search the codebase, follow imports, and auto-approve tool actions
 on its own without needing content pre-loaded.
 
-Best for:
+`sandbox=True` is a safer middle tier: agy still explores the filesystem
+actively, but under terminal restrictions and without blindly auto-approving
+actions. `trust` takes precedence if both are set. Prefer `sandbox` unless the
+task genuinely needs agy to write files or run arbitrary commands.
+
+Best for (trust or sandbox):
 - Deep codebase exploration
 - Cross-file symbol resolution
 - Large projects where pre-loading is impractical
