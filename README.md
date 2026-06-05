@@ -50,7 +50,7 @@ Verify with `agy --version`.
 
 ### 2. Sign in with Google
 
-Run `/castor-auth` (or call the `gemini_auth` tool) for guided sign-in. It hands
+Run `/castor:auth` (or call the `gemini_auth` tool) for guided sign-in. It hands
 you the command to run — sign-in is interactive, so you run it yourself in the
 Claude Code prompt or a terminal:
 
@@ -79,7 +79,7 @@ globally. Works on macOS, Linux, and Windows.
 
 ### 5. Restart Claude Code
 
-Then run `/castor-status` to confirm everything is wired up.
+Then run `/castor:status` to confirm everything is wired up.
 
 ---
 
@@ -116,10 +116,10 @@ over via the system keyring — no extra steps needed.
 
 | Command | Description |
 |---|---|
-| `/castor-status` | Check Antigravity CLI installation and sign-in |
-| `/castor-auth` | Sign in to the Antigravity CLI |
-| `/castor-explore` | Full codebase exploration in agent mode |
-| `/castor-research <topic>` | Deep-dive on a symbol, feature, or file |
+| `/castor:status` | Check Antigravity CLI installation and sign-in |
+| `/castor:auth` | Sign in to the Antigravity CLI |
+| `/castor:explore` | Full codebase exploration in agent mode |
+| `/castor:research <topic>` | Deep-dive on a symbol, feature, or file |
 
 ---
 
@@ -198,7 +198,7 @@ Call `gemini_models` to list what's available.
 **`agy` not found** — Run
 `curl -fsSL https://antigravity.google/cli/install.sh | bash`
 
-**Not signed in** — Run `/castor-auth` (or call the `gemini_auth` tool) for the
+**Not signed in** — Run `/castor:auth` (or call the `gemini_auth` tool) for the
 sign-in command, then run `agy -p "ok"` to complete Google sign-in
 
 **Timeout** — agy print mode has a 300s limit. For large projects, prefer

@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "…and N more" overflow) instead of only a count, so Claude can request
   specific dropped files in a follow-up.
 - `_run_agy` argv assembly extracted into a `_build_agy_cmd` helper.
+- **Slash commands renamed to the `castor:` namespace** (`/castor:status`,
+  `/castor:auth`, `/castor:explore`, `/castor:research`). They now install under
+  `~/.claude/commands/castor/`; the installer removes the old flat
+  `castor-*.md` files from prior installs.
 
 ### Added
 
@@ -52,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explores under terminal restrictions without auto-approving actions. A safe
   middle ground between read-only and `trust`; `trust` takes precedence if both
   are set.
-- `/castor-auth` slash command — guides first-time sign-in.
+- `/castor:auth` slash command — guides first-time sign-in.
 
 ### Carried over (prior unreleased work)
 

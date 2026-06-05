@@ -150,5 +150,5 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
 - Enhanced `gemini_status` diagnostics (available models) — **done**
   (account/freshness skipped: agy has no whoami command and `agy update`
   mutates rather than checks)
-- `/castor-auth` slash command for onboarding — **done**
+- `/castor:auth` slash command for onboarding — **done**
 - Streaming output (async subprocess)

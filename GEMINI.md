@@ -137,7 +137,7 @@ context it already built.
 - `conversation_id` resumes a specific agy conversation by ID and takes precedence over
   `continue_session`. Only use it when you have an ID to resume.
 
-Pattern: run a broad `/castor-explore` first, then follow up with narrower
+Pattern: run a broad `/castor:explore` first, then follow up with narrower
 `continue_session=True` prompts that build on what agy already learned.
 
 ---

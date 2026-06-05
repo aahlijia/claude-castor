@@ -14,4 +14,4 @@ Call the `gemini_auth` tool, then relay its instruction to the user clearly:
 - If it reports the `agy` CLI is not installed, tell the user to run
   `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then retry.
 
-After the user has signed in, run `/castor-status` to confirm it reports READY.
+After the user has signed in, run `/castor:status` to confirm it reports READY.
