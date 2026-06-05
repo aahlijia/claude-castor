@@ -7,12 +7,17 @@ from fastmcp import FastMCP
 
 mcp = FastMCP("claude-castor")
 
+INSTALL_CMD = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+
 SYSTEM_INSTRUCTION = """\
 You are a technical assistant. Respond with precision and structure.
 - Use clear headings and bullet points where appropriate
 - Include file names, line numbers, and symbol names when referencing code
 - Be concise — avoid filler; every sentence should carry information
-- If asked to index or summarize, produce output Claude can use as context\
+- If asked to index or summarize, produce output Claude can use as context
+- Do NOT narrate your actions (no "I will read..." / "I will view...")
+- Do NOT append a "Summary of Work" or similar trailing section
+- Reference files as plain paths, never as file:// links\
 """
 
 SKIP_DIRS = {
@@ -48,6 +53,11 @@ SKIP_EXTENSIONS = {
 }
 MAX_FILE_BYTES = 100 * 1024  # 100 KB per file
 MAX_TOTAL_BYTES = 800 * 1024  # 800 KB total inline content
+
+# agy print mode waits this long for a single prompt to resolve.
+PRINT_TIMEOUT = "300s"
+# Subprocess wall-clock guard, slightly above PRINT_TIMEOUT.
+SUBPROCESS_TIMEOUT = 310
 
 
 def _read_bytes(path: Path) -> bytes | None:
@@ -158,39 +168,68 @@ def _inline_directory(directory: str) -> str:
     return result
 
 
-def _run_gemini(
-    prompt: str, trust: bool = False, cwd: str | None = None
+def _needs_auth(text: str) -> bool:
+    """True if agy output indicates the user is not signed in."""
+    return "Authentication required" in text
+
+
+def _run_agy(
+    prompt: str,
+    trust: bool = False,
+    cwd: str | None = None,
+    add_dirs: list[str] | None = None,
 ) -> str:
-    cmd = ["gemini", "--skip-trust"]
-    env = None
+    """Run an agy print-mode prompt and return its stdout.
+
+    The prompt is piped via stdin (agy --print reads it from stdin),
+    so prompt size is not bounded by the command-line argument limit.
+
+    Args:
+        prompt: The fully-assembled prompt to send to agy.
+        trust: If True, pass --dangerously-skip-permissions so agy
+            auto-approves tool actions (writes, commands).
+        cwd: Working directory for the subprocess; roots agy's
+            workspace so it explores the correct project.
+        add_dirs: Extra directories to grant agy read access to via
+            repeated --add-dir flags.
+
+    Returns:
+        agy's stdout, or a bracketed error/status string.
+    """
+    cmd = ["agy", "--print", "--print-timeout", PRINT_TIMEOUT]
     if trust:
-        cmd = ["gemini"]
-        env = {**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"}
+        cmd.append("--dangerously-skip-permissions")
+    for directory in add_dirs or []:
+        cmd.extend(["--add-dir", directory])
+
     try:
         result = subprocess.run(
             cmd,
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=300,
-            env=env,
+            timeout=SUBPROCESS_TIMEOUT,
             cwd=cwd,
         )
     except FileNotFoundError:
-        return (
-            "[Error: `gemini` CLI not found. "
-            "Run: npm install -g @google/gemini-cli]"
-        )
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
     except subprocess.TimeoutExpired:
         return (
-            "[Error: Gemini timed out after 300s. "
-            "Try passing specific files instead of a full directory.]"
+            "[Error: Antigravity timed out. Try a narrower scope, "
+            "specific files, or fewer directories.]"
+        )
+
+    combined = result.stdout + result.stderr
+    if _needs_auth(combined):
+        return (
+            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
+            "to complete Google sign-in — it is a one-time step.]"
         )
 
     if result.returncode != 0 and result.stderr.strip():
-        return f"[Gemini error]\n{result.stderr.strip()}"
+        return f"[Antigravity error]\n{result.stderr.strip()}"
 
-    return result.stdout.strip() or "[No response from Gemini]"
+    return result.stdout.strip() or "[No response from Antigravity]"
 
 
 @mcp.tool()
@@ -201,8 +240,9 @@ def gemini_prompt(
     raw: bool = False,
     trust: bool = False,
     cwd: str | None = None,
+    add_dirs: list[str] | None = None,
 ) -> str:
-    """Send a prompt to Gemini and return the response.
+    """Send a prompt to Antigravity (agy) and return the response.
 
     Use this to offload large-context work — file exploration, indexing,
     summarization, cross-file analysis, research. Claude should construct
@@ -210,27 +250,29 @@ def gemini_prompt(
     and where you are in the task), followed by a specific ask.
     See GEMINI.md for the full prompting guide.
 
-    Only pass `files` or `directory` if the user explicitly mentioned them.
-    Do not crawl the filesystem on the user's behalf — that is Gemini's job.
+    agy explores the workspace on its own when rooted via `cwd`, so
+    prefer that over inlining. Only pass `files` or `directory` to inline
+    content when the user explicitly named specific files.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
         files: Absolute paths to files to inline into the prompt.
         directory: A directory whose contents should be inlined.
         raw: If True, skip structured response instructions.
-        trust: If True, run Gemini in full agent mode with filesystem
-            access. Only use after the user has completed OAuth via
-            `gemini_setup`. Default is False (safe headless mode).
-        cwd: Working directory for the Gemini subprocess. Required when
-            using trust=True so Gemini's filesystem access is rooted in
-            the correct project directory. Pass the absolute path of the
-            user's current project.
+        trust: If True, pass --dangerously-skip-permissions so agy
+            auto-approves tool actions (writes, commands). Requires
+            `cwd`. Default False keeps agy read-only.
+        cwd: Working directory for the agy subprocess. Required when
+            using trust=True so agy's workspace is rooted in the user's
+            project. Pass the absolute project path.
+        add_dirs: Extra directories to grant agy read access to (via
+            --add-dir) without inlining them. Lets agy explore them.
     """
     if trust and not cwd:
         return (
-            "[Error: cwd is required when trust=True so Gemini's "
-            "filesystem access is rooted in the correct project "
-            "directory. Pass the absolute path of the user's project.]"
+            "[Error: cwd is required when trust=True so agy's workspace "
+            "is rooted in the correct project directory. Pass the "
+            "absolute path of the user's project.]"
         )
 
     parts: list[str] = []
@@ -246,81 +288,121 @@ def gemini_prompt(
     if directory:
         parts.append(_inline_directory(directory))
 
-    return _run_gemini("\n\n".join(parts), trust=trust, cwd=cwd)
+    return _run_agy(
+        "\n\n".join(parts), trust=trust, cwd=cwd, add_dirs=add_dirs
+    )
+
+
+@mcp.tool()
+def gemini_auth() -> str:
+    """Return instructions for the user to sign in to Antigravity.
+
+    Sign-in is interactive: agy prints an OAuth URL, the user consents
+    in the browser, and agy waits for that to complete. An MCP tool call
+    blocks Claude while it runs, so it cannot drive an interactive flow —
+    the user has no way to act while the tool is pending. Instead, this
+    returns an instruction for the user to run the sign-in command
+    themselves directly in the Claude Code prompt.
+
+    Call this when `gemini_status` or `gemini_prompt` reports that the
+    user is not signed in.
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except FileNotFoundError:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+
+    if result.returncode != 0:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+
+    return (
+        "To sign in to Antigravity, type this in the Claude Code prompt "
+        "(the `!` runs it as a live terminal command):\n\n"
+        '    ! agy -p "ok"\n\n'
+        "Complete the Google consent in your browser when agy prints the "
+        "sign-in URL. This is a one-time step — the token persists in the "
+        "system keyring, so later calls run without prompts."
+    )
 
 
 @mcp.tool()
 def gemini_setup() -> str:
-    """Return setup instructions for Gemini OAuth and agent mode.
+    """Return setup instructions for Antigravity (agy).
 
-    Call this when the user wants to set up Gemini for the first time
-    or wants to enable deep research mode with filesystem access.
+    Call this when the user wants to set up Antigravity for the first
+    time or wants to enable agent mode with filesystem access.
     """
-    return """\
-To enable full Gemini agent mode with filesystem access, complete
-Google OAuth once (first time only).
+    return f"""\
+To use Antigravity (the `agy` CLI), install it and sign in once.
 
-Tell the user to type the following in the Claude Code prompt:
+1. Install (if `gemini_status` reports NOT INSTALLED):
 
-    ! gemini --skip-trust
+    {INSTALL_CMD}
 
-They should:
-  1. Complete the Google OAuth flow in the browser
-  2. Exit with /exit or Ctrl+C
+2. Sign in (one-time). Tell the user to type this in the Claude Code
+   prompt (the `!` runs it as a live terminal command):
 
-No directory trust step is needed — the MCP server sets
-GEMINI_CLI_TRUST_WORKSPACE automatically when trust=True is used.
+    ! agy -p "ok"
 
-Once OAuth is complete, call gemini_prompt with trust=True for full
-agent mode: Gemini can explore the filesystem, search code, and
-follow imports on its own.\
+   then complete the Google consent in the browser. The token is saved
+   in the system keyring, so later calls run without prompts. The
+   `gemini_auth` tool returns these same instructions.
+
+Once signed in, call gemini_prompt with trust=True (and cwd set to the
+project path) for full agent mode: agy explores the filesystem, runs
+tools, and follows imports on its own.\
 """
 
 
 @mcp.tool()
 def gemini_status() -> str:
-    """Check that the gemini CLI is installed and authenticated.
+    """Check that the agy CLI is installed and signed in.
 
     Run before first use or when troubleshooting. Returns a status
     string with fix instructions if not ready.
     """
+    not_installed = f"NOT INSTALLED: `agy` CLI not found.\nFix: {INSTALL_CMD}"
+
     try:
         version_result = subprocess.run(
-            ["gemini", "--version"], capture_output=True, text=True, timeout=10
+            ["agy", "--version"], capture_output=True, text=True, timeout=10
         )
     except FileNotFoundError:
-        return (
-            "NOT INSTALLED: `gemini` CLI not found.\n"
-            "Fix: npm install -g @google/gemini-cli"
-        )
+        return not_installed
 
     if version_result.returncode != 0:
-        return (
-            "NOT INSTALLED: `gemini` CLI not found.\n"
-            "Fix: npm install -g @google/gemini-cli"
-        )
+        return not_installed
 
     version = version_result.stdout.strip()
 
     try:
         auth_result = subprocess.run(
-            ["gemini", "--skip-trust"],
+            ["agy", "--print", "--print-timeout", "30s"],
             input="Reply with exactly the word: OK",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=40,
         )
     except FileNotFoundError:
-        return "NOT INSTALLED: `gemini` CLI not found."
+        return not_installed
+
+    combined = auth_result.stdout + auth_result.stderr
+    if _needs_auth(combined):
+        return (
+            f"NOT SIGNED IN: agy {version} installed but not "
+            "authenticated.\n"
+            'Fix: run the `gemini_auth` tool (or `! agy -p "ok"`).'
+        )
 
     if auth_result.returncode != 0:
         return (
-            f"NOT AUTHENTICATED: CLI found ({version}) but auth failed.\n"
-            "Fix: run `gemini` interactively to complete Google OAuth.\n"
+            f"ERROR: agy {version} installed but a test prompt failed.\n"
             f"Error: {auth_result.stderr.strip()}"
         )
 
-    return f"READY — {version}"
+    return f"READY — agy {version}"
 
 
 if __name__ == "__main__":

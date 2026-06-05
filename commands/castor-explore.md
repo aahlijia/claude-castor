@@ -1,12 +1,12 @@
-Perform a full codebase exploration using Gemini in agent mode.
+Perform a full codebase exploration using Antigravity (agy) in agent mode.
 
 Read `~/.claude/GEMINI.md` first for prompting guidance, then call `gemini_prompt` with:
-- `trust=True` (full agent mode — Gemini navigates the filesystem on its own)
+- `trust=True` (full agent mode — agy navigates the filesystem on its own)
 - `cwd` set to the absolute path of the current working directory
-- No `files` or `directory` — Gemini will explore independently
+- No `files` or `directory` — agy will explore independently
 - A prompt that includes:
   - The current working directory path
   - What the user is trying to understand or accomplish (use the argument if provided: $ARGUMENTS)
   - A request for: key files and their roles, how the system works end-to-end, notable patterns or dependencies, and anything surprising or worth flagging
 
-After Gemini responds, summarize the findings and highlight anything directly relevant to the user's current task.
+After agy responds, summarize the findings and highlight anything directly relevant to the user's current task.

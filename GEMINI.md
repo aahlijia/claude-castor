@@ -1,14 +1,14 @@
-# Gemini Prompting Guide
+# Antigravity Prompting Guide
 
 This file contains instructions for how to use the `gemini_prompt` tool effectively.
-Read this before making any Gemini tool calls.
+The tool drives the Antigravity CLI (`agy`); read this before making any calls.
 
 ---
 
-## When to Use Gemini
+## When to Use Antigravity
 
-Reach for Gemini when the task would consume significant Claude context or requires
-broad exploration:
+Reach for `gemini_prompt` when the task would consume significant Claude context or
+requires broad exploration:
 
 - Reading, indexing, or summarizing large files or entire codebases
 - Cross-file analysis (e.g. "how is X used across the project?")
@@ -16,16 +16,16 @@ broad exploration:
 - Summarizing documentation, specs, or long outputs
 - Any task where you would otherwise need to read many files sequentially
 
-Do **not** use Gemini for:
+Do **not** use it for:
 - Tasks you can answer directly from what you already know
 - Simple, single-file edits where you already have the file contents
-- Final implementation decisions — Gemini provides research context, not ground truth
+- Final implementation decisions — agy provides research context, not ground truth
 
 ---
 
 ## How to Construct the Prompt
 
-Always lead with task context before the actual ask. Gemini has no memory of your
+Always lead with task context before the actual ask. agy has no memory of your
 conversation with the user, so the prompt must be self-contained.
 
 **Template:**
@@ -50,7 +50,7 @@ Identify the key files, functions, and any non-obvious dependencies.
 How does auth work?
 ```
 
-The good version gives Gemini what it needs to return a targeted, useful response.
+The good version gives agy what it needs to return a targeted, useful response.
 The bad version produces a generic answer that may not apply to this project.
 
 ---
@@ -69,22 +69,24 @@ You do not need to include full conversation history — just the relevant curre
 
 ## Files and Directories
 
-Only pass `files` or `directory` if the **user explicitly mentioned** specific paths.
-Do not scan the filesystem to find "relevant" files on the user's behalf — that is
-exactly the kind of work Gemini is for.
+Prefer rooting agy at the project via `cwd` and letting it explore — that is exactly
+the kind of work it is for. Only pass `files` or `directory` to inline content when
+the **user explicitly mentioned** specific paths. Do not scan the filesystem to find
+"relevant" files on the user's behalf.
 
 If the user says "look at `src/`" or "check `utils.py`", pass those paths.
-If the user says "explore the project" without specifying, ask Gemini in the prompt
-and let it work with whatever context is available.
+If the user says "explore the project" without specifying, use `trust=True` with `cwd`
+set and let agy explore on its own. Use `add_dirs` to grant read access to extra
+directories without inlining them.
 
 ---
 
 ## Interpreting Responses
 
-- Treat Gemini's output as research context, not ground truth
+- Treat agy's output as research context, not ground truth
 - Verify specific claims (line numbers, function signatures) before acting on them —
-  Gemini can hallucinate details
-- If Gemini's response is vague or incomplete, call `gemini_prompt` again with a more
+  agy can hallucinate details
+- If agy's response is vague or incomplete, call `gemini_prompt` again with a more
   targeted follow-up prompt
 - Use `raw=True` only when the user explicitly asks for unfiltered output
 
@@ -92,17 +94,18 @@ and let it work with whatever context is available.
 
 ## Trust Mode (Agent Mode)
 
-By default, `gemini_prompt` runs in safe headless mode (`trust=False`) — Gemini
-receives pre-loaded file content and responds as a Q&A assistant.
+By default, `gemini_prompt` runs read-only (`trust=False`) — agy answers from the
+workspace and pre-loaded content without modifying anything.
 
-With `trust=True`, Gemini runs in full agent mode and can actively explore the
-filesystem, grep for patterns, follow imports, and navigate the project on its own.
-This produces significantly better results for deep research tasks.
+With `trust=True`, agy runs with `--dangerously-skip-permissions`: it actively
+explores the filesystem, greps for patterns, follows imports, and auto-approves tool
+actions on its own. This produces significantly better results for deep research.
 
-**Prerequisite:** The user must have completed Google OAuth at least once (run `gemini`
-in a terminal). No interactive directory trust step is required — the server sets
-`GEMINI_CLI_TRUST_WORKSPACE=true` automatically. Call `gemini_setup` if the user
-hasn't authenticated yet.
+**Prerequisites:**
+- `cwd` is **required** — pass the absolute project path so agy's workspace is rooted
+  correctly. The call errors without it.
+- The user must be signed in to Antigravity. If `gemini_status` reports NOT SIGNED IN,
+  call the `gemini_auth` tool (it opens the Google sign-in URL in the browser).
 
 Use `trust=True` when:
 - The user explicitly asks for deep research or full codebase exploration
@@ -115,9 +118,10 @@ Use `trust=True` when:
 
 | Situation | What to do |
 |---|---|
-| Need to understand a large codebase | `gemini_prompt` with `trust=True` |
+| Need to understand a large codebase | `gemini_prompt` with `trust=True` + `cwd` |
 | User mentions a specific file | `gemini_prompt` with that file in `files` |
-| User says "explore the project" | `gemini_prompt` with `trust=True`, no files |
+| User says "explore the project" | `gemini_prompt` with `trust=True` + `cwd`, no files |
 | Need raw output | `gemini_prompt` with `raw=True` |
-| Gemini CLI not working | `gemini_status` |
-| User needs to set up trust / auth | `gemini_setup` |
+| agy CLI not working | `gemini_status` |
+| User needs to sign in | `gemini_auth` |
+| User needs setup instructions | `gemini_setup` |

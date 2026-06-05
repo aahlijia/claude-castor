@@ -7,23 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `gemini_prompt` now rejects `trust=True` calls that omit `cwd`, returning a
-  clear error instead of silently letting Gemini explore the server's working
-  directory.
-
 ### Changed
 
-- File inlining (`_inline_files`, `_inline_directory`) now reads each file once
-  instead of twice — a single `_read_bytes` call feeds both the binary check
-  and the content block. In directory walks, the size check runs before the
-  read so oversized binaries are never fully loaded.
+- **Migrated from the retired Gemini CLI to the Antigravity CLI (`agy`).**
+  Google shut down the free Gemini CLI on 2026-06-18; Antigravity is its
+  successor (still powered by Gemini models, free individual tier, Google
+  sign-in). The MCP tools keep their `gemini_*` names for compatibility.
+  - `_run_gemini` → `_run_agy`: invokes `agy --print` (prompt piped via stdin,
+    so prompt size is no longer bound by the argument-length limit),
+    `--print-timeout 300s`. Agent mode now passes
+    `--dangerously-skip-permissions` instead of setting
+    `GEMINI_CLI_TRUST_WORKSPACE`; `add_dirs` maps to repeated `--add-dir`.
+  - `SYSTEM_INSTRUCTION` now suppresses agy's print-mode noise: action
+    narration ("I will read…"), the trailing "Summary of Work" section, and
+    `file://` links.
+  - `gemini_prompt` gains an `add_dirs` parameter for granting agy read access
+    to extra directories without inlining them.
+  - `gemini_status` checks `agy --version` and distinguishes NOT INSTALLED,
+    NOT SIGNED IN, and READY.
+  - Install/auth docs updated: `curl … install.sh | bash` instead of npm;
+    `agy -p "ok"` / the new `gemini_auth` tool instead of bare `gemini` OAuth.
 
-### Fixed
+### Added
 
-- Resolved all `ruff` lint and format violations; the codebase now passes
-  `ruff check` and `ruff format --check` clean.
+- `gemini_auth` tool — launches `agy`, extracts the Google OAuth URL it prints,
+  opens it in the browser, and waits for agy's native polling to complete
+  sign-in (one-time; the token persists in the system keyring).
+
+### Carried over (prior unreleased work)
+
+- `gemini_prompt` rejects `trust=True` calls that omit `cwd`.
+- File inlining reads each file once; size check precedes the read.
+- `ruff check` / `ruff format --check` pass clean.
 
 ## [0.1.0] - 2026-05-28
 

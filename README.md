@@ -1,33 +1,38 @@
 # Claude Castor
 
-> A Gemini MCP for Claude Code.
+> An Antigravity MCP for Claude Code.
 
 Offloads large-context work — file exploration, indexing, summarization, deep
-research — to Gemini via the free `@google/gemini-cli`. Claude orchestrates and
-reasons; Gemini handles the heavy lifting.
+research — to Google's free [Antigravity CLI](https://antigravity.google)
+(`agy`), the terminal coding agent powered by Gemini models. Claude
+orchestrates and reasons; Antigravity handles the heavy lifting.
 
-No API key required. Uses Google OAuth (free tier, Gemini 2.5 models).
+No API key required. Uses Google sign-in (free individual tier).
+
+> **Note:** Antigravity CLI replaces the retired Gemini CLI (shut down
+> June 18, 2026). The MCP tools keep their `gemini_*` names for
+> compatibility, but they now drive the `agy` binary.
 
 ---
 
 ## How It Works
 
-1. Claude recognizes a task that would benefit from Gemini's large context window
+1. Claude recognizes a task that would benefit from a large context window
 2. Claude constructs a context-rich prompt describing the task and what it needs
 3. Claude calls `gemini_prompt` via the MCP bridge
-4. The server passes the prompt to the `gemini` CLI as a subprocess
-5. Gemini's response comes back as a tool result Claude uses to continue the task
+4. The server pipes the prompt to the `agy --print` CLI as a subprocess
+5. agy's response comes back as a tool result Claude uses to continue the task
 
-In **agent mode** (`trust=True`), Gemini gets full filesystem access and actively
-explores the project on its own — navigating files, grepping for patterns,
-following imports — rather than working from pre-loaded context.
+In **agent mode** (`trust=True`), agy auto-approves tool actions
+(`--dangerously-skip-permissions`) and, rooted at `cwd`, actively explores the
+project on its own — navigating files, grepping for patterns, following
+imports — rather than working from pre-loaded context.
 
 ---
 
 ## Prerequisites
 
 - Python 3.10+
-- Node.js
 - [uv](https://docs.astral.sh/uv/)
 - [Claude Code](https://claude.ai/code)
 
@@ -35,21 +40,25 @@ following imports — rather than working from pre-loaded context.
 
 ## Installation
 
-### 1. Install the Gemini CLI
+### 1. Install the Antigravity CLI
 
 ```bash
-npm install -g @google/gemini-cli
+curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-### 2. Authenticate with Google
+Verify with `agy --version`.
 
-Open a terminal and run:
+### 2. Sign in with Google
+
+The easiest path is to call the `gemini_auth` tool from Claude (it opens the
+sign-in URL in your browser). To do it manually, open a terminal and run:
 
 ```bash
-gemini
+agy -p "ok"
 ```
 
-Follow the Google OAuth prompt in your browser. One-time step — exit when done.
+Complete the Google consent in your browser. One-time step — the token is
+stored in the system keyring.
 
 ### 3. Clone the repo
 
@@ -97,8 +106,8 @@ entry under `mcpServers`:
 
 Get your `uv` path with `which uv`. Restart the desktop app after saving.
 
-If you already completed the Google OAuth step for Claude Code, authentication
-carries over — no extra steps needed.
+If you already signed in to Antigravity for Claude Code, authentication carries
+over via the system keyring — no extra steps needed.
 
 ---
 
@@ -106,7 +115,7 @@ carries over — no extra steps needed.
 
 | Command | Description |
 |---|---|
-| `/castor-status` | Check Gemini CLI installation and auth |
+| `/castor-status` | Check Antigravity CLI installation and sign-in |
 | `/castor-explore` | Full codebase exploration in agent mode |
 | `/castor-research <topic>` | Deep-dive on a symbol, feature, or file |
 
@@ -116,9 +125,10 @@ carries over — no extra steps needed.
 
 | Tool | Description |
 |---|---|
-| `gemini_prompt` | Send a prompt to Gemini and get a response |
-| `gemini_status` | Check CLI installation and auth |
-| `gemini_setup` | Get step-by-step OAuth instructions |
+| `gemini_prompt` | Send a prompt to Antigravity and get a response |
+| `gemini_auth` | Open the Google sign-in URL and complete authentication |
+| `gemini_status` | Check CLI installation and sign-in |
+| `gemini_setup` | Get step-by-step setup instructions |
 
 ### `gemini_prompt` parameters
 
@@ -128,34 +138,39 @@ carries over — no extra steps needed.
 | `files` | `list[str]` | `None` | File paths to inline (user-provided only) |
 | `directory` | `str` | `None` | Directory to inline (user-provided only) |
 | `raw` | `bool` | `false` | Skip structured response instructions |
-| `trust` | `bool` | `false` | Enable full agent mode with filesystem access |
+| `trust` | `bool` | `false` | Enable full agent mode (requires `cwd`) |
+| `cwd` | `str` | `None` | Project root for agy's workspace |
+| `add_dirs` | `list[str]` | `None` | Extra dirs to grant agy read access (`--add-dir`) |
 
 ---
 
 ## Agent Mode
 
-By default, Claude pre-loads file content and Gemini responds in Q&A mode. With
-`trust=True`, Gemini runs in full agent mode — it can read files, search the
-codebase, and follow imports on its own without needing content pre-loaded.
+By default, agy runs read-only and responds in Q&A mode. With `trust=True`
+(which requires `cwd`), agy runs with `--dangerously-skip-permissions` — it can
+read files, search the codebase, follow imports, and auto-approve tool actions
+on its own without needing content pre-loaded.
 
 Best for:
 - Deep codebase exploration
 - Cross-file symbol resolution
 - Large projects where pre-loading is impractical
 
-No interactive directory trust step is required. The server handles workspace
-trust automatically via `GEMINI_CLI_TRUST_WORKSPACE`.
+agy is rooted at the `cwd` you pass; grant access to additional directories
+with `add_dirs` (mapped to repeated `--add-dir` flags).
 
 ---
 
 ## Troubleshooting
 
-**`gemini` not found** — Run `npm install -g @google/gemini-cli`
+**`agy` not found** — Run
+`curl -fsSL https://antigravity.google/cli/install.sh | bash`
 
-**Auth failed** — Open a terminal and run `gemini` to complete Google OAuth
+**Not signed in** — Call the `gemini_auth` tool, or run `agy -p "ok"` in a
+terminal to complete Google sign-in
 
-**Timeout** — Gemini has a 300s limit. For large projects, prefer agent mode
-(`trust=True`) over pre-loading a full directory
+**Timeout** — agy print mode has a 300s limit. For large projects, prefer
+agent mode (`trust=True`) over pre-loading a full directory
 
 **Empty response** — Try `raw=True` to see unfiltered output
 

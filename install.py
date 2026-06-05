@@ -87,7 +87,7 @@ def main() -> None:
 
     print(
         "\nDone! Restart Claude Code, then:\n"
-        "  /castor-status    — verify the Gemini CLI is ready\n"
+        "  /castor-status    — verify the Antigravity (agy) CLI is ready\n"
         "  /castor-explore   — explore the current codebase\n"
         "  /castor-research  — deep-dive on a specific topic"
     )
