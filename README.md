@@ -116,6 +116,7 @@ over via the system keyring — no extra steps needed.
 | Command | Description |
 |---|---|
 | `/castor-status` | Check Antigravity CLI installation and sign-in |
+| `/castor-auth` | Sign in to the Antigravity CLI |
 | `/castor-explore` | Full codebase exploration in agent mode |
 | `/castor-research <topic>` | Deep-dive on a symbol, feature, or file |
 
