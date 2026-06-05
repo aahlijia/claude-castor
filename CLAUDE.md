@@ -22,8 +22,9 @@ Verify with `agy --version`.
 
 ### 2. Sign in
 
-Call the `gemini_auth` tool (it opens the Google sign-in URL in the browser), or
-open a terminal (outside Claude Code) and run:
+Run `/castor:auth` (or call the `gemini_auth` tool) for the sign-in command, then
+run it yourself — sign-in is interactive, so type it in the Claude Code prompt or
+a terminal:
 
 ```bash
 agy -p "ok"
@@ -127,8 +128,8 @@ Run `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then verify w
 `agy --version`.
 
 **Not signed in**
-Call the `gemini_auth` tool, or run `agy -p "ok"` in a terminal to complete Google
-sign-in.
+Run `/castor:auth` (or call the `gemini_auth` tool) for the sign-in command, then
+run `agy -p "ok"` to complete Google sign-in.
 
 **Timeout**
 agy print mode has a 300s timeout per call. For large directories in agent mode
