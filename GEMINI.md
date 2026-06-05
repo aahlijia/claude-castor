@@ -134,6 +134,19 @@ Pattern: run a broad `/castor-explore` first, then follow up with narrower
 
 ---
 
+## Model Selection
+
+`gemini_prompt` accepts a `model` argument to pick which agy model runs the prompt.
+Leave it unset to use agy's default. Call `gemini_models` to see the available names.
+
+- A faster/cheaper model is fine for light summarization or indexing.
+- A stronger model is worth it for deep cross-file reasoning or tricky analysis.
+
+Only set `model` when the user asks for a specific one or the task clearly warrants
+trading speed for capability — otherwise the default is fine.
+
+---
+
 ## Quick Reference
 
 | Situation | What to do |
@@ -144,6 +157,8 @@ Pattern: run a broad `/castor-explore` first, then follow up with narrower
 | Need raw output | `gemini_prompt` with `raw=True` |
 | Follow-up on the same codebase | `gemini_prompt` with `continue_session=True` |
 | Start a fresh session | `gemini_reset` |
+| Pick a specific model | `gemini_prompt` with `model=...` |
+| See available models | `gemini_models` |
 | agy CLI not working | `gemini_status` |
 | User needs to sign in | `gemini_auth` |
 | User needs setup instructions | `gemini_setup` |

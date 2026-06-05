@@ -74,11 +74,17 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `add_dirs` | `list[str] \| None` | Extra dirs to grant agy read access (`--add-dir`) |
 | `continue_session` | `bool` | Resume agy's prior conversation instead of re-exploring (default: false) |
 | `conversation_id` | `str \| None` | Resume a specific agy conversation by ID (takes precedence over `continue_session`) |
+| `model` | `str \| None` | Select the agy model (see `gemini_models`; defaults to agy's default) |
 
 ### `gemini_reset`
 
 Forgets the current Antigravity session so the next `gemini_prompt` with
 `continue_session=True` starts a fresh conversation. Use at task boundaries.
+
+### `gemini_models`
+
+Lists the models available to agy — the names you can pass as `model` to
+`gemini_prompt`. Requires sign-in.
 
 ### `gemini_auth`
 
@@ -136,7 +142,7 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 See `.docs/development-plan.md` for the full roadmap. Key items:
 
 - Persistent chat sessions with `gemini_reset` tool (agy `--continue`) — **done**
-- Model selection (`model` param + `gemini_models` tool)
+- Model selection (`model` param + `gemini_models` tool) — **done**
 - Sandbox tier (`--sandbox`) between read-only and full trust
 - Directory structure map when content is truncated
 - Enhanced `gemini_status` diagnostics (account, model version)

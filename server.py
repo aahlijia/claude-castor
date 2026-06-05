@@ -196,6 +196,7 @@ def _run_agy(
     add_dirs: list[str] | None = None,
     continue_session: bool = False,
     conversation_id: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Run an agy print-mode prompt and return its stdout.
 
@@ -215,6 +216,8 @@ def _run_agy(
         conversation_id: If set, pass --conversation <id> to resume a
             specific conversation; takes precedence over
             continue_session.
+        model: If set, pass --model <model> to select the agy model.
+            Call gemini_models for the available names.
 
     Returns:
         agy's stdout, or a bracketed error/status string.
@@ -228,6 +231,8 @@ def _run_agy(
         cmd.extend(["--conversation", conversation_id])
     elif continue_session:
         cmd.append("--continue")
+    if model:
+        cmd.extend(["--model", model])
 
     try:
         result = subprocess.run(
@@ -270,6 +275,7 @@ def gemini_prompt(
     add_dirs: list[str] | None = None,
     continue_session: bool = False,
     conversation_id: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Send a prompt to Antigravity (agy) and return the response.
 
@@ -306,6 +312,10 @@ def gemini_prompt(
             fresh and establishes the session.
         conversation_id: Resume a specific agy conversation by ID. Takes
             precedence over continue_session when set.
+        model: Select the agy model (e.g. a faster model for light
+            summarization, a stronger one for deep reasoning). Call
+            gemini_models for the available names. Defaults to agy's
+            configured default.
     """
     if trust and not cwd:
         return (
@@ -336,6 +346,7 @@ def gemini_prompt(
         add_dirs=add_dirs,
         continue_session=resume,
         conversation_id=conversation_id,
+        model=model,
     )
     # Bracketed returns are errors/status, not real conversations, so
     # only mark a session active when agy actually responded.
@@ -359,6 +370,36 @@ def gemini_reset() -> str:
         "Session reset — the next gemini_prompt with continue_session=True "
         "will start a fresh context instead of resuming."
     )
+
+
+@mcp.tool()
+def gemini_models() -> str:
+    """List the models available to Antigravity (agy).
+
+    Returns the names you can pass as the `model` argument to
+    gemini_prompt. Requires sign-in — if not authenticated, returns the
+    sign-in instruction instead.
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "models"], capture_output=True, text=True, timeout=30
+        )
+    except FileNotFoundError:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+    except subprocess.TimeoutExpired:
+        return "[Error: `agy models` timed out.]"
+
+    combined = result.stdout + result.stderr
+    if _needs_auth(combined):
+        return (
+            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
+            "to complete Google sign-in — it is a one-time step.]"
+        )
+
+    if result.returncode != 0 and result.stderr.strip():
+        return f"[Antigravity error]\n{result.stderr.strip()}"
+
+    return result.stdout.strip() or "[No models reported by Antigravity]"
 
 
 @mcp.tool()

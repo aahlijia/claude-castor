@@ -127,6 +127,7 @@ over via the system keyring — no extra steps needed.
 |---|---|
 | `gemini_prompt` | Send a prompt to Antigravity and get a response |
 | `gemini_reset` | Forget the current session so the next prompt starts fresh |
+| `gemini_models` | List the models available to agy |
 | `gemini_auth` | Get sign-in instructions when not authenticated |
 | `gemini_status` | Check CLI installation and sign-in |
 | `gemini_setup` | Get step-by-step setup instructions |
@@ -144,6 +145,7 @@ over via the system keyring — no extra steps needed.
 | `add_dirs` | `list[str]` | `None` | Extra dirs to grant agy read access (`--add-dir`) |
 | `continue_session` | `bool` | `false` | Resume agy's prior conversation instead of re-exploring |
 | `conversation_id` | `str` | `None` | Resume a specific agy conversation by ID |
+| `model` | `str` | `None` | Select the agy model (see `gemini_models`) |
 
 ---
 
