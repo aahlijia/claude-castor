@@ -145,6 +145,6 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
 - Persistent chat sessions with `gemini_reset` tool (agy `--continue`) — **done**
 - Model selection (`model` param + `gemini_models` tool) — **done**
 - Sandbox tier (`--sandbox`) between read-only and full trust — **done**
-- Directory structure map when content is truncated
+- Directory structure map when content is truncated — **done**
 - Enhanced `gemini_status` diagnostics (account, model version)
 - Streaming output (async subprocess)

@@ -53,6 +53,8 @@ SKIP_EXTENSIONS = {
 }
 MAX_FILE_BYTES = 100 * 1024  # 100 KB per file
 MAX_TOTAL_BYTES = 800 * 1024  # 800 KB total inline content
+# Cap how many skipped paths are listed back, to bound the note size.
+MAX_SKIPPED_LISTED = 50
 
 # agy print mode waits this long for a single prompt to resolve.
 PRINT_TIMEOUT = "300s"
@@ -170,8 +172,13 @@ def _inline_directory(directory: str) -> str:
 
     result = "\n".join(blocks)
     if skipped:
-        n = len(skipped)
-        result += f"\n\n[Note: {n} file(s) skipped — too large or binary]"
+        listing = "\n".join(skipped[:MAX_SKIPPED_LISTED])
+        extra = len(skipped) - MAX_SKIPPED_LISTED
+        more = f"\n…and {extra} more" if extra > 0 else ""
+        result += (
+            "\n\n[Skipped files — too large or over the inline budget; "
+            f"request explicitly if needed]\n{listing}{more}"
+        )
     return result
 
 
