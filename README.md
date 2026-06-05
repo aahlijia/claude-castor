@@ -50,8 +50,9 @@ Verify with `agy --version`.
 
 ### 2. Sign in with Google
 
-The easiest path is to call the `gemini_auth` tool from Claude (it opens the
-sign-in URL in your browser). To do it manually, open a terminal and run:
+Run `/castor-auth` (or call the `gemini_auth` tool) for guided sign-in. It hands
+you the command to run — sign-in is interactive, so you run it yourself in the
+Claude Code prompt or a terminal:
 
 ```bash
 agy -p "ok"
@@ -173,13 +174,32 @@ with `add_dirs` (mapped to repeated `--add-dir` flags).
 
 ---
 
+## Sessions
+
+By default each `gemini_prompt` call is independent — agy re-explores the project
+from cold every time. For multi-step work on the same codebase, pass
+`continue_session=True` so agy resumes its prior conversation and keeps the
+context it already built (`--continue`). The first call of a server run always
+starts fresh; later calls resume it. Call `gemini_reset` at a task boundary to
+drop stale context, or pass `conversation_id` to resume a specific conversation.
+
+---
+
+## Model Selection
+
+Leave `model` unset to use agy's default. Pass `model="…"` to pick a specific
+model — a faster one for light summarization, a stronger one for deep reasoning.
+Call `gemini_models` to list what's available.
+
+---
+
 ## Troubleshooting
 
 **`agy` not found** — Run
 `curl -fsSL https://antigravity.google/cli/install.sh | bash`
 
-**Not signed in** — Call the `gemini_auth` tool, or run `agy -p "ok"` in a
-terminal to complete Google sign-in
+**Not signed in** — Run `/castor-auth` (or call the `gemini_auth` tool) for the
+sign-in command, then run `agy -p "ok"` to complete Google sign-in
 
 **Timeout** — agy print mode has a 300s limit. For large projects, prefer
 agent mode (`trust=True`) over pre-loading a full directory
@@ -190,10 +210,10 @@ agent mode (`trust=True`) over pre-loading a full directory
 
 ## Roadmap
 
-Phase 1 (current) is stateless — each call is independent. See `PLAN.md` for
-the full Phase 2 roadmap:
+See `.docs/development-plan.md` for the full roadmap. Recently shipped:
+persistent sessions (`gemini_reset`), model selection (`gemini_models`), a
+sandbox tier, skipped-file listing on truncation, and richer `gemini_status`.
 
-- Persistent sessions with `gemini_reset`
-- Streaming output
-- Directory structure map on truncation
-- Enhanced diagnostics
+Still planned:
+
+- Streaming output (async subprocess)
