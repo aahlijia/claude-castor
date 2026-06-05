@@ -95,7 +95,8 @@ browser flow itself. Call when `gemini_status` reports NOT SIGNED IN.
 
 ### `gemini_status`
 
-Checks CLI installation and sign-in. Returns `READY` or instructions to fix.
+Checks CLI installation and sign-in. Returns `READY` (with the available
+models appended, best-effort) or instructions to fix.
 
 ### `gemini_setup`
 
@@ -146,5 +147,7 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
 - Model selection (`model` param + `gemini_models` tool) — **done**
 - Sandbox tier (`--sandbox`) between read-only and full trust — **done**
 - Directory structure map when content is truncated — **done**
-- Enhanced `gemini_status` diagnostics (account, model version)
+- Enhanced `gemini_status` diagnostics (available models) — **done**
+  (account/freshness skipped: agy has no whoami command and `agy update`
+  mutates rather than checks)
 - Streaming output (async subprocess)

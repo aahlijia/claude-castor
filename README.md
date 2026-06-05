@@ -129,7 +129,7 @@ over via the system keyring — no extra steps needed.
 | `gemini_reset` | Forget the current session so the next prompt starts fresh |
 | `gemini_models` | List the models available to agy |
 | `gemini_auth` | Get sign-in instructions when not authenticated |
-| `gemini_status` | Check CLI installation and sign-in |
+| `gemini_status` | Check CLI installation and sign-in; lists available models when READY |
 | `gemini_setup` | Get step-by-step setup instructions |
 
 ### `gemini_prompt` parameters

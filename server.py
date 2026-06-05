@@ -512,12 +512,42 @@ tools, and follows imports on its own.\
 """
 
 
+def _status_extras() -> str:
+    """Best-effort niceties appended to a READY status line.
+
+    Every lookup is non-fatal — any failure returns an empty string, so a
+    missing nicety never downgrades a READY status. Account and version
+    freshness are intentionally omitted: agy exposes no whoami command,
+    and `agy update` performs an update rather than a safe check.
+
+    Returns:
+        A newline-prefixed suffix listing available models, or "".
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "models"], capture_output=True, text=True, timeout=15
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+    if result.returncode != 0:
+        return ""
+
+    models = result.stdout.strip()
+    if not models or _needs_auth(models + result.stderr):
+        return ""
+
+    shown = "\n".join(models.splitlines()[:10])
+    return f"\nModels available:\n{shown}"
+
+
 @mcp.tool()
 def gemini_status() -> str:
     """Check that the agy CLI is installed and signed in.
 
     Run before first use or when troubleshooting. Returns a status
-    string with fix instructions if not ready.
+    string with fix instructions if not ready. When READY, also lists the
+    available models (best-effort; omitted silently if unavailable).
     """
     not_installed = f"NOT INSTALLED: `agy` CLI not found.\nFix: {INSTALL_CMD}"
 
@@ -558,7 +588,7 @@ def gemini_status() -> str:
             f"Error: {auth_result.stderr.strip()}"
         )
 
-    return f"READY — agy {version}"
+    return f"READY — agy {version}{_status_extras()}"
 
 
 if __name__ == "__main__":
