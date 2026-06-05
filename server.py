@@ -168,9 +168,18 @@ def _inline_directory(directory: str) -> str:
     return result
 
 
+_AUTH_MARKERS = (
+    "authentication required",
+    "please sign in",
+    "not signed in",
+    "login required",
+)
+
+
 def _needs_auth(text: str) -> bool:
     """True if agy output indicates the user is not signed in."""
-    return "Authentication required" in text
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_MARKERS)
 
 
 def _run_agy(
