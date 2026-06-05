@@ -59,6 +59,13 @@ PRINT_TIMEOUT = "300s"
 # Subprocess wall-clock guard, slightly above PRINT_TIMEOUT.
 SUBPROCESS_TIMEOUT = 310
 
+# True once a resumable agy conversation exists this server run. The MCP
+# server is long-lived, so this persists across tool calls: the first
+# gemini_prompt starts fresh, later continue_session=True calls resume it,
+# and gemini_reset clears it. Guards against resuming into nothing (or a
+# prior, unrelated task) when continue_session is the default for a caller.
+_session_active = False
+
 
 def _read_bytes(path: Path) -> bytes | None:
     """Read a file's raw bytes, returning None on read error."""
@@ -187,6 +194,8 @@ def _run_agy(
     trust: bool = False,
     cwd: str | None = None,
     add_dirs: list[str] | None = None,
+    continue_session: bool = False,
+    conversation_id: str | None = None,
 ) -> str:
     """Run an agy print-mode prompt and return its stdout.
 
@@ -201,6 +210,11 @@ def _run_agy(
             workspace so it explores the correct project.
         add_dirs: Extra directories to grant agy read access to via
             repeated --add-dir flags.
+        continue_session: If True, pass --continue to resume agy's most
+            recent conversation. Ignored when conversation_id is set.
+        conversation_id: If set, pass --conversation <id> to resume a
+            specific conversation; takes precedence over
+            continue_session.
 
     Returns:
         agy's stdout, or a bracketed error/status string.
@@ -210,6 +224,10 @@ def _run_agy(
         cmd.append("--dangerously-skip-permissions")
     for directory in add_dirs or []:
         cmd.extend(["--add-dir", directory])
+    if conversation_id:
+        cmd.extend(["--conversation", conversation_id])
+    elif continue_session:
+        cmd.append("--continue")
 
     try:
         result = subprocess.run(
@@ -250,6 +268,8 @@ def gemini_prompt(
     trust: bool = False,
     cwd: str | None = None,
     add_dirs: list[str] | None = None,
+    continue_session: bool = False,
+    conversation_id: str | None = None,
 ) -> str:
     """Send a prompt to Antigravity (agy) and return the response.
 
@@ -262,6 +282,10 @@ def gemini_prompt(
     agy explores the workspace on its own when rooted via `cwd`, so
     prefer that over inlining. Only pass `files` or `directory` to inline
     content when the user explicitly named specific files.
+
+    For multi-step work against the same codebase, pass
+    continue_session=True so agy resumes its prior conversation instead
+    of re-exploring from cold. Call gemini_reset to start fresh.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
@@ -276,6 +300,12 @@ def gemini_prompt(
             project. Pass the absolute project path.
         add_dirs: Extra directories to grant agy read access to (via
             --add-dir) without inlining them. Lets agy explore them.
+        continue_session: If True, resume agy's existing conversation so
+            it keeps prior context. Has no effect on the first call of a
+            server run (or right after gemini_reset) — that call starts
+            fresh and establishes the session.
+        conversation_id: Resume a specific agy conversation by ID. Takes
+            precedence over continue_session when set.
     """
     if trust and not cwd:
         return (
@@ -297,8 +327,37 @@ def gemini_prompt(
     if directory:
         parts.append(_inline_directory(directory))
 
-    return _run_agy(
-        "\n\n".join(parts), trust=trust, cwd=cwd, add_dirs=add_dirs
+    global _session_active
+    resume = continue_session and _session_active and not conversation_id
+    response = _run_agy(
+        "\n\n".join(parts),
+        trust=trust,
+        cwd=cwd,
+        add_dirs=add_dirs,
+        continue_session=resume,
+        conversation_id=conversation_id,
+    )
+    # Bracketed returns are errors/status, not real conversations, so
+    # only mark a session active when agy actually responded.
+    if not response.startswith("["):
+        _session_active = True
+    return response
+
+
+@mcp.tool()
+def gemini_reset() -> str:
+    """Forget the current Antigravity session so the next call is fresh.
+
+    Clears the server-side marker that continue_session relies on, so the
+    next gemini_prompt with continue_session=True starts a new agy
+    conversation instead of resuming the prior one. Use this at task
+    boundaries to avoid carrying stale context between unrelated jobs.
+    """
+    global _session_active
+    _session_active = False
+    return (
+        "Session reset — the next gemini_prompt with continue_session=True "
+        "will start a fresh context instead of resuming."
     )
 
 

@@ -105,12 +105,32 @@ actions on its own. This produces significantly better results for deep research
 - `cwd` is **required** — pass the absolute project path so agy's workspace is rooted
   correctly. The call errors without it.
 - The user must be signed in to Antigravity. If `gemini_status` reports NOT SIGNED IN,
-  call the `gemini_auth` tool (it opens the Google sign-in URL in the browser).
+  call the `gemini_auth` tool (it returns the `! agy -p "ok"` sign-in instruction).
 
 Use `trust=True` when:
 - The user explicitly asks for deep research or full codebase exploration
 - The task requires following chains of imports or cross-file symbol resolution
 - Pre-loading files would be insufficient or impractical
+
+---
+
+## Sessions
+
+By default every `gemini_prompt` call is **cold** — agy re-explores the codebase from
+scratch, re-spending its time budget. For multi-step work against the same project,
+pass `continue_session=True` so agy resumes its prior conversation and keeps the
+context it already built.
+
+- The **first** call of a server run (or the first after `gemini_reset`) always starts
+  fresh, even with `continue_session=True` — that call establishes the session.
+- **Subsequent** calls with `continue_session=True` resume it.
+- Call `gemini_reset` at a task boundary to drop stale context before starting an
+  unrelated job, so the next continued call does not carry over the prior topic.
+- `conversation_id` resumes a specific agy conversation by ID and takes precedence over
+  `continue_session`. Only use it when you have an ID to resume.
+
+Pattern: run a broad `/castor-explore` first, then follow up with narrower
+`continue_session=True` prompts that build on what agy already learned.
 
 ---
 
@@ -122,6 +142,8 @@ Use `trust=True` when:
 | User mentions a specific file | `gemini_prompt` with that file in `files` |
 | User says "explore the project" | `gemini_prompt` with `trust=True` + `cwd`, no files |
 | Need raw output | `gemini_prompt` with `raw=True` |
+| Follow-up on the same codebase | `gemini_prompt` with `continue_session=True` |
+| Start a fresh session | `gemini_reset` |
 | agy CLI not working | `gemini_status` |
 | User needs to sign in | `gemini_auth` |
 | User needs setup instructions | `gemini_setup` |

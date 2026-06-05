@@ -72,11 +72,19 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `trust` | `bool` | Full agent mode — `--dangerously-skip-permissions`; requires `cwd` (default: false) |
 | `cwd` | `str \| None` | Project root for agy's workspace (required when `trust=True`) |
 | `add_dirs` | `list[str] \| None` | Extra dirs to grant agy read access (`--add-dir`) |
+| `continue_session` | `bool` | Resume agy's prior conversation instead of re-exploring (default: false) |
+| `conversation_id` | `str \| None` | Resume a specific agy conversation by ID (takes precedence over `continue_session`) |
+
+### `gemini_reset`
+
+Forgets the current Antigravity session so the next `gemini_prompt` with
+`continue_session=True` starts a fresh conversation. Use at task boundaries.
 
 ### `gemini_auth`
 
-Opens the Google sign-in URL in the browser and waits for agy's native polling to
-complete authentication. Call when `gemini_status` reports NOT SIGNED IN.
+Returns instructions for the user to sign in (run `! agy -p "ok"` in the Claude
+Code prompt). An MCP tool call blocks Claude, so it cannot drive the interactive
+browser flow itself. Call when `gemini_status` reports NOT SIGNED IN.
 
 ### `gemini_status`
 
@@ -123,11 +131,13 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 
 ---
 
-## Phase 2 (Not Yet Implemented)
+## Phase 2
 
-See `PLAN.md` for the full Phase 2 roadmap. Key items:
+See `.docs/development-plan.md` for the full roadmap. Key items:
 
-- Persistent chat sessions with `gemini_reset` tool (agy `--continue`/`--conversation`)
-- Streaming output (async subprocess)
+- Persistent chat sessions with `gemini_reset` tool (agy `--continue`) — **done**
+- Model selection (`model` param + `gemini_models` tool)
+- Sandbox tier (`--sandbox`) between read-only and full trust
 - Directory structure map when content is truncated
-- Enhanced `gemini_status` diagnostics (workspace size, trust state, model version)
+- Enhanced `gemini_status` diagnostics (account, model version)
+- Streaming output (async subprocess)
