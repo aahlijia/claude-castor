@@ -79,6 +79,19 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `sandbox` | `bool` | Explore under terminal restrictions — safe middle tier (default: false; ignored when `trust=True`) |
 | `use_cache` | `bool` | Reuse a stored response for the same prompt against an unchanged repo (default: true; side-effect-free calls only) |
 
+### Workflow tools
+
+Purpose-built wrappers over `gemini_prompt` that bake in the right prompt and
+access tier. Each takes `cwd` (project root) and optional `model`. All are
+side-effect-free, so results are cached against the repo state in a git repo.
+
+| Tool | Signature | Tier | Purpose |
+|---|---|---|---|
+| `gemini_index` | `(cwd, model=None)` | sandbox | Compact repo map (layout, entry points, key symbols) |
+| `gemini_review` | `(cwd, diff=None, model=None)` | read-only | Correctness review of a diff (defaults to `git diff HEAD`) |
+| `gemini_find_usages` | `(cwd, symbol, model=None)` | sandbox | Every use of a symbol, with paths/lines |
+| `gemini_explain_error` | `(cwd, error, model=None)` | sandbox | Ranked root-cause hypotheses for an error |
+
 ### `gemini_reset`
 
 Forgets the current Antigravity session so the next `gemini_prompt` with
@@ -161,6 +174,7 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
 - `/castor:auth` slash command for onboarding — **done**
 - Response caching (`use_cache` param + `gemini_cache_clear` tool; keyed by
   prompt + model + git HEAD/working-tree state) — **done**
-- Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`)
+- Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`,
+  `gemini_explain_error`; thin wrappers over the shared `_dispatch` core) — **done**
 - Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`)
 - Streaming output (async subprocess)

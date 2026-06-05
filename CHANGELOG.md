@@ -67,6 +67,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error/status responses. Entries live under `~/.cache/claude-castor/`
   (`$XDG_CACHE_HOME`) with a 7-day TTL. New `gemini_cache_clear` tool wipes them;
   pass `use_cache=False` to force a single fresh run.
+- Workflow tools — four purpose-built wrappers over `gemini_prompt` that bake in
+  the right prompt and access tier, so Claude needn't assemble them by hand. Each
+  takes `cwd` and an optional `model`, is side-effect-free, and inherits caching:
+  - `gemini_index(cwd)` — a compact, Claude-consumable repo map (layout, entry
+    points, key modules/symbols, how they connect). Sandbox tier; the canonical
+    cacheable "give me context" call.
+  - `gemini_review(cwd, diff=None)` — a correctness-focused second-opinion review
+    of a diff (defaults to `git diff HEAD`). Read-only; complements `/code-review`.
+  - `gemini_find_usages(cwd, symbol)` — every use of a symbol, with paths and
+    line references. Sandbox tier.
+  - `gemini_explain_error(cwd, error)` — ranked root-cause hypotheses for an error
+    or stack trace, with the files to check. Sandbox tier.
+  - The `gemini_prompt` run/cache/session core was extracted into a shared
+    `_dispatch` helper that all of these (and `gemini_prompt`) route through, so
+    caching and session bookkeeping behave identically everywhere.
 
 ### Carried over (prior unreleased work)
 

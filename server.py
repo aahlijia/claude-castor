@@ -23,6 +23,23 @@ You are a technical assistant. Respond with precision and structure.
 - Reference files as plain paths, never as file:// links\
 """
 
+# Baked prompt for gemini_index — a compact, Claude-consumable repo map.
+INDEX_PROMPT = """\
+Produce a structured index of this codebase for another engineer to use as
+context. Include: the top-level directory layout with a one-line role for
+each entry, the entry points, the key modules and their main symbols, and
+how the major pieces connect. Be compact and reference real paths. Do NOT
+include file contents — just the map."""
+
+# Baked prompt for gemini_review — a correctness-focused diff review.
+REVIEW_PROMPT = """\
+Review this code diff as a careful senior engineer. Focus on correctness:
+bugs, broken edge cases, error handling, off-by-one and boundary issues,
+resource and concurrency mistakes, and anything that would fail at runtime.
+Skip pure style nitpicks. For each finding give the file, the relevant hunk,
+the problem, and a concrete fix. If you find nothing substantive, say so
+plainly rather than inventing concerns."""
+
 SKIP_DIRS = {
     ".git",
     "node_modules",
@@ -357,6 +374,30 @@ def _repo_fingerprint(cwd: str | None) -> str | None:
     return f"{head.stdout.strip()}:{porcelain}"
 
 
+def _git_diff(cwd: str) -> str:
+    """Return uncommitted changes in cwd, or a bracketed error string.
+
+    Diffs the working tree (staged and unstaged) against HEAD, so it
+    captures the changes a user would want reviewed before committing.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return "[Error: `git` not found.]"
+    except subprocess.TimeoutExpired:
+        return "[Error: `git diff` timed out.]"
+
+    if result.returncode != 0:
+        return f"[Error: git diff failed]\n{result.stderr.strip()}"
+    return result.stdout
+
+
 def _cache_dir() -> Path:
     """Return the on-disk cache directory (created lazily on write)."""
     base = os.environ.get("XDG_CACHE_HOME")
@@ -478,6 +519,72 @@ def _try_cache(
     return key, _cache_get(key)
 
 
+def _dispatch(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    trust: bool = False,
+    cwd: str | None = None,
+    add_dirs: list[str] | None = None,
+    continue_session: bool = False,
+    conversation_id: str | None = None,
+    model: str | None = None,
+    sandbox: bool = False,
+    use_cache: bool = True,
+) -> str:
+    """Assemble, cache-check, run, and store a single agy prompt.
+
+    The shared core of gemini_prompt and the workflow tools
+    (gemini_index, gemini_review, ...). Enforces the trust/cwd guard, the
+    side-effect-free cache gate, and session bookkeeping in one place so
+    every caller handles caching and sessions identically.
+
+    Returns:
+        agy's response, a cached response, or a bracketed error string.
+    """
+    if trust and not cwd:
+        return (
+            "[Error: cwd is required when trust=True so agy's workspace "
+            "is rooted in the correct project directory. Pass the "
+            "absolute path of the user's project.]"
+        )
+
+    assembled = _assemble_prompt(prompt, raw, files, directory)
+    cache_key, cached = _try_cache(
+        use_cache,
+        assembled,
+        model,
+        sandbox,
+        trust,
+        continue_session,
+        conversation_id,
+        cwd,
+    )
+    if cached is not None:
+        return cached
+
+    global _session_active
+    resume = continue_session and _session_active and not conversation_id
+    response = _run_agy(
+        assembled,
+        trust=trust,
+        cwd=cwd,
+        add_dirs=add_dirs,
+        continue_session=resume,
+        conversation_id=conversation_id,
+        model=model,
+        sandbox=sandbox,
+    )
+    # Bracketed returns are errors/status, not real conversations, so
+    # only mark a session active (and cache) when agy actually responded.
+    if not response.startswith("["):
+        _session_active = True
+        if cache_key is not None:
+            _cache_put(cache_key, response, model)
+    return response
+
+
 @mcp.tool()
 def gemini_prompt(
     prompt: str,
@@ -542,46 +649,130 @@ def gemini_prompt(
             are cached — never trust mode or session continuations. Set
             False to force a fresh run. Clear with gemini_cache_clear.
     """
-    if trust and not cwd:
-        return (
-            "[Error: cwd is required when trust=True so agy's workspace "
-            "is rooted in the correct project directory. Pass the "
-            "absolute path of the user's project.]"
-        )
-
-    assembled = _assemble_prompt(prompt, raw, files, directory)
-    cache_key, cached = _try_cache(
-        use_cache,
-        assembled,
-        model,
-        sandbox,
-        trust,
-        continue_session,
-        conversation_id,
-        cwd,
-    )
-    if cached is not None:
-        return cached
-
-    global _session_active
-    resume = continue_session and _session_active and not conversation_id
-    response = _run_agy(
-        assembled,
+    return _dispatch(
+        prompt,
+        files=files,
+        directory=directory,
+        raw=raw,
         trust=trust,
         cwd=cwd,
         add_dirs=add_dirs,
-        continue_session=resume,
+        continue_session=continue_session,
         conversation_id=conversation_id,
         model=model,
         sandbox=sandbox,
+        use_cache=use_cache,
     )
-    # Bracketed returns are errors/status, not real conversations, so
-    # only mark a session active (and cache) when agy actually responded.
-    if not response.startswith("["):
-        _session_active = True
-        if cache_key is not None:
-            _cache_put(cache_key, response, model)
-    return response
+
+
+@mcp.tool()
+def gemini_index(cwd: str, model: str | None = None) -> str:
+    """Produce a structured map of a codebase for use as context.
+
+    Runs agy as a sandboxed explorer rooted at cwd — it navigates the
+    project on its own and returns a compact index: directory layout,
+    entry points, key modules and symbols, and how they connect. This is
+    the canonical "give me context I can reuse" call: it is side-effect-
+    free, so when cwd is a git repo the result is cached against the repo
+    state and re-runs are instant.
+
+    Args:
+        cwd: Absolute path to the project root to index.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        A structured codebase index, or a bracketed error string.
+    """
+    return _dispatch(INDEX_PROMPT, sandbox=True, cwd=cwd, model=model)
+
+
+@mcp.tool()
+def gemini_review(
+    cwd: str, diff: str | None = None, model: str | None = None
+) -> str:
+    """Get a free second-opinion review of a code diff from agy.
+
+    Sends a diff to agy for a correctness-focused review at no cost to
+    Claude's context. When diff is omitted, the uncommitted changes in
+    cwd (staged and unstaged, via `git diff HEAD`) are reviewed. The diff
+    is inlined, so the review is cached on the diff content. Complements —
+    does not replace — Claude's own /code-review.
+
+    Args:
+        cwd: Absolute path to the git repository.
+        diff: A unified diff to review. When None, the uncommitted
+            changes in cwd are captured automatically.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        Review findings, or a bracketed error/status string.
+    """
+    if diff is None:
+        diff = _git_diff(cwd)
+        if diff.startswith("["):
+            return diff
+    if not diff.strip():
+        return (
+            "[No diff to review — the working tree is clean or the "
+            "provided diff is empty.]"
+        )
+    return _dispatch(f"{REVIEW_PROMPT}\n\n[DIFF]\n{diff}", model=model)
+
+
+@mcp.tool()
+def gemini_find_usages(cwd: str, symbol: str, model: str | None = None) -> str:
+    """Find where and how a symbol is used across a codebase.
+
+    Runs agy as a sandboxed explorer rooted at cwd to locate every use of
+    `symbol` and summarize how it is used, with paths and line
+    references. Side-effect-free, so the result is cached against the
+    repo state when cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        symbol: The symbol name to trace (function, class, variable, …).
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        A usage report, or a bracketed error string.
+    """
+    prompt = (
+        f"Find every place the symbol `{symbol}` is used across this "
+        "codebase. For each occurrence give the file path, the line, and "
+        "a short note on how it is used (definition, call, import, "
+        "re-export, test, etc.). Group by file and end with a one-line "
+        "summary of the symbol's role. Reference real paths and line "
+        "numbers."
+    )
+    return _dispatch(prompt, sandbox=True, cwd=cwd, model=model)
+
+
+@mcp.tool()
+def gemini_explain_error(
+    cwd: str, error: str, model: str | None = None
+) -> str:
+    """Explain an error or stack trace against the codebase.
+
+    Runs agy as a sandboxed explorer rooted at cwd to trace the error to
+    its likely source and return ranked root-cause hypotheses with the
+    files to check. Side-effect-free, so the result is cached against the
+    repo state when cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        error: The error message or stack trace to diagnose.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        Ranked root-cause hypotheses, or a bracketed error string.
+    """
+    prompt = (
+        "Diagnose this error against the codebase. Trace it to its likely "
+        "source and return the most probable root causes, ranked, each "
+        "with the specific file(s) and line(s) to check and why. Be "
+        f"concrete.\n\n[ERROR]\n{error}"
+    )
+    return _dispatch(prompt, sandbox=True, cwd=cwd, model=model)
 
 
 @mcp.tool()

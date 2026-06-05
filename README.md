@@ -128,6 +128,10 @@ over via the system keyring — no extra steps needed.
 | Tool | Description |
 |---|---|
 | `gemini_prompt` | Send a prompt to Antigravity and get a response |
+| `gemini_index` | Produce a structured map of a codebase for use as context |
+| `gemini_review` | Free second-opinion review of a code diff |
+| `gemini_find_usages` | Find where and how a symbol is used across a codebase |
+| `gemini_explain_error` | Explain an error or stack trace against the codebase |
 | `gemini_reset` | Forget the current session so the next prompt starts fresh |
 | `gemini_cache_clear` | Delete all cached responses to force fresh runs |
 | `gemini_models` | List the models available to agy |
@@ -195,6 +199,26 @@ Call `gemini_models` to list what's available.
 
 ---
 
+## Workflow Tools
+
+Beyond the general `gemini_prompt`, four purpose-built tools bake in the right
+prompt and access tier for common shapes — so Claude doesn't have to assemble
+them by hand. Each takes a `cwd` (the project root) and an optional `model`.
+
+| Tool | What it does | Tier |
+|---|---|---|
+| `gemini_index(cwd)` | Compact repo map: layout, entry points, key symbols, how they connect | sandbox |
+| `gemini_review(cwd, diff=None)` | Correctness-focused review of a diff (defaults to `git diff HEAD`) | read-only |
+| `gemini_find_usages(cwd, symbol)` | Every use of a symbol, with paths and line refs | sandbox |
+| `gemini_explain_error(cwd, error)` | Ranked root-cause hypotheses for an error/stack trace | sandbox |
+
+All four are side-effect-free, so their results are cached against the repo
+state when `cwd` is a git repo (see below). `gemini_index` is the canonical
+"give me context I can reuse" call — run it once, then build on it.
+`gemini_review` complements (does not replace) Claude's own `/code-review`.
+
+---
+
 ## Caching
 
 Identical prompts against an unchanged codebase return a stored response instead
@@ -236,10 +260,10 @@ agent mode (`trust=True`) over pre-loading a full directory
 
 Recently shipped: persistent sessions (`gemini_reset`), model selection
 (`gemini_models`), a sandbox tier, skipped-file listing on truncation, richer
-`gemini_status`, and response caching (`gemini_cache_clear`).
+`gemini_status`, response caching (`gemini_cache_clear`), and workflow tools
+(`gemini_index`, `gemini_review`, `gemini_find_usages`, `gemini_explain_error`).
 
 Still planned:
 
-- Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`)
 - Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`)
 - Streaming output (async subprocess)

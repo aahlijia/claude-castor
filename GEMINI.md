@@ -155,6 +155,28 @@ trading speed for capability — otherwise the default is fine.
 
 ---
 
+## Workflow Tools
+
+For common shapes, prefer a purpose-built tool over assembling a raw
+`gemini_prompt` — they bake in the right prompt and access tier, and they inherit
+caching. Each takes a `cwd` (project root) and an optional `model`.
+
+| Tool | Use when | Tier |
+|---|---|---|
+| `gemini_index(cwd)` | You need a map of an unfamiliar codebase before deeper work | sandbox |
+| `gemini_review(cwd, diff=None)` | You want a free second opinion on a diff (defaults to `git diff HEAD`) | read-only |
+| `gemini_find_usages(cwd, symbol)` | "Where/how is X used across the project?" | sandbox |
+| `gemini_explain_error(cwd, error)` | You have a stack trace and want root-cause hypotheses | sandbox |
+
+Notes:
+- `gemini_index` is the canonical first call on a new codebase — run it once and
+  build on the result (it is cached against the repo state in a git repo).
+- `gemini_review` complements your own `/code-review`; it is a cheap extra pass,
+  not a replacement, and costs no Claude context.
+- These cover the frequent cases. For anything else, construct a `gemini_prompt`.
+
+---
+
 ## Caching
 
 Identical prompts against an unchanged codebase reuse a stored response instead
@@ -188,7 +210,11 @@ Implications for how you call the tool:
 
 | Situation | What to do |
 |---|---|
-| Need to understand a large codebase | `gemini_prompt` with `trust=True` + `cwd` |
+| Need to understand a large codebase | `gemini_index` with `cwd` |
+| Need to understand a large codebase (deep/custom) | `gemini_prompt` with `trust=True` + `cwd` |
+| Review a diff for free | `gemini_review` with `cwd` |
+| Trace a symbol's usages | `gemini_find_usages` with `cwd` + `symbol` |
+| Diagnose an error/stack trace | `gemini_explain_error` with `cwd` + `error` |
 | User mentions a specific file | `gemini_prompt` with that file in `files` |
 | User says "explore the project" | `gemini_prompt` with `trust=True` + `cwd`, no files |
 | Need raw output | `gemini_prompt` with `raw=True` |
