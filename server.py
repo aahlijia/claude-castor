@@ -1,6 +1,9 @@
 import fnmatch
+import hashlib
+import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -60,6 +63,10 @@ MAX_SKIPPED_LISTED = 50
 PRINT_TIMEOUT = "300s"
 # Subprocess wall-clock guard, slightly above PRINT_TIMEOUT.
 SUBPROCESS_TIMEOUT = 310
+
+# Cached responses older than this are treated as misses, bounding
+# staleness even when the git-SHA match would otherwise hold an entry.
+CACHE_TTL_SECONDS = 7 * 24 * 3600
 
 # True once a resumable agy conversation exists this server run. The MCP
 # server is long-lived, so this persists across tool calls: the first
@@ -305,6 +312,172 @@ def _run_agy(
     return result.stdout.strip() or "[No response from Antigravity]"
 
 
+def _is_side_effect_free(
+    trust: bool, continue_session: bool, conversation_id: str | None
+) -> bool:
+    """True when a call only reads — safe to cache or replay.
+
+    trust=True may write files or run commands; session continuations
+    depend on mutable server state. Neither is safely cacheable.
+    """
+    return not trust and not continue_session and not conversation_id
+
+
+def _repo_fingerprint(cwd: str | None) -> str | None:
+    """Return a git HEAD + working-tree fingerprint for cwd.
+
+    Combines the HEAD commit with a hash of `git status --porcelain`, so
+    any staged, unstaged, or untracked change busts the cache. Returns
+    None when cwd is unset or not a git repository — the caller then
+    declines to cache explore-mode calls it cannot prove are unchanged.
+    """
+    if not cwd:
+        return None
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if head.returncode != 0:
+            return None
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    porcelain = hashlib.sha256(status.stdout.encode("utf-8")).hexdigest()
+    return f"{head.stdout.strip()}:{porcelain}"
+
+
+def _cache_dir() -> Path:
+    """Return the on-disk cache directory (created lazily on write)."""
+    base = os.environ.get("XDG_CACHE_HOME")
+    root = Path(base) if base else Path.home() / ".cache"
+    return root / "claude-castor"
+
+
+def _cache_key(
+    prompt: str, model: str | None, sandbox: bool, fingerprint: str | None
+) -> str:
+    """Hash everything that affects the response into a stable key."""
+    payload = json.dumps(
+        {
+            "prompt": prompt,
+            "model": model or "",
+            "sandbox": sandbox,
+            "repo": fingerprint or "",
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cache_lookup_key(
+    prompt: str,
+    model: str | None,
+    sandbox: bool,
+    trust: bool,
+    continue_session: bool,
+    conversation_id: str | None,
+    cwd: str | None,
+) -> str | None:
+    """Return a cache key if this call is cacheable, else None.
+
+    Cacheable only when side-effect-free. Sandbox explores the
+    filesystem, so it is cached only when a repo fingerprint can prove
+    the code is unchanged; non-explore (inline/read-only) calls are
+    determined by the prompt alone and cache without one.
+    """
+    if not _is_side_effect_free(trust, continue_session, conversation_id):
+        return None
+    fingerprint = _repo_fingerprint(cwd)
+    if sandbox and fingerprint is None:
+        return None
+    return _cache_key(prompt, model, sandbox, fingerprint)
+
+
+def _cache_get(key: str) -> str | None:
+    """Return a cached response for key, or None on miss/expiry/error."""
+    path = _cache_dir() / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        entry = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if time.time() - entry.get("created_at", 0) > CACHE_TTL_SECONDS:
+        return None
+    return entry.get("response")
+
+
+def _cache_put(key: str, response: str, model: str | None) -> None:
+    """Store a response under key. Best-effort; never raises."""
+    cache_dir = _cache_dir()
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{key}.json").write_text(
+            json.dumps(
+                {
+                    "response": response,
+                    "model": model or "",
+                    "created_at": time.time(),
+                }
+            )
+        )
+    except OSError:
+        pass
+
+
+def _assemble_prompt(
+    prompt: str, raw: bool, files: list[str] | None, directory: str | None
+) -> str:
+    """Build the full prompt: system prefix, ask, then inlined content."""
+    parts: list[str] = []
+    if not raw:
+        parts.append(SYSTEM_INSTRUCTION)
+    parts.append(prompt)
+    if files:
+        parts.append(_inline_files(files))
+    if directory:
+        parts.append(_inline_directory(directory))
+    return "\n\n".join(parts)
+
+
+def _try_cache(
+    use_cache: bool,
+    prompt: str,
+    model: str | None,
+    sandbox: bool,
+    trust: bool,
+    continue_session: bool,
+    conversation_id: str | None,
+    cwd: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the cache for a call.
+
+    Returns:
+        A (key, cached_response) pair. key is None when the call is not
+        cacheable (so the caller skips storing too); cached_response is
+        None on a miss.
+    """
+    if not use_cache:
+        return None, None
+    key = _cache_lookup_key(
+        prompt, model, sandbox, trust, continue_session, conversation_id, cwd
+    )
+    if key is None:
+        return None, None
+    return key, _cache_get(key)
+
+
 @mcp.tool()
 def gemini_prompt(
     prompt: str,
@@ -318,6 +491,7 @@ def gemini_prompt(
     conversation_id: str | None = None,
     model: str | None = None,
     sandbox: bool = False,
+    use_cache: bool = True,
 ) -> str:
     """Send a prompt to Antigravity (agy) and return the response.
 
@@ -362,6 +536,11 @@ def gemini_prompt(
             runs under terminal restrictions and does not blindly
             auto-approve actions — the safe middle ground between
             read-only and trust. Ignored when trust=True.
+        use_cache: If True (default), reuse a stored response when the
+            same prompt is re-sent against an unchanged repo (matched by
+            git HEAD + working-tree state). Only side-effect-free calls
+            are cached — never trust mode or session continuations. Set
+            False to force a fresh run. Clear with gemini_cache_clear.
     """
     if trust and not cwd:
         return (
@@ -370,23 +549,24 @@ def gemini_prompt(
             "absolute path of the user's project.]"
         )
 
-    parts: list[str] = []
-
-    if not raw:
-        parts.append(SYSTEM_INSTRUCTION)
-
-    parts.append(prompt)
-
-    if files:
-        parts.append(_inline_files(files))
-
-    if directory:
-        parts.append(_inline_directory(directory))
+    assembled = _assemble_prompt(prompt, raw, files, directory)
+    cache_key, cached = _try_cache(
+        use_cache,
+        assembled,
+        model,
+        sandbox,
+        trust,
+        continue_session,
+        conversation_id,
+        cwd,
+    )
+    if cached is not None:
+        return cached
 
     global _session_active
     resume = continue_session and _session_active and not conversation_id
     response = _run_agy(
-        "\n\n".join(parts),
+        assembled,
         trust=trust,
         cwd=cwd,
         add_dirs=add_dirs,
@@ -396,9 +576,11 @@ def gemini_prompt(
         sandbox=sandbox,
     )
     # Bracketed returns are errors/status, not real conversations, so
-    # only mark a session active when agy actually responded.
+    # only mark a session active (and cache) when agy actually responded.
     if not response.startswith("["):
         _session_active = True
+        if cache_key is not None:
+            _cache_put(cache_key, response, model)
     return response
 
 
@@ -417,6 +599,30 @@ def gemini_reset() -> str:
         "Session reset — the next gemini_prompt with continue_session=True "
         "will start a fresh context instead of resuming."
     )
+
+
+@mcp.tool()
+def gemini_cache_clear() -> str:
+    """Delete all cached Antigravity responses.
+
+    gemini_prompt reuses a stored response when the same prompt is
+    re-sent against an unchanged repo (matched by git HEAD + working-tree
+    state). Clear the cache to force fresh runs — e.g. after changing
+    agy's config or its default model, or to reclaim disk.
+    """
+    cache_dir = _cache_dir()
+    if not cache_dir.exists():
+        return "Cache is already empty — nothing to clear."
+
+    removed = 0
+    for entry in cache_dir.glob("*.json"):
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError:
+            pass
+
+    return f"Cleared {removed} cached response(s) from {cache_dir}."
 
 
 @mcp.tool()

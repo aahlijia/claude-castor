@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   middle ground between read-only and `trust`; `trust` takes precedence if both
   are set.
 - `/castor:auth` slash command — guides first-time sign-in.
+- Response caching — `gemini_prompt` gains a `use_cache` parameter (default
+  `true`): an identical prompt sent against an unchanged repo returns a stored
+  response instead of re-running agy. The cache key combines the assembled
+  prompt, `model`, `sandbox`, and — when `cwd` is a git repo — the repo state
+  (`git HEAD` + a hash of `git status --porcelain`, so any change busts it).
+  Only side-effect-free calls are cached: never `trust=True`, never session
+  continuations, never sandbox calls outside a git repo, never bracketed
+  error/status responses. Entries live under `~/.cache/claude-castor/`
+  (`$XDG_CACHE_HOME`) with a 7-day TTL. New `gemini_cache_clear` tool wipes them;
+  pass `use_cache=False` to force a single fresh run.
 
 ### Carried over (prior unreleased work)
 

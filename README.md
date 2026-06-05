@@ -129,6 +129,7 @@ over via the system keyring — no extra steps needed.
 |---|---|
 | `gemini_prompt` | Send a prompt to Antigravity and get a response |
 | `gemini_reset` | Forget the current session so the next prompt starts fresh |
+| `gemini_cache_clear` | Delete all cached responses to force fresh runs |
 | `gemini_models` | List the models available to agy |
 | `gemini_auth` | Get sign-in instructions when not authenticated |
 | `gemini_status` | Check CLI installation and sign-in; lists available models when READY |
@@ -149,6 +150,7 @@ over via the system keyring — no extra steps needed.
 | `conversation_id` | `str` | `None` | Resume a specific agy conversation by ID |
 | `model` | `str` | `None` | Select the agy model (see `gemini_models`) |
 | `sandbox` | `bool` | `false` | Explore under terminal restrictions (safe middle tier; ignored if `trust`) |
+| `use_cache` | `bool` | `true` | Reuse a stored response for the same prompt against an unchanged repo |
 
 ---
 
@@ -193,6 +195,28 @@ Call `gemini_models` to list what's available.
 
 ---
 
+## Caching
+
+Identical prompts against an unchanged codebase return a stored response instead
+of re-running agy — instant, and free. The cache key combines the full prompt,
+the `model`, the `sandbox` flag, and (when `cwd` is a git repo) the repo state:
+`git HEAD` plus a hash of `git status --porcelain`, so any commit or working-tree
+change busts the cache.
+
+Caching is **side-effect-free only**:
+
+- `trust=True` calls are never cached (they may write files or run commands).
+- Session continuations (`continue_session` / `conversation_id`) are never cached.
+- `sandbox=True` explore calls are cached only inside a git repo, where the repo
+  fingerprint can prove the code is unchanged.
+- Bracketed error/status responses are never stored.
+
+Entries live under `~/.cache/claude-castor/` (or `$XDG_CACHE_HOME`) and expire
+after 7 days. Pass `use_cache=False` to force a fresh run, or call
+`gemini_cache_clear` to wipe the cache.
+
+---
+
 ## Troubleshooting
 
 **`agy` not found** — Run
@@ -210,10 +234,12 @@ agent mode (`trust=True`) over pre-loading a full directory
 
 ## Roadmap
 
-See `.docs/development-plan.md` for the full roadmap. Recently shipped:
-persistent sessions (`gemini_reset`), model selection (`gemini_models`), a
-sandbox tier, skipped-file listing on truncation, and richer `gemini_status`.
+Recently shipped: persistent sessions (`gemini_reset`), model selection
+(`gemini_models`), a sandbox tier, skipped-file listing on truncation, richer
+`gemini_status`, and response caching (`gemini_cache_clear`).
 
 Still planned:
 
+- Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`)
+- Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`)
 - Streaming output (async subprocess)

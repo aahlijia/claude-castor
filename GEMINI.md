@@ -155,6 +155,35 @@ trading speed for capability — otherwise the default is fine.
 
 ---
 
+## Caching
+
+Identical prompts against an unchanged codebase reuse a stored response instead
+of re-running agy — instant and free. This happens automatically; you do not need
+to manage it. The cache key covers the full assembled prompt, the `model`, the
+`sandbox` flag, and the repo state (`git HEAD` + working-tree hash) when `cwd` is
+a git repo.
+
+What is **not** cached:
+
+- `trust=True` calls — they may write files or run commands, so they always re-run.
+- Session continuations (`continue_session` / `conversation_id`) — stateful.
+- `sandbox=True` calls outside a git repo — the code's freshness can't be proven.
+- Error/status responses (bracketed output).
+
+Implications for how you call the tool:
+
+- Re-asking the same question mid-task is cheap — don't contort prompts to avoid
+  "repeating" yourself; an identical prompt is a feature (a free hit).
+- If you genuinely need agy to re-run despite an identical prompt (e.g. you
+  suspect a non-deterministic explore answer), pass `use_cache=False`.
+- A cached explore answer is "a prior good answer for this question against this
+  code," not a guarantee of bit-identical regeneration. Inline-only calls are
+  fully deterministic from their input.
+- Call `gemini_cache_clear` only when the user changes agy's config/default model
+  or wants to reclaim disk — not as part of normal flow.
+
+---
+
 ## Quick Reference
 
 | Situation | What to do |
@@ -166,6 +195,8 @@ trading speed for capability — otherwise the default is fine.
 | Explore safely (no writes/commands) | `gemini_prompt` with `sandbox=True` + `cwd` |
 | Follow-up on the same codebase | `gemini_prompt` with `continue_session=True` |
 | Start a fresh session | `gemini_reset` |
+| Force a fresh run (skip cache) | `gemini_prompt` with `use_cache=False` |
+| Clear all cached responses | `gemini_cache_clear` |
 | Pick a specific model | `gemini_prompt` with `model=...` |
 | See available models | `gemini_models` |
 | agy CLI not working | `gemini_status` |

@@ -77,11 +77,18 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `conversation_id` | `str \| None` | Resume a specific agy conversation by ID (takes precedence over `continue_session`) |
 | `model` | `str \| None` | Select the agy model (see `gemini_models`; defaults to agy's default) |
 | `sandbox` | `bool` | Explore under terminal restrictions — safe middle tier (default: false; ignored when `trust=True`) |
+| `use_cache` | `bool` | Reuse a stored response for the same prompt against an unchanged repo (default: true; side-effect-free calls only) |
 
 ### `gemini_reset`
 
 Forgets the current Antigravity session so the next `gemini_prompt` with
 `continue_session=True` starts a fresh conversation. Use at task boundaries.
+
+### `gemini_cache_clear`
+
+Deletes all cached Antigravity responses. `gemini_prompt` reuses a stored
+response when the same prompt is re-sent against an unchanged repo (matched by
+git HEAD + working-tree state). Clear it to force fresh runs.
 
 ### `gemini_models`
 
@@ -152,4 +159,8 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
   (account/freshness skipped: agy has no whoami command and `agy update`
   mutates rather than checks)
 - `/castor:auth` slash command for onboarding — **done**
+- Response caching (`use_cache` param + `gemini_cache_clear` tool; keyed by
+  prompt + model + git HEAD/working-tree state) — **done**
+- Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`)
+- Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`)
 - Streaming output (async subprocess)
