@@ -136,6 +136,9 @@ over via the system keyring — no extra steps needed.
 | `gemini_review` | Free second-opinion review of a code diff |
 | `gemini_find_usages` | Find where and how a symbol is used across a codebase |
 | `gemini_explain_error` | Explain an error or stack trace against the codebase |
+| `gemini_start` | Start a prompt in the background; returns a job id |
+| `gemini_poll` | Check a background job; returns its result when done |
+| `gemini_jobs` | List background jobs and their status |
 | `gemini_reset` | Forget the current session so the next prompt starts fresh |
 | `gemini_cache_clear` | Delete all cached responses to force fresh runs |
 | `gemini_models` | List the models available to agy |
@@ -223,6 +226,25 @@ state when `cwd` is a git repo (see below). `gemini_index` is the canonical
 
 ---
 
+## Background Jobs
+
+`gemini_prompt` blocks until agy responds (up to 300s). For long explorations —
+or fan-out, where you start several jobs across subtrees and synthesize the
+results — run them in the background instead:
+
+1. `gemini_start(prompt, …)` spawns the agy run off-thread and returns a job id.
+2. Do other work.
+3. `gemini_poll(job_id)` returns `running` (with elapsed time), the response when
+   `done`, or a message on error. `gemini_jobs()` lists everything outstanding.
+
+`gemini_start` takes the same arguments as `gemini_prompt` except the session
+ones: background jobs are **fresh-only** by construction (concurrent jobs would
+race on the shared session), so for stateful multi-turn work use the synchronous
+`gemini_prompt`. Concurrency is capped (4 workers), and a cache hit completes a
+job immediately. Jobs live in memory only — a server restart forgets them.
+
+---
+
 ## Caching
 
 Identical prompts against an unchanged codebase return a stored response instead
@@ -264,10 +286,10 @@ agent mode (`trust=True`) over pre-loading a full directory
 
 Recently shipped: persistent sessions (`gemini_reset`), model selection
 (`gemini_models`), a sandbox tier, skipped-file listing on truncation, richer
-`gemini_status`, response caching (`gemini_cache_clear`), and workflow tools
-(`gemini_index`, `gemini_review`, `gemini_find_usages`, `gemini_explain_error`).
+`gemini_status`, response caching (`gemini_cache_clear`), workflow tools
+(`gemini_index`, `gemini_review`, `gemini_find_usages`, `gemini_explain_error`),
+and async background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`).
 
 Still planned:
 
-- Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`)
-- Streaming output (async subprocess)
+- Streaming output (token-by-token, vs. the current poll model)

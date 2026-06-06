@@ -92,6 +92,15 @@ side-effect-free, so results are cached against the repo state in a git repo.
 | `gemini_find_usages` | `(cwd, symbol, model=None)` | sandbox | Every use of a symbol, with paths/lines |
 | `gemini_explain_error` | `(cwd, error, model=None)` | sandbox | Ranked root-cause hypotheses for an error |
 
+### Background jobs
+
+`gemini_start` runs a prompt off-thread (same args as `gemini_prompt` minus the
+session ones — background jobs are fresh-only) and returns a job id;
+`gemini_poll(job_id)` returns `running` / the response / an error; `gemini_jobs`
+lists them. Use for long explorations and fan-out. Concurrency is capped at 4
+workers; jobs are in-memory (lost on restart) and bounded to 50 (oldest finished
+evicted, never a running job).
+
 ### `gemini_reset`
 
 Forgets the current Antigravity session so the next `gemini_prompt` with
@@ -176,5 +185,6 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
   prompt + model + git HEAD/working-tree state) — **done**
 - Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`,
   `gemini_explain_error`; thin wrappers over the shared `_dispatch` core) — **done**
-- Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`)
-- Streaming output (async subprocess)
+- Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`;
+  thread-pool workers, poll model, fresh-only) — **done**
+- Streaming output (token-by-token, vs. the current poll model)

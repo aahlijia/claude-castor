@@ -177,6 +177,32 @@ Notes:
 
 ---
 
+## Background Jobs
+
+`gemini_prompt` blocks until agy responds — fine for a quick ask, but a long
+exploration ties you up for the full timeout. For those, run the work in the
+background:
+
+- `gemini_start(prompt, …)` returns a job id immediately and runs agy off-thread.
+- Do other useful work, then `gemini_poll(job_id)` to collect the result (it
+  returns `running` with elapsed time until the job finishes).
+- `gemini_jobs()` lists outstanding jobs.
+
+When to reach for it:
+- A single long/deep exploration where you have other things to do meanwhile.
+- **Fan-out**: start several `gemini_start` jobs across different subtrees or
+  questions, then poll them and synthesize — far faster than serial calls.
+
+Rules:
+- `gemini_start` is **fresh-only**: it does not take `continue_session` or
+  `conversation_id`. For stateful multi-turn work, stay on `gemini_prompt`.
+- It accepts the same other args as `gemini_prompt` (`trust`, `cwd`, `sandbox`,
+  `model`, `files`, `directory`, `use_cache`). A cache hit finishes instantly.
+- Don't poll in a tight loop — do real work between polls. Jobs are in-memory, so
+  a server restart forgets them.
+
+---
+
 ## Caching
 
 Identical prompts against an unchanged codebase reuse a stored response instead
@@ -220,6 +246,9 @@ Implications for how you call the tool:
 | Need raw output | `gemini_prompt` with `raw=True` |
 | Explore safely (no writes/commands) | `gemini_prompt` with `sandbox=True` + `cwd` |
 | Follow-up on the same codebase | `gemini_prompt` with `continue_session=True` |
+| Long job — keep working meanwhile | `gemini_start`, then `gemini_poll` |
+| Fan-out across subtrees | several `gemini_start`, then poll each |
+| Check on background jobs | `gemini_jobs` |
 | Start a fresh session | `gemini_reset` |
 | Force a fresh run (skip cache) | `gemini_prompt` with `use_cache=False` |
 | Clear all cached responses | `gemini_cache_clear` |

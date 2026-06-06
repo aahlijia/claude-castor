@@ -3,8 +3,13 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from fastmcp import FastMCP
 
@@ -532,6 +537,7 @@ def _dispatch(
     model: str | None = None,
     sandbox: bool = False,
     use_cache: bool = True,
+    track_session: bool = True,
 ) -> str:
     """Assemble, cache-check, run, and store a single agy prompt.
 
@@ -539,6 +545,12 @@ def _dispatch(
     (gemini_index, gemini_review, ...). Enforces the trust/cwd guard, the
     side-effect-free cache gate, and session bookkeeping in one place so
     every caller handles caching and sessions identically.
+
+    Args:
+        track_session: When True, mark the server session active after a
+            real response so later continue_session calls resume it. Set
+            False for background jobs, which run concurrently and must not
+            race on the shared session state.
 
     Returns:
         agy's response, a cached response, or a bracketed error string.
@@ -579,10 +591,86 @@ def _dispatch(
     # Bracketed returns are errors/status, not real conversations, so
     # only mark a session active (and cache) when agy actually responded.
     if not response.startswith("["):
-        _session_active = True
+        if track_session:
+            _session_active = True
         if cache_key is not None:
             _cache_put(cache_key, response, model)
     return response
+
+
+# Background-job subsystem. agy print mode blocks for up to PRINT_TIMEOUT;
+# these let a long prompt run off-thread so Claude can keep working and
+# collect the result later via gemini_poll. Jobs are in-memory only — a
+# server restart drops them. Concurrency is capped by the pool so a
+# fan-out cannot spawn unbounded agy processes.
+JOB_POOL_SIZE = 4
+MAX_JOBS = 50
+
+
+@dataclass
+class _Job:
+    """State of one background agy job.
+
+    Attributes:
+        status: "running", "done", or "error".
+        started_at: Unix time the job was submitted.
+        finished_at: Unix time it completed, or None while running.
+        response: The result (real response when done, bracketed message
+            when error), or None while running.
+    """
+
+    status: str
+    started_at: float
+    finished_at: float | None = None
+    response: str | None = None
+
+
+_jobs: dict[str, _Job] = {}
+_jobs_lock = threading.Lock()
+_job_pool = ThreadPoolExecutor(max_workers=JOB_POOL_SIZE)
+
+
+def _evict_jobs() -> None:
+    """Drop the oldest finished jobs to keep _jobs under MAX_JOBS.
+
+    The caller must hold _jobs_lock. Only finished jobs are evicted, so a
+    running job is never dropped out from under a pending poll.
+    """
+    if len(_jobs) < MAX_JOBS:
+        return
+    finished = sorted(
+        (
+            (jid, job)
+            for jid, job in _jobs.items()
+            if job.finished_at is not None
+        ),
+        key=lambda kv: kv[1].finished_at or 0,
+    )
+    for jid, _ in finished:
+        if len(_jobs) < MAX_JOBS:
+            break
+        del _jobs[jid]
+
+
+def _run_job(job_id: str, kwargs: dict[str, Any]) -> None:
+    """Worker body: run the prompt, then record the outcome on the job.
+
+    Runs with track_session=False so background completion never mutates
+    the shared session state the synchronous path depends on. A bracketed
+    response (agy error/status) is recorded as an "error" outcome.
+    """
+    try:
+        response = _dispatch(track_session=False, **kwargs)
+    except Exception as exc:  # worker must never crash silently
+        response = f"[Job crashed: {exc}]"
+
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job.status = "error" if response.startswith("[") else "done"
+        job.response = response
+        job.finished_at = time.time()
 
 
 @mcp.tool()
@@ -773,6 +861,134 @@ def gemini_explain_error(
         f"concrete.\n\n[ERROR]\n{error}"
     )
     return _dispatch(prompt, sandbox=True, cwd=cwd, model=model)
+
+
+@mcp.tool()
+def gemini_start(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    trust: bool = False,
+    cwd: str | None = None,
+    add_dirs: list[str] | None = None,
+    model: str | None = None,
+    sandbox: bool = False,
+    use_cache: bool = True,
+) -> str:
+    """Start an agy prompt in the background and return a job id.
+
+    Use this for long explorations or fan-out (start several jobs across
+    subtrees, then synthesize) so Claude is not blocked for the full agy
+    timeout. The job runs off-thread; collect its result with gemini_poll.
+
+    Background jobs are fresh-only by construction — they do not accept
+    continue_session or conversation_id and never touch the shared session
+    state, because concurrent jobs would race on it. For stateful,
+    multi-turn work use the synchronous gemini_prompt instead.
+
+    Args:
+        prompt: The fully-formed prompt Claude has constructed.
+        files: Absolute paths to files to inline into the prompt.
+        directory: A directory whose contents should be inlined.
+        raw: If True, skip structured response instructions.
+        trust: If True, full agent mode (requires cwd). Note: trust runs
+            are never cached.
+        cwd: Working directory for the agy subprocess. Required when
+            trust=True.
+        add_dirs: Extra directories to grant agy read access to.
+        model: Select the agy model (see gemini_models).
+        sandbox: If True, agy explores under terminal restrictions.
+            Ignored when trust=True.
+        use_cache: If True (default), a cache hit completes the job
+            immediately without spawning agy.
+
+    Returns:
+        A message with the job id to pass to gemini_poll, or a bracketed
+        error string (e.g. when trust=True is missing cwd).
+    """
+    if trust and not cwd:
+        return (
+            "[Error: cwd is required when trust=True so agy's workspace "
+            "is rooted in the correct project directory. Pass the "
+            "absolute path of the user's project.]"
+        )
+
+    kwargs: dict[str, Any] = {
+        "prompt": prompt,
+        "files": files,
+        "directory": directory,
+        "raw": raw,
+        "trust": trust,
+        "cwd": cwd,
+        "add_dirs": add_dirs,
+        "model": model,
+        "sandbox": sandbox,
+        "use_cache": use_cache,
+    }
+    job_id = uuid.uuid4().hex[:8]
+    with _jobs_lock:
+        _evict_jobs()
+        _jobs[job_id] = _Job(status="running", started_at=time.time())
+    _job_pool.submit(_run_job, job_id, kwargs)
+    return (
+        f"Started background job {job_id}. Poll it with "
+        f'gemini_poll("{job_id}") — do other work first, then check back.'
+    )
+
+
+@mcp.tool()
+def gemini_poll(job_id: str) -> str:
+    """Check a background job started with gemini_start.
+
+    Args:
+        job_id: The id returned by gemini_start.
+
+    Returns:
+        While running, a bracketed status with elapsed seconds. When done,
+        agy's response. On error, a bracketed message. For an unknown id,
+        a bracketed not-found note.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return (
+                f"[Unknown job {job_id} — it may have been evicted or "
+                "never existed.]"
+            )
+        status, response = job.status, job.response
+        started, finished = job.started_at, job.finished_at
+
+    if status == "running":
+        elapsed = int(time.time() - started)
+        return (
+            f"[Job {job_id} still running — {elapsed}s elapsed. "
+            "Poll again shortly.]"
+        )
+
+    took = int((finished or time.time()) - started)
+    if status == "error":
+        return f"[Job {job_id} failed after {took}s]\n{response}"
+    return response or "[No response from Antigravity]"
+
+
+@mcp.tool()
+def gemini_jobs() -> str:
+    """List background jobs and their status.
+
+    Returns:
+        One line per job (id, status, age/duration), newest last, or a
+        note when there are none.
+    """
+    with _jobs_lock:
+        if not _jobs:
+            return "No background jobs."
+        now = time.time()
+        lines = []
+        for jid, job in sorted(_jobs.items(), key=lambda kv: kv[1].started_at):
+            secs = int((job.finished_at or now) - job.started_at)
+            lines.append(f"{jid}  {job.status:<8} {secs}s")
+    return "\n".join(lines)
 
 
 @mcp.tool()

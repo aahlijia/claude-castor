@@ -86,6 +86,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/castor:usages <symbol>`, and `/castor:explain <error>`. Auto-installed by the
   existing `commands/castor/*.md` glob; `/castor:explore` is unchanged (deep
   trust-mode exploration remains distinct from the compact `gemini_index` map).
+- Async background jobs — three tools for non-blocking and fan-out work:
+  - `gemini_start(prompt, …)` runs an agy prompt off-thread and returns a job id
+    immediately. Takes the same arguments as `gemini_prompt` except the session
+    ones: background jobs are fresh-only (concurrent jobs would race on the shared
+    session state), so they never accept `continue_session`/`conversation_id` and
+    never mutate it.
+  - `gemini_poll(job_id)` returns `running` (with elapsed seconds), the response
+    when done, or a bracketed message on error/unknown id.
+  - `gemini_jobs()` lists outstanding jobs with status and age.
+  - Backed by a bounded `ThreadPoolExecutor` (4 workers, so a fan-out cannot spawn
+    unlimited agy processes) and an in-memory job table capped at 50 (oldest
+    finished jobs evicted on the next start; a running job is never evicted). Jobs
+    do not survive a server restart. `_dispatch` gained a `track_session` flag so
+    the background path reuses the same run/cache logic without touching sessions.
 
 ### Carried over (prior unreleased work)
 
