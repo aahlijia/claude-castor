@@ -120,6 +120,10 @@ over via the system keyring — no extra steps needed.
 | `/castor:auth` | Sign in to the Antigravity CLI |
 | `/castor:explore` | Full codebase exploration in agent mode |
 | `/castor:research <topic>` | Deep-dive on a symbol, feature, or file |
+| `/castor:index` | Compact, reusable map of the current codebase |
+| `/castor:review` | Free second-opinion review of your uncommitted changes |
+| `/castor:usages <symbol>` | Trace where and how a symbol is used |
+| `/castor:explain <error>` | Diagnose an error or stack trace against the codebase |
 
 ---
 

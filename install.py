@@ -104,7 +104,11 @@ def main() -> None:
         "  /castor:status    — verify the Antigravity (agy) CLI is ready\n"
         "  /castor:auth      — sign in if not authenticated\n"
         "  /castor:explore   — explore the current codebase\n"
-        "  /castor:research  — deep-dive on a specific topic"
+        "  /castor:research  — deep-dive on a specific topic\n"
+        "  /castor:index     — map the codebase for reuse as context\n"
+        "  /castor:review    — free second-opinion review of your changes\n"
+        "  /castor:usages    — trace where a symbol is used\n"
+        "  /castor:explain   — diagnose an error against the codebase"
     )
 
 

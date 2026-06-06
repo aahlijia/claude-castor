@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `gemini_prompt` run/cache/session core was extracted into a shared
     `_dispatch` helper that all of these (and `gemini_prompt`) route through, so
     caching and session bookkeeping behave identically everywhere.
+- Slash commands for the workflow tools: `/castor:index`, `/castor:review`,
+  `/castor:usages <symbol>`, and `/castor:explain <error>`. Auto-installed by the
+  existing `commands/castor/*.md` glob; `/castor:explore` is unchanged (deep
+  trust-mode exploration remains distinct from the compact `gemini_index` map).
 
 ### Carried over (prior unreleased work)
 
