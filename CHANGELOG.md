@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
  
+## [Unreleased]
+
+### Improved
+
+- **Castor skills now load the MCP tool schema automatically** — the manual
+  `ToolSearch` pre-load step is no longer required. Each `/castor:*` skill
+  opens with the exact `ToolSearch("select:…")` call for the tool it drives,
+  so the first invocation succeeds in a cold session without any preamble.
+
+### Fixed
+
+- **Auth error messages are now consistent across all call sites.** Every
+  not-signed-in response now names both the `gemini_auth` tool and the
+  `! agy -p "ok"` command via a shared `AUTH_HINT` constant, replacing three
+  near-duplicate strings that disagreed in wording.
+- `gemini_poll` on an unknown or evicted job ID now suggests running
+  `gemini_jobs` to list current jobs.
+
+### Added
+
+- **Project-state store helpers** (`_project_key`, `_project_state_path`,
+  `_load_project_state`, `_save_project_state`) under
+  `~/.cache/claude-castor/projects/`. Foundation for FR-6 structured index
+  output, FR-2 memory persistence, and FR-4 richer status — consumed by later
+  Round-3 features. Writes are atomic (`os.replace`) to avoid corruption from
+  concurrent background jobs.
+
+---
+
 ## [0.2.0] - 2026-06-08
 
 ### Changed

@@ -1,5 +1,9 @@
 Perform a full codebase exploration using Antigravity (agy) in agent mode.
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_prompt")
+
 Read `~/.claude/GEMINI.md` first for prompting guidance, then call `gemini_prompt` with:
 - `trust=True` (full agent mode — agy navigates the filesystem on its own)
 - `cwd` set to the absolute path of the current working directory

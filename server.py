@@ -16,6 +16,10 @@ from fastmcp import FastMCP
 mcp = FastMCP("claude-castor")
 
 INSTALL_CMD = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+AUTH_HINT = (
+    'Run the `gemini_auth` tool or type `! agy -p "ok"` '
+    "in the Claude Code prompt to sign in — it is a one-time step."
+)
 
 SYSTEM_INSTRUCTION = """\
 You are a technical assistant. Respond with precision and structure.
@@ -323,10 +327,7 @@ def _run_agy(
 
     combined = result.stdout + result.stderr
     if _needs_auth(combined):
-        return (
-            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
-            "to complete Google sign-in — it is a one-time step.]"
-        )
+        return f"[Not signed in to Antigravity. {AUTH_HINT}]"
 
     if result.returncode != 0 and result.stderr.strip():
         return f"[Antigravity error]\n{result.stderr.strip()}"
@@ -478,6 +479,43 @@ def _cache_put(key: str, response: str, model: str | None) -> None:
                 }
             )
         )
+    except OSError:
+        pass
+
+
+def _project_key(cwd: str) -> str:
+    """SHA-256 of the resolved absolute project path."""
+    return hashlib.sha256(str(Path(cwd).resolve()).encode("utf-8")).hexdigest()
+
+
+def _project_state_path(cwd: str) -> Path:
+    """Path to the per-project state sidecar JSON."""
+    return _cache_dir() / "projects" / f"{_project_key(cwd)}.json"
+
+
+def _load_project_state(cwd: str) -> dict:
+    """Load the project state dict, returning {} on miss or parse error."""
+    path = _project_state_path(cwd)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_project_state(cwd: str, state: dict) -> None:
+    """Atomically persist the project state dict. Best-effort; never raises.
+
+    Uses write-to-tmp + os.replace so concurrent writes from background
+    jobs cannot corrupt the file (POSIX rename is atomic).
+    """
+    path = _project_state_path(cwd)
+    tmp = path.with_suffix(".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -954,7 +992,7 @@ def gemini_poll(job_id: str) -> str:
         if job is None:
             return (
                 f"[Unknown job {job_id} — it may have been evicted or "
-                "never existed.]"
+                "never existed. Run gemini_jobs to list current jobs.]"
             )
         status, response = job.status, job.response
         started, finished = job.started_at, job.finished_at
@@ -1051,10 +1089,7 @@ def gemini_models() -> str:
 
     combined = result.stdout + result.stderr
     if _needs_auth(combined):
-        return (
-            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
-            "to complete Google sign-in — it is a one-time step.]"
-        )
+        return f"[Not signed in to Antigravity. {AUTH_HINT}]"
 
     if result.returncode != 0 and result.stderr.strip():
         return f"[Antigravity error]\n{result.stderr.strip()}"
@@ -1191,8 +1226,7 @@ def gemini_status() -> str:
     if _needs_auth(combined):
         return (
             f"NOT SIGNED IN: agy {version} installed but not "
-            "authenticated.\n"
-            'Fix: run the `gemini_auth` tool (or `! agy -p "ok"`).'
+            f"authenticated.\nFix: {AUTH_HINT}"
         )
 
     if auth_result.returncode != 0:

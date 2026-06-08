@@ -1,5 +1,9 @@
 Produce a structured map of the current codebase using Antigravity (agy).
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_index")
+
 Read `~/.claude/GEMINI.md` first for context, then call `gemini_index` with:
 - `cwd` set to the absolute path of the current working directory
 

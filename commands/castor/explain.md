@@ -2,6 +2,10 @@ Diagnose an error or stack trace against the current codebase using Antigravity 
 
 The error or stack trace is: $ARGUMENTS
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_explain_error")
+
 Read `~/.claude/GEMINI.md` first for context, then call `gemini_explain_error` with:
 - `cwd` set to the absolute path of the current working directory
 - `error` set to the error text in $ARGUMENTS
