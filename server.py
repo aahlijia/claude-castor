@@ -32,13 +32,25 @@ You are a technical assistant. Respond with precision and structure.
 - Reference files as plain paths, never as file:// links\
 """
 
-# Baked prompt for gemini_index — a compact, Claude-consumable repo map.
+# Baked prompt for gemini_index — requests a structured JSON object.
 INDEX_PROMPT = """\
-Produce a structured index of this codebase for another engineer to use as
-context. Include: the top-level directory layout with a one-line role for
-each entry, the entry points, the key modules and their main symbols, and
-how the major pieces connect. Be compact and reference real paths. Do NOT
-include file contents — just the map."""
+You are a technical assistant. Produce a structured JSON index of this
+codebase for use as context by another engineer.
+
+Return a JSON object with exactly these keys:
+
+  "summary"         — one-paragraph description of what this codebase does
+  "entry_points"    — list of top-level entry point paths as strings
+  "modules"         — object mapping each key module or class name to
+                      {"file": "<path>", "line": <int>, "role": "<desc>"}
+  "exception_types" — list of custom exception or error type names
+                      (empty list if none)
+  "architecture"    — short paragraph on how the major pieces connect
+
+Be precise — use real file paths, symbol names, and line numbers from
+the code. Do NOT wrap the output in a code fence. Return only the JSON
+object, nothing else.\
+"""
 
 # Baked prompt for gemini_review — a correctness-focused diff review.
 REVIEW_PROMPT = """\
@@ -100,6 +112,16 @@ CACHE_TTL_SECONDS = 7 * 24 * 3600
 # and gemini_reset clears it. Guards against resuming into nothing (or a
 # prior, unrelated task) when continue_session is the default for a caller.
 _session_active = False
+
+_INDEX_KEYS = frozenset(
+    {
+        "summary",
+        "entry_points",
+        "modules",
+        "exception_types",
+        "architecture",
+    }
+)
 
 
 def _read_bytes(path: Path) -> bytes | None:
@@ -378,6 +400,29 @@ def _repo_fingerprint(cwd: str | None) -> str | None:
 
     porcelain = hashlib.sha256(status.stdout.encode("utf-8")).hexdigest()
     return f"{head.stdout.strip()}:{porcelain}"
+
+
+def _get_git_sha(cwd: str) -> str | None:
+    """Return the HEAD commit SHA for cwd, or None.
+
+    Args:
+        cwd: Working directory to query.
+
+    Returns:
+        The HEAD SHA string, or None if cwd is not a git repo or git
+        is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _git_diff(cwd: str) -> str:
@@ -791,25 +836,102 @@ def gemini_prompt(
     )
 
 
+def _strip_fences(text: str) -> str:
+    """Strip a single outermost markdown code fence from text."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    first_newline = stripped.find("\n")
+    if first_newline == -1 or not stripped.endswith("```"):
+        return stripped
+    return stripped[first_newline + 1 : -3].strip()
+
+
+def _validate_index_keys(data: dict) -> bool:
+    """True when data contains all required gemini_index keys."""
+    return _INDEX_KEYS.issubset(data.keys())
+
+
+def _update_last_index(cwd: str) -> None:
+    """Record a successful gemini_index run in the project state store.
+
+    Best-effort — never raises. Consumed by FR-4 (gemini_status with cwd)
+    to surface when the project was last indexed and at which commit.
+
+    Args:
+        cwd: Absolute project root that was just indexed.
+    """
+    state = _load_project_state(cwd)
+    state["last_index"] = {
+        "timestamp": time.time(),
+        "git_sha": _get_git_sha(cwd) or "",
+    }
+    state["updated_at"] = time.time()
+    _save_project_state(cwd, state)
+
+
+def _parse_index(raw: str, cwd: str) -> str:
+    """Parse agy's index response into a structured JSON string.
+
+    Tries to extract a JSON object from raw (stripping code fences),
+    validates required keys are present, then injects git_sha and
+    raw_markdown. Falls back to a minimal envelope on parse failure.
+
+    Args:
+        raw: agy's raw index response.
+        cwd: Project root; used to inject the current git SHA.
+
+    Returns:
+        A JSON string with structured index fields, or a minimal JSON
+        envelope with git_sha and raw_markdown when parsing fails.
+    """
+    git_sha = _get_git_sha(cwd)
+    fallback: dict[str, Any] = {
+        "git_sha": git_sha,
+        "raw_markdown": raw,
+    }
+    try:
+        data = json.loads(_strip_fences(raw))
+    except (ValueError, TypeError):
+        return json.dumps(fallback)
+    if not isinstance(data, dict) or not _validate_index_keys(data):
+        return json.dumps(fallback)
+    data["git_sha"] = git_sha
+    data["raw_markdown"] = raw
+    return json.dumps(data)
+
+
 @mcp.tool()
 def gemini_index(cwd: str, model: str | None = None) -> str:
-    """Produce a structured map of a codebase for use as context.
+    """Produce a structured JSON index of a codebase for use as context.
 
     Runs agy as a sandboxed explorer rooted at cwd — it navigates the
-    project on its own and returns a compact index: directory layout,
-    entry points, key modules and symbols, and how they connect. This is
-    the canonical "give me context I can reuse" call: it is side-effect-
-    free, so when cwd is a git repo the result is cached against the repo
-    state and re-runs are instant.
+    project on its own and returns a structured JSON index: a summary,
+    entry points, key modules with file/line/role, custom exception
+    types, and an architecture overview. Also includes raw_markdown
+    (the full agy response) and git_sha.
+
+    This is the canonical "give me context I can reuse" call: it is
+    side-effect-free, so when cwd is a git repo the result is cached
+    against the repo state and re-runs are instant.
 
     Args:
         cwd: Absolute path to the project root to index.
         model: Optional agy model override (see gemini_models).
 
     Returns:
-        A structured codebase index, or a bracketed error string.
+        A JSON string with keys: summary, entry_points, modules,
+        exception_types, architecture, raw_markdown, git_sha. On
+        parse failure, returns a minimal JSON object with raw_markdown
+        and git_sha only. On agy error, returns a bracketed error
+        string.
     """
-    return _dispatch(INDEX_PROMPT, sandbox=True, cwd=cwd, model=model)
+    raw = _dispatch(INDEX_PROMPT, raw=True, sandbox=True, cwd=cwd, model=model)
+    if raw.startswith("["):
+        return raw
+    result = _parse_index(raw, cwd)
+    _update_last_index(cwd)
+    return result
 
 
 @mcp.tool()

@@ -25,6 +25,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/castor:index` now persists the index to project memory** — after a
+  successful structured `gemini_index` response, the skill writes a compact
+  `castor-index.md` to the project's Claude memory directory
+  (`~/.claude/projects/<slug>/memory/`) and adds a pointer to `MEMORY.md`.
+  On subsequent sessions, the skill reads the memory file and compares its
+  `git_sha` against the current HEAD — if they match, the tool call is
+  skipped entirely. Only a new commit invalidates the memory index (HEAD-only
+  comparison, not the full working-tree fingerprint, so uncommitted edits
+  during development do not cause unnecessary re-indexing). Parse-failure
+  fallback responses are never written to memory.
+
+- **`gemini_index` records `last_index` in the project state store** —
+  timestamp and git SHA of the last successful index run are written to
+  `~/.cache/claude-castor/projects/<hash>.json` for consumption by FR-4
+  (`gemini_status` with `cwd`).
+
+- **`gemini_index` now returns structured JSON** — the response includes
+  `summary`, `entry_points`, `modules` (name → `{file, line, role}`),
+  `exception_types`, `architecture`, `raw_markdown`, and `git_sha`.
+  Consumers can route on individual fields (e.g. auto-populate
+  `gemini_find_usages` targets from `modules`) while `raw_markdown`
+  preserves the full agy response. Falls back to a minimal
+  `{git_sha, raw_markdown}` envelope when the response cannot be parsed
+  as JSON. Implemented by `_parse_index` (calls `_strip_fences` +
+  `_validate_index_keys` + `_get_git_sha`); `INDEX_PROMPT` updated to
+  request JSON output; `gemini_index` now dispatches with `raw=True` to
+  avoid `SYSTEM_INSTRUCTION` interfering with JSON-only output.
+
 - **Project-state store helpers** (`_project_key`, `_project_state_path`,
   `_load_project_state`, `_save_project_state`) under
   `~/.cache/claude-castor/projects/`. Foundation for FR-6 structured index
