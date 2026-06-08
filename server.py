@@ -456,6 +456,32 @@ def _cache_dir() -> Path:
     return root / "claude-castor"
 
 
+def _cache_size_mb() -> float:
+    """Return the total size of all cache files in MB.
+
+    Walks the entire cache directory recursively, covering both the flat
+    response-cache entries and the projects/ subdirectory added by the
+    project-state store. Best-effort — returns 0.0 on any error.
+
+    Returns:
+        Total size in megabytes, rounded to one decimal place by callers.
+    """
+    cache_dir = _cache_dir()
+    if not cache_dir.exists():
+        return 0.0
+    total = 0
+    try:
+        for entry in cache_dir.rglob("*"):
+            if entry.is_file():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total / (1024 * 1024)
+
+
 def _cache_key(
     prompt: str, model: str | None, sandbox: bool, fingerprint: str | None
 ) -> str:
@@ -1311,13 +1337,39 @@ def _status_extras() -> str:
     return f"\nModels available:\n{shown}"
 
 
+def _format_last_index(state: dict) -> str:
+    """Format the last_index entry from a project state dict as a status line.
+
+    Args:
+        state: Project state dict from _load_project_state.
+
+    Returns:
+        A newline-prefixed "last_index: ..." line, or "" when no index
+        has been recorded for the project yet.
+    """
+    entry = state.get("last_index")
+    if not entry:
+        return ""
+    ts = entry.get("timestamp", 0.0)
+    git_sha = entry.get("git_sha", "")
+    ts_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+    sha_str = f"  git_sha: {git_sha[:7]}" if git_sha else ""
+    return f"\nlast_index: {ts_str}{sha_str}"
+
+
 @mcp.tool()
-def gemini_status() -> str:
+def gemini_status(cwd: str | None = None) -> str:
     """Check that the agy CLI is installed and signed in.
 
-    Run before first use or when troubleshooting. Returns a status
-    string with fix instructions if not ready. When READY, also lists the
-    available models (best-effort; omitted silently if unavailable).
+    Run before first use or when troubleshooting. Returns a status string
+    with fix instructions if not ready. When READY, appends cache size and
+    available models (best-effort). When cwd is provided, also appends the
+    last-index timestamp and git SHA for that project (from the project
+    state store populated by gemini_index).
+
+    Args:
+        cwd: Optional absolute path to a project root. When given, per-
+            project index metadata is included in the output.
     """
     not_installed = f"NOT INSTALLED: `agy` CLI not found.\nFix: {INSTALL_CMD}"
 
@@ -1357,7 +1409,11 @@ def gemini_status() -> str:
             f"Error: {auth_result.stderr.strip()}"
         )
 
-    return f"READY — agy {version}{_status_extras()}"
+    suffix = _status_extras()
+    suffix += f"\ncache_size_mb: {_cache_size_mb():.1f}"
+    if cwd is not None:
+        suffix += _format_last_index(_load_project_state(cwd))
+    return f"READY — agy {version}{suffix}"
 
 
 if __name__ == "__main__":

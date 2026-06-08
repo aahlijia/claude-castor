@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  
 ## [Unreleased]
 
+### Added (continued)
+
+- **`gemini_status` now accepts an optional `cwd` argument** — when provided,
+  the response includes the last-index timestamp and git SHA for that project
+  (read from the project state store populated by `gemini_index`). The response
+  also always includes a `cache_size_mb` line showing the total size of all
+  files under `~/.cache/claude-castor/` (response cache + project store). The
+  `/castor:status` skill now passes `cwd` automatically.
+
 ### Improved
 
 - **Castor skills now load the MCP tool schema automatically** — the manual
