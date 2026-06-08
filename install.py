@@ -7,8 +7,12 @@ import sys
 from pathlib import Path
 
 REPO_DIR = Path(__file__).parent.resolve()
-COMMANDS_SRC = REPO_DIR / "commands"
-COMMANDS_DEST = Path.home() / ".claude" / "commands"
+# Namespaced under castor/ so the commands install as /castor:<name>.
+COMMANDS_SRC = REPO_DIR / "commands" / "castor"
+COMMANDS_DEST = Path.home() / ".claude" / "commands" / "castor"
+# Flat files from pre-namespace installs (/castor-<name>) to clean up.
+LEGACY_COMMANDS_DIR = Path.home() / ".claude" / "commands"
+LEGACY_COMMAND_STEMS = ("auth", "explore", "research", "status")
 GEMINI_MD_SRC = REPO_DIR / "GEMINI.md"
 GEMINI_MD_DEST = Path.home() / ".claude" / "GEMINI.md"
 
@@ -64,13 +68,23 @@ def register_mcp(claude: str, uv: Path) -> None:
     print(f"  Registered — using uv at {uv}")
 
 
+def remove_legacy_commands() -> None:
+    """Delete flat castor-*.md files from pre-namespace installs."""
+    for stem in LEGACY_COMMAND_STEMS:
+        legacy = LEGACY_COMMANDS_DIR / f"castor-{stem}.md"
+        if legacy.exists():
+            legacy.unlink()
+            print(f"  removed legacy /castor-{stem}")
+
+
 def install_commands() -> None:
     COMMANDS_DEST.mkdir(parents=True, exist_ok=True)
     print("Installing slash commands...")
+    remove_legacy_commands()
     for src in sorted(COMMANDS_SRC.glob("*.md")):
         dest = COMMANDS_DEST / src.name
         shutil.copy(src, dest)
-        print(f"  /{src.stem}")
+        print(f"  /castor:{src.stem}")
 
     shutil.copy(GEMINI_MD_SRC, GEMINI_MD_DEST)
     print(f"  GEMINI.md → {GEMINI_MD_DEST}")
@@ -87,9 +101,14 @@ def main() -> None:
 
     print(
         "\nDone! Restart Claude Code, then:\n"
-        "  /castor-status    — verify the Gemini CLI is ready\n"
-        "  /castor-explore   — explore the current codebase\n"
-        "  /castor-research  — deep-dive on a specific topic"
+        "  /castor:status    — verify the Antigravity (agy) CLI is ready\n"
+        "  /castor:auth      — sign in if not authenticated\n"
+        "  /castor:explore   — explore the current codebase\n"
+        "  /castor:research  — deep-dive on a specific topic\n"
+        "  /castor:index     — map the codebase for reuse as context\n"
+        "  /castor:review    — free second-opinion review of your changes\n"
+        "  /castor:usages    — trace where a symbol is used\n"
+        "  /castor:explain   — diagnose an error against the codebase"
     )
 
 

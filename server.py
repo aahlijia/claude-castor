@@ -1,19 +1,49 @@
 import fnmatch
+import hashlib
+import json
 import os
 import subprocess
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from fastmcp import FastMCP
 
 mcp = FastMCP("claude-castor")
+
+INSTALL_CMD = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
 
 SYSTEM_INSTRUCTION = """\
 You are a technical assistant. Respond with precision and structure.
 - Use clear headings and bullet points where appropriate
 - Include file names, line numbers, and symbol names when referencing code
 - Be concise — avoid filler; every sentence should carry information
-- If asked to index or summarize, produce output Claude can use as context\
+- If asked to index or summarize, produce output Claude can use as context
+- Do NOT narrate your actions (no "I will read..." / "I will view...")
+- Do NOT append a "Summary of Work" or similar trailing section
+- Reference files as plain paths, never as file:// links\
 """
+
+# Baked prompt for gemini_index — a compact, Claude-consumable repo map.
+INDEX_PROMPT = """\
+Produce a structured index of this codebase for another engineer to use as
+context. Include: the top-level directory layout with a one-line role for
+each entry, the entry points, the key modules and their main symbols, and
+how the major pieces connect. Be compact and reference real paths. Do NOT
+include file contents — just the map."""
+
+# Baked prompt for gemini_review — a correctness-focused diff review.
+REVIEW_PROMPT = """\
+Review this code diff as a careful senior engineer. Focus on correctness:
+bugs, broken edge cases, error handling, off-by-one and boundary issues,
+resource and concurrency mistakes, and anything that would fail at runtime.
+Skip pure style nitpicks. For each finding give the file, the relevant hunk,
+the problem, and a concrete fix. If you find nothing substantive, say so
+plainly rather than inventing concerns."""
 
 SKIP_DIRS = {
     ".git",
@@ -48,6 +78,24 @@ SKIP_EXTENSIONS = {
 }
 MAX_FILE_BYTES = 100 * 1024  # 100 KB per file
 MAX_TOTAL_BYTES = 800 * 1024  # 800 KB total inline content
+# Cap how many skipped paths are listed back, to bound the note size.
+MAX_SKIPPED_LISTED = 50
+
+# agy print mode waits this long for a single prompt to resolve.
+PRINT_TIMEOUT = "300s"
+# Subprocess wall-clock guard, slightly above PRINT_TIMEOUT.
+SUBPROCESS_TIMEOUT = 310
+
+# Cached responses older than this are treated as misses, bounding
+# staleness even when the git-SHA match would otherwise hold an entry.
+CACHE_TTL_SECONDS = 7 * 24 * 3600
+
+# True once a resumable agy conversation exists this server run. The MCP
+# server is long-lived, so this persists across tool calls: the first
+# gemini_prompt starts fresh, later continue_session=True calls resume it,
+# and gemini_reset clears it. Guards against resuming into nothing (or a
+# prior, unrelated task) when continue_session is the default for a caller.
+_session_active = False
 
 
 def _read_bytes(path: Path) -> bytes | None:
@@ -153,44 +201,476 @@ def _inline_directory(directory: str) -> str:
 
     result = "\n".join(blocks)
     if skipped:
-        n = len(skipped)
-        result += f"\n\n[Note: {n} file(s) skipped — too large or binary]"
+        listing = "\n".join(skipped[:MAX_SKIPPED_LISTED])
+        extra = len(skipped) - MAX_SKIPPED_LISTED
+        more = f"\n…and {extra} more" if extra > 0 else ""
+        result += (
+            "\n\n[Skipped files — too large or over the inline budget; "
+            f"request explicitly if needed]\n{listing}{more}"
+        )
     return result
 
 
-def _run_gemini(
-    prompt: str, trust: bool = False, cwd: str | None = None
-) -> str:
-    cmd = ["gemini", "--skip-trust"]
-    env = None
+_AUTH_MARKERS = (
+    "authentication required",
+    "please sign in",
+    "not signed in",
+    "login required",
+)
+
+
+def _needs_auth(text: str) -> bool:
+    """True if agy output indicates the user is not signed in."""
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_MARKERS)
+
+
+def _build_agy_cmd(
+    trust: bool,
+    add_dirs: list[str] | None,
+    continue_session: bool,
+    conversation_id: str | None,
+    model: str | None,
+    sandbox: bool,
+) -> list[str]:
+    """Assemble the agy print-mode command with the requested flags.
+
+    Access tier is mutually exclusive: trust (--dangerously-skip-
+    permissions) wins over sandbox (--sandbox); session resume by
+    conversation_id wins over continue_session.
+
+    Returns:
+        The full argv list for the agy subprocess.
+    """
+    cmd = ["agy", "--print", "--print-timeout", PRINT_TIMEOUT]
     if trust:
-        cmd = ["gemini"]
-        env = {**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"}
+        cmd.append("--dangerously-skip-permissions")
+    elif sandbox:
+        cmd.append("--sandbox")
+    for directory in add_dirs or []:
+        cmd.extend(["--add-dir", directory])
+    if conversation_id:
+        cmd.extend(["--conversation", conversation_id])
+    elif continue_session:
+        cmd.append("--continue")
+    if model:
+        cmd.extend(["--model", model])
+    return cmd
+
+
+def _run_agy(
+    prompt: str,
+    trust: bool = False,
+    cwd: str | None = None,
+    add_dirs: list[str] | None = None,
+    continue_session: bool = False,
+    conversation_id: str | None = None,
+    model: str | None = None,
+    sandbox: bool = False,
+) -> str:
+    """Run an agy print-mode prompt and return its stdout.
+
+    The prompt is piped via stdin (agy --print reads it from stdin),
+    so prompt size is not bounded by the command-line argument limit.
+
+    Args:
+        prompt: The fully-assembled prompt to send to agy.
+        trust: If True, pass --dangerously-skip-permissions so agy
+            auto-approves tool actions (writes, commands).
+        cwd: Working directory for the subprocess; roots agy's
+            workspace so it explores the correct project.
+        add_dirs: Extra directories to grant agy read access to via
+            repeated --add-dir flags.
+        continue_session: If True, pass --continue to resume agy's most
+            recent conversation. Ignored when conversation_id is set.
+        conversation_id: If set, pass --conversation <id> to resume a
+            specific conversation; takes precedence over
+            continue_session.
+        model: If set, pass --model <model> to select the agy model.
+            Call gemini_models for the available names.
+        sandbox: If True, pass --sandbox so agy explores with terminal
+            restrictions instead of auto-approving everything. Ignored
+            when trust is True (trust is the broader grant).
+
+    Returns:
+        agy's stdout, or a bracketed error/status string.
+    """
+    cmd = _build_agy_cmd(
+        trust=trust,
+        add_dirs=add_dirs,
+        continue_session=continue_session,
+        conversation_id=conversation_id,
+        model=model,
+        sandbox=sandbox,
+    )
+
     try:
         result = subprocess.run(
             cmd,
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=300,
-            env=env,
+            timeout=SUBPROCESS_TIMEOUT,
             cwd=cwd,
         )
     except FileNotFoundError:
-        return (
-            "[Error: `gemini` CLI not found. "
-            "Run: npm install -g @google/gemini-cli]"
-        )
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
     except subprocess.TimeoutExpired:
         return (
-            "[Error: Gemini timed out after 300s. "
-            "Try passing specific files instead of a full directory.]"
+            "[Error: Antigravity timed out. Try a narrower scope, "
+            "specific files, or fewer directories.]"
+        )
+
+    combined = result.stdout + result.stderr
+    if _needs_auth(combined):
+        return (
+            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
+            "to complete Google sign-in — it is a one-time step.]"
         )
 
     if result.returncode != 0 and result.stderr.strip():
-        return f"[Gemini error]\n{result.stderr.strip()}"
+        return f"[Antigravity error]\n{result.stderr.strip()}"
 
-    return result.stdout.strip() or "[No response from Gemini]"
+    return result.stdout.strip() or "[No response from Antigravity]"
+
+
+def _is_side_effect_free(
+    trust: bool, continue_session: bool, conversation_id: str | None
+) -> bool:
+    """True when a call only reads — safe to cache or replay.
+
+    trust=True may write files or run commands; session continuations
+    depend on mutable server state. Neither is safely cacheable.
+    """
+    return not trust and not continue_session and not conversation_id
+
+
+def _repo_fingerprint(cwd: str | None) -> str | None:
+    """Return a git HEAD + working-tree fingerprint for cwd.
+
+    Combines the HEAD commit with a hash of `git status --porcelain`, so
+    any staged, unstaged, or untracked change busts the cache. Returns
+    None when cwd is unset or not a git repository — the caller then
+    declines to cache explore-mode calls it cannot prove are unchanged.
+    """
+    if not cwd:
+        return None
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if head.returncode != 0:
+            return None
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    porcelain = hashlib.sha256(status.stdout.encode("utf-8")).hexdigest()
+    return f"{head.stdout.strip()}:{porcelain}"
+
+
+def _git_diff(cwd: str) -> str:
+    """Return uncommitted changes in cwd, or a bracketed error string.
+
+    Diffs the working tree (staged and unstaged) against HEAD, so it
+    captures the changes a user would want reviewed before committing.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return "[Error: `git` not found.]"
+    except subprocess.TimeoutExpired:
+        return "[Error: `git diff` timed out.]"
+
+    if result.returncode != 0:
+        return f"[Error: git diff failed]\n{result.stderr.strip()}"
+    return result.stdout
+
+
+def _cache_dir() -> Path:
+    """Return the on-disk cache directory (created lazily on write)."""
+    base = os.environ.get("XDG_CACHE_HOME")
+    root = Path(base) if base else Path.home() / ".cache"
+    return root / "claude-castor"
+
+
+def _cache_key(
+    prompt: str, model: str | None, sandbox: bool, fingerprint: str | None
+) -> str:
+    """Hash everything that affects the response into a stable key."""
+    payload = json.dumps(
+        {
+            "prompt": prompt,
+            "model": model or "",
+            "sandbox": sandbox,
+            "repo": fingerprint or "",
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cache_lookup_key(
+    prompt: str,
+    model: str | None,
+    sandbox: bool,
+    trust: bool,
+    continue_session: bool,
+    conversation_id: str | None,
+    cwd: str | None,
+) -> str | None:
+    """Return a cache key if this call is cacheable, else None.
+
+    Cacheable only when side-effect-free. Sandbox explores the
+    filesystem, so it is cached only when a repo fingerprint can prove
+    the code is unchanged; non-explore (inline/read-only) calls are
+    determined by the prompt alone and cache without one.
+    """
+    if not _is_side_effect_free(trust, continue_session, conversation_id):
+        return None
+    fingerprint = _repo_fingerprint(cwd)
+    if sandbox and fingerprint is None:
+        return None
+    return _cache_key(prompt, model, sandbox, fingerprint)
+
+
+def _cache_get(key: str) -> str | None:
+    """Return a cached response for key, or None on miss/expiry/error."""
+    path = _cache_dir() / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        entry = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if time.time() - entry.get("created_at", 0) > CACHE_TTL_SECONDS:
+        return None
+    return entry.get("response")
+
+
+def _cache_put(key: str, response: str, model: str | None) -> None:
+    """Store a response under key. Best-effort; never raises."""
+    cache_dir = _cache_dir()
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{key}.json").write_text(
+            json.dumps(
+                {
+                    "response": response,
+                    "model": model or "",
+                    "created_at": time.time(),
+                }
+            )
+        )
+    except OSError:
+        pass
+
+
+def _assemble_prompt(
+    prompt: str, raw: bool, files: list[str] | None, directory: str | None
+) -> str:
+    """Build the full prompt: system prefix, ask, then inlined content."""
+    parts: list[str] = []
+    if not raw:
+        parts.append(SYSTEM_INSTRUCTION)
+    parts.append(prompt)
+    if files:
+        parts.append(_inline_files(files))
+    if directory:
+        parts.append(_inline_directory(directory))
+    return "\n\n".join(parts)
+
+
+def _try_cache(
+    use_cache: bool,
+    prompt: str,
+    model: str | None,
+    sandbox: bool,
+    trust: bool,
+    continue_session: bool,
+    conversation_id: str | None,
+    cwd: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the cache for a call.
+
+    Returns:
+        A (key, cached_response) pair. key is None when the call is not
+        cacheable (so the caller skips storing too); cached_response is
+        None on a miss.
+    """
+    if not use_cache:
+        return None, None
+    key = _cache_lookup_key(
+        prompt, model, sandbox, trust, continue_session, conversation_id, cwd
+    )
+    if key is None:
+        return None, None
+    return key, _cache_get(key)
+
+
+def _dispatch(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    trust: bool = False,
+    cwd: str | None = None,
+    add_dirs: list[str] | None = None,
+    continue_session: bool = False,
+    conversation_id: str | None = None,
+    model: str | None = None,
+    sandbox: bool = False,
+    use_cache: bool = True,
+    track_session: bool = True,
+) -> str:
+    """Assemble, cache-check, run, and store a single agy prompt.
+
+    The shared core of gemini_prompt and the workflow tools
+    (gemini_index, gemini_review, ...). Enforces the trust/cwd guard, the
+    side-effect-free cache gate, and session bookkeeping in one place so
+    every caller handles caching and sessions identically.
+
+    Args:
+        track_session: When True, mark the server session active after a
+            real response so later continue_session calls resume it. Set
+            False for background jobs, which run concurrently and must not
+            race on the shared session state.
+
+    Returns:
+        agy's response, a cached response, or a bracketed error string.
+    """
+    if trust and not cwd:
+        return (
+            "[Error: cwd is required when trust=True so agy's workspace "
+            "is rooted in the correct project directory. Pass the "
+            "absolute path of the user's project.]"
+        )
+
+    assembled = _assemble_prompt(prompt, raw, files, directory)
+    cache_key, cached = _try_cache(
+        use_cache,
+        assembled,
+        model,
+        sandbox,
+        trust,
+        continue_session,
+        conversation_id,
+        cwd,
+    )
+    if cached is not None:
+        return cached
+
+    global _session_active
+    resume = continue_session and _session_active and not conversation_id
+    response = _run_agy(
+        assembled,
+        trust=trust,
+        cwd=cwd,
+        add_dirs=add_dirs,
+        continue_session=resume,
+        conversation_id=conversation_id,
+        model=model,
+        sandbox=sandbox,
+    )
+    # Bracketed returns are errors/status, not real conversations, so
+    # only mark a session active (and cache) when agy actually responded.
+    if not response.startswith("["):
+        if track_session:
+            _session_active = True
+        if cache_key is not None:
+            _cache_put(cache_key, response, model)
+    return response
+
+
+# Background-job subsystem. agy print mode blocks for up to PRINT_TIMEOUT;
+# these let a long prompt run off-thread so Claude can keep working and
+# collect the result later via gemini_poll. Jobs are in-memory only — a
+# server restart drops them. Concurrency is capped by the pool so a
+# fan-out cannot spawn unbounded agy processes.
+JOB_POOL_SIZE = 4
+MAX_JOBS = 50
+
+
+@dataclass
+class _Job:
+    """State of one background agy job.
+
+    Attributes:
+        status: "running", "done", or "error".
+        started_at: Unix time the job was submitted.
+        finished_at: Unix time it completed, or None while running.
+        response: The result (real response when done, bracketed message
+            when error), or None while running.
+    """
+
+    status: str
+    started_at: float
+    finished_at: float | None = None
+    response: str | None = None
+
+
+_jobs: dict[str, _Job] = {}
+_jobs_lock = threading.Lock()
+_job_pool = ThreadPoolExecutor(max_workers=JOB_POOL_SIZE)
+
+
+def _evict_jobs() -> None:
+    """Drop the oldest finished jobs to keep _jobs under MAX_JOBS.
+
+    The caller must hold _jobs_lock. Only finished jobs are evicted, so a
+    running job is never dropped out from under a pending poll.
+    """
+    if len(_jobs) < MAX_JOBS:
+        return
+    finished = sorted(
+        (
+            (jid, job)
+            for jid, job in _jobs.items()
+            if job.finished_at is not None
+        ),
+        key=lambda kv: kv[1].finished_at or 0,
+    )
+    for jid, _ in finished:
+        if len(_jobs) < MAX_JOBS:
+            break
+        del _jobs[jid]
+
+
+def _run_job(job_id: str, kwargs: dict[str, Any]) -> None:
+    """Worker body: run the prompt, then record the outcome on the job.
+
+    Runs with track_session=False so background completion never mutates
+    the shared session state the synchronous path depends on. A bracketed
+    response (agy error/status) is recorded as an "error" outcome.
+    """
+    try:
+        response = _dispatch(track_session=False, **kwargs)
+    except Exception as exc:  # worker must never crash silently
+        response = f"[Job crashed: {exc}]"
+
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job.status = "error" if response.startswith("[") else "done"
+        job.response = response
+        job.finished_at = time.time()
 
 
 @mcp.tool()
@@ -201,8 +681,14 @@ def gemini_prompt(
     raw: bool = False,
     trust: bool = False,
     cwd: str | None = None,
+    add_dirs: list[str] | None = None,
+    continue_session: bool = False,
+    conversation_id: str | None = None,
+    model: str | None = None,
+    sandbox: bool = False,
+    use_cache: bool = True,
 ) -> str:
-    """Send a prompt to Gemini and return the response.
+    """Send a prompt to Antigravity (agy) and return the response.
 
     Use this to offload large-context work — file exploration, indexing,
     summarization, cross-file analysis, research. Claude should construct
@@ -210,117 +696,512 @@ def gemini_prompt(
     and where you are in the task), followed by a specific ask.
     See GEMINI.md for the full prompting guide.
 
-    Only pass `files` or `directory` if the user explicitly mentioned them.
-    Do not crawl the filesystem on the user's behalf — that is Gemini's job.
+    agy explores the workspace on its own when rooted via `cwd`, so
+    prefer that over inlining. Only pass `files` or `directory` to inline
+    content when the user explicitly named specific files.
+
+    For multi-step work against the same codebase, pass
+    continue_session=True so agy resumes its prior conversation instead
+    of re-exploring from cold. Call gemini_reset to start fresh.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
         files: Absolute paths to files to inline into the prompt.
         directory: A directory whose contents should be inlined.
         raw: If True, skip structured response instructions.
-        trust: If True, run Gemini in full agent mode with filesystem
-            access. Only use after the user has completed OAuth via
-            `gemini_setup`. Default is False (safe headless mode).
-        cwd: Working directory for the Gemini subprocess. Required when
-            using trust=True so Gemini's filesystem access is rooted in
-            the correct project directory. Pass the absolute path of the
-            user's current project.
+        trust: If True, pass --dangerously-skip-permissions so agy
+            auto-approves tool actions (writes, commands). Requires
+            `cwd`. Default False keeps agy read-only.
+        cwd: Working directory for the agy subprocess. Required when
+            using trust=True so agy's workspace is rooted in the user's
+            project. Pass the absolute project path.
+        add_dirs: Extra directories to grant agy read access to (via
+            --add-dir) without inlining them. Lets agy explore them.
+        continue_session: If True, resume agy's existing conversation so
+            it keeps prior context. Has no effect on the first call of a
+            server run (or right after gemini_reset) — that call starts
+            fresh and establishes the session.
+        conversation_id: Resume a specific agy conversation by ID. Takes
+            precedence over continue_session when set.
+        model: Select the agy model (e.g. a faster model for light
+            summarization, a stronger one for deep reasoning). Call
+            gemini_models for the available names. Defaults to agy's
+            configured default.
+        sandbox: If True, agy explores the filesystem (like trust) but
+            runs under terminal restrictions and does not blindly
+            auto-approve actions — the safe middle ground between
+            read-only and trust. Ignored when trust=True.
+        use_cache: If True (default), reuse a stored response when the
+            same prompt is re-sent against an unchanged repo (matched by
+            git HEAD + working-tree state). Only side-effect-free calls
+            are cached — never trust mode or session continuations. Set
+            False to force a fresh run. Clear with gemini_cache_clear.
+    """
+    return _dispatch(
+        prompt,
+        files=files,
+        directory=directory,
+        raw=raw,
+        trust=trust,
+        cwd=cwd,
+        add_dirs=add_dirs,
+        continue_session=continue_session,
+        conversation_id=conversation_id,
+        model=model,
+        sandbox=sandbox,
+        use_cache=use_cache,
+    )
+
+
+@mcp.tool()
+def gemini_index(cwd: str, model: str | None = None) -> str:
+    """Produce a structured map of a codebase for use as context.
+
+    Runs agy as a sandboxed explorer rooted at cwd — it navigates the
+    project on its own and returns a compact index: directory layout,
+    entry points, key modules and symbols, and how they connect. This is
+    the canonical "give me context I can reuse" call: it is side-effect-
+    free, so when cwd is a git repo the result is cached against the repo
+    state and re-runs are instant.
+
+    Args:
+        cwd: Absolute path to the project root to index.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        A structured codebase index, or a bracketed error string.
+    """
+    return _dispatch(INDEX_PROMPT, sandbox=True, cwd=cwd, model=model)
+
+
+@mcp.tool()
+def gemini_review(
+    cwd: str, diff: str | None = None, model: str | None = None
+) -> str:
+    """Get a free second-opinion review of a code diff from agy.
+
+    Sends a diff to agy for a correctness-focused review at no cost to
+    Claude's context. When diff is omitted, the uncommitted changes in
+    cwd (staged and unstaged, via `git diff HEAD`) are reviewed. The diff
+    is inlined, so the review is cached on the diff content. Complements —
+    does not replace — Claude's own /code-review.
+
+    Args:
+        cwd: Absolute path to the git repository.
+        diff: A unified diff to review. When None, the uncommitted
+            changes in cwd are captured automatically.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        Review findings, or a bracketed error/status string.
+    """
+    if diff is None:
+        diff = _git_diff(cwd)
+        if diff.startswith("["):
+            return diff
+    if not diff.strip():
+        return (
+            "[No diff to review — the working tree is clean or the "
+            "provided diff is empty.]"
+        )
+    return _dispatch(f"{REVIEW_PROMPT}\n\n[DIFF]\n{diff}", model=model)
+
+
+@mcp.tool()
+def gemini_find_usages(cwd: str, symbol: str, model: str | None = None) -> str:
+    """Find where and how a symbol is used across a codebase.
+
+    Runs agy as a sandboxed explorer rooted at cwd to locate every use of
+    `symbol` and summarize how it is used, with paths and line
+    references. Side-effect-free, so the result is cached against the
+    repo state when cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        symbol: The symbol name to trace (function, class, variable, …).
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        A usage report, or a bracketed error string.
+    """
+    prompt = (
+        f"Find every place the symbol `{symbol}` is used across this "
+        "codebase. For each occurrence give the file path, the line, and "
+        "a short note on how it is used (definition, call, import, "
+        "re-export, test, etc.). Group by file and end with a one-line "
+        "summary of the symbol's role. Reference real paths and line "
+        "numbers."
+    )
+    return _dispatch(prompt, sandbox=True, cwd=cwd, model=model)
+
+
+@mcp.tool()
+def gemini_explain_error(
+    cwd: str, error: str, model: str | None = None
+) -> str:
+    """Explain an error or stack trace against the codebase.
+
+    Runs agy as a sandboxed explorer rooted at cwd to trace the error to
+    its likely source and return ranked root-cause hypotheses with the
+    files to check. Side-effect-free, so the result is cached against the
+    repo state when cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        error: The error message or stack trace to diagnose.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        Ranked root-cause hypotheses, or a bracketed error string.
+    """
+    prompt = (
+        "Diagnose this error against the codebase. Trace it to its likely "
+        "source and return the most probable root causes, ranked, each "
+        "with the specific file(s) and line(s) to check and why. Be "
+        f"concrete.\n\n[ERROR]\n{error}"
+    )
+    return _dispatch(prompt, sandbox=True, cwd=cwd, model=model)
+
+
+@mcp.tool()
+def gemini_start(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    trust: bool = False,
+    cwd: str | None = None,
+    add_dirs: list[str] | None = None,
+    model: str | None = None,
+    sandbox: bool = False,
+    use_cache: bool = True,
+) -> str:
+    """Start an agy prompt in the background and return a job id.
+
+    Use this for long explorations or fan-out (start several jobs across
+    subtrees, then synthesize) so Claude is not blocked for the full agy
+    timeout. The job runs off-thread; collect its result with gemini_poll.
+
+    Background jobs are fresh-only by construction — they do not accept
+    continue_session or conversation_id and never touch the shared session
+    state, because concurrent jobs would race on it. For stateful,
+    multi-turn work use the synchronous gemini_prompt instead.
+
+    Args:
+        prompt: The fully-formed prompt Claude has constructed.
+        files: Absolute paths to files to inline into the prompt.
+        directory: A directory whose contents should be inlined.
+        raw: If True, skip structured response instructions.
+        trust: If True, full agent mode (requires cwd). Note: trust runs
+            are never cached.
+        cwd: Working directory for the agy subprocess. Required when
+            trust=True.
+        add_dirs: Extra directories to grant agy read access to.
+        model: Select the agy model (see gemini_models).
+        sandbox: If True, agy explores under terminal restrictions.
+            Ignored when trust=True.
+        use_cache: If True (default), a cache hit completes the job
+            immediately without spawning agy.
+
+    Returns:
+        A message with the job id to pass to gemini_poll, or a bracketed
+        error string (e.g. when trust=True is missing cwd).
     """
     if trust and not cwd:
         return (
-            "[Error: cwd is required when trust=True so Gemini's "
-            "filesystem access is rooted in the correct project "
-            "directory. Pass the absolute path of the user's project.]"
+            "[Error: cwd is required when trust=True so agy's workspace "
+            "is rooted in the correct project directory. Pass the "
+            "absolute path of the user's project.]"
         )
 
-    parts: list[str] = []
+    kwargs: dict[str, Any] = {
+        "prompt": prompt,
+        "files": files,
+        "directory": directory,
+        "raw": raw,
+        "trust": trust,
+        "cwd": cwd,
+        "add_dirs": add_dirs,
+        "model": model,
+        "sandbox": sandbox,
+        "use_cache": use_cache,
+    }
+    job_id = uuid.uuid4().hex[:8]
+    with _jobs_lock:
+        _evict_jobs()
+        _jobs[job_id] = _Job(status="running", started_at=time.time())
+    _job_pool.submit(_run_job, job_id, kwargs)
+    return (
+        f"Started background job {job_id}. Poll it with "
+        f'gemini_poll("{job_id}") — do other work first, then check back.'
+    )
 
-    if not raw:
-        parts.append(SYSTEM_INSTRUCTION)
 
-    parts.append(prompt)
+@mcp.tool()
+def gemini_poll(job_id: str) -> str:
+    """Check a background job started with gemini_start.
 
-    if files:
-        parts.append(_inline_files(files))
+    Args:
+        job_id: The id returned by gemini_start.
 
-    if directory:
-        parts.append(_inline_directory(directory))
+    Returns:
+        While running, a bracketed status with elapsed seconds. When done,
+        agy's response. On error, a bracketed message. For an unknown id,
+        a bracketed not-found note.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return (
+                f"[Unknown job {job_id} — it may have been evicted or "
+                "never existed.]"
+            )
+        status, response = job.status, job.response
+        started, finished = job.started_at, job.finished_at
 
-    return _run_gemini("\n\n".join(parts), trust=trust, cwd=cwd)
+    if status == "running":
+        elapsed = int(time.time() - started)
+        return (
+            f"[Job {job_id} still running — {elapsed}s elapsed. "
+            "Poll again shortly.]"
+        )
+
+    took = int((finished or time.time()) - started)
+    if status == "error":
+        return f"[Job {job_id} failed after {took}s]\n{response}"
+    return response or "[No response from Antigravity]"
+
+
+@mcp.tool()
+def gemini_jobs() -> str:
+    """List background jobs and their status.
+
+    Returns:
+        One line per job (id, status, age/duration), newest last, or a
+        note when there are none.
+    """
+    with _jobs_lock:
+        if not _jobs:
+            return "No background jobs."
+        now = time.time()
+        lines = []
+        for jid, job in sorted(_jobs.items(), key=lambda kv: kv[1].started_at):
+            secs = int((job.finished_at or now) - job.started_at)
+            lines.append(f"{jid}  {job.status:<8} {secs}s")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def gemini_reset() -> str:
+    """Forget the current Antigravity session so the next call is fresh.
+
+    Clears the server-side marker that continue_session relies on, so the
+    next gemini_prompt with continue_session=True starts a new agy
+    conversation instead of resuming the prior one. Use this at task
+    boundaries to avoid carrying stale context between unrelated jobs.
+    """
+    global _session_active
+    _session_active = False
+    return (
+        "Session reset — the next gemini_prompt with continue_session=True "
+        "will start a fresh context instead of resuming."
+    )
+
+
+@mcp.tool()
+def gemini_cache_clear() -> str:
+    """Delete all cached Antigravity responses.
+
+    gemini_prompt reuses a stored response when the same prompt is
+    re-sent against an unchanged repo (matched by git HEAD + working-tree
+    state). Clear the cache to force fresh runs — e.g. after changing
+    agy's config or its default model, or to reclaim disk.
+    """
+    cache_dir = _cache_dir()
+    if not cache_dir.exists():
+        return "Cache is already empty — nothing to clear."
+
+    removed = 0
+    for entry in cache_dir.glob("*.json"):
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError:
+            pass
+
+    return f"Cleared {removed} cached response(s) from {cache_dir}."
+
+
+@mcp.tool()
+def gemini_models() -> str:
+    """List the models available to Antigravity (agy).
+
+    Returns the names you can pass as the `model` argument to
+    gemini_prompt. Requires sign-in — if not authenticated, returns the
+    sign-in instruction instead.
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "models"], capture_output=True, text=True, timeout=30
+        )
+    except FileNotFoundError:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+    except subprocess.TimeoutExpired:
+        return "[Error: `agy models` timed out.]"
+
+    combined = result.stdout + result.stderr
+    if _needs_auth(combined):
+        return (
+            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
+            "to complete Google sign-in — it is a one-time step.]"
+        )
+
+    if result.returncode != 0 and result.stderr.strip():
+        return f"[Antigravity error]\n{result.stderr.strip()}"
+
+    return result.stdout.strip() or "[No models reported by Antigravity]"
+
+
+@mcp.tool()
+def gemini_auth() -> str:
+    """Return instructions for the user to sign in to Antigravity.
+
+    Sign-in is interactive: agy prints an OAuth URL, the user consents
+    in the browser, and agy waits for that to complete. An MCP tool call
+    blocks Claude while it runs, so it cannot drive an interactive flow —
+    the user has no way to act while the tool is pending. Instead, this
+    returns an instruction for the user to run the sign-in command
+    themselves directly in the Claude Code prompt.
+
+    Call this when `gemini_status` or `gemini_prompt` reports that the
+    user is not signed in.
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except FileNotFoundError:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+
+    if result.returncode != 0:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+
+    return (
+        "To sign in to Antigravity, type this in the Claude Code prompt "
+        "(the `!` runs it as a live terminal command):\n\n"
+        '    ! agy -p "ok"\n\n'
+        "Complete the Google consent in your browser when agy prints the "
+        "sign-in URL. This is a one-time step — the token persists in the "
+        "system keyring, so later calls run without prompts."
+    )
 
 
 @mcp.tool()
 def gemini_setup() -> str:
-    """Return setup instructions for Gemini OAuth and agent mode.
+    """Return setup instructions for Antigravity (agy).
 
-    Call this when the user wants to set up Gemini for the first time
-    or wants to enable deep research mode with filesystem access.
+    Call this when the user wants to set up Antigravity for the first
+    time or wants to enable agent mode with filesystem access.
     """
-    return """\
-To enable full Gemini agent mode with filesystem access, complete
-Google OAuth once (first time only).
+    return f"""\
+To use Antigravity (the `agy` CLI), install it and sign in once.
 
-Tell the user to type the following in the Claude Code prompt:
+1. Install (if `gemini_status` reports NOT INSTALLED):
 
-    ! gemini --skip-trust
+    {INSTALL_CMD}
 
-They should:
-  1. Complete the Google OAuth flow in the browser
-  2. Exit with /exit or Ctrl+C
+2. Sign in (one-time). Tell the user to type this in the Claude Code
+   prompt (the `!` runs it as a live terminal command):
 
-No directory trust step is needed — the MCP server sets
-GEMINI_CLI_TRUST_WORKSPACE automatically when trust=True is used.
+    ! agy -p "ok"
 
-Once OAuth is complete, call gemini_prompt with trust=True for full
-agent mode: Gemini can explore the filesystem, search code, and
-follow imports on its own.\
+   then complete the Google consent in the browser. The token is saved
+   in the system keyring, so later calls run without prompts. The
+   `gemini_auth` tool returns these same instructions.
+
+Once signed in, call gemini_prompt with trust=True (and cwd set to the
+project path) for full agent mode: agy explores the filesystem, runs
+tools, and follows imports on its own.\
 """
+
+
+def _status_extras() -> str:
+    """Best-effort niceties appended to a READY status line.
+
+    Every lookup is non-fatal — any failure returns an empty string, so a
+    missing nicety never downgrades a READY status. Account and version
+    freshness are intentionally omitted: agy exposes no whoami command,
+    and `agy update` performs an update rather than a safe check.
+
+    Returns:
+        A newline-prefixed suffix listing available models, or "".
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "models"], capture_output=True, text=True, timeout=15
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+    if result.returncode != 0:
+        return ""
+
+    models = result.stdout.strip()
+    if not models or _needs_auth(models + result.stderr):
+        return ""
+
+    shown = "\n".join(models.splitlines()[:10])
+    return f"\nModels available:\n{shown}"
 
 
 @mcp.tool()
 def gemini_status() -> str:
-    """Check that the gemini CLI is installed and authenticated.
+    """Check that the agy CLI is installed and signed in.
 
     Run before first use or when troubleshooting. Returns a status
-    string with fix instructions if not ready.
+    string with fix instructions if not ready. When READY, also lists the
+    available models (best-effort; omitted silently if unavailable).
     """
+    not_installed = f"NOT INSTALLED: `agy` CLI not found.\nFix: {INSTALL_CMD}"
+
     try:
         version_result = subprocess.run(
-            ["gemini", "--version"], capture_output=True, text=True, timeout=10
+            ["agy", "--version"], capture_output=True, text=True, timeout=10
         )
     except FileNotFoundError:
-        return (
-            "NOT INSTALLED: `gemini` CLI not found.\n"
-            "Fix: npm install -g @google/gemini-cli"
-        )
+        return not_installed
 
     if version_result.returncode != 0:
-        return (
-            "NOT INSTALLED: `gemini` CLI not found.\n"
-            "Fix: npm install -g @google/gemini-cli"
-        )
+        return not_installed
 
     version = version_result.stdout.strip()
 
     try:
         auth_result = subprocess.run(
-            ["gemini", "--skip-trust"],
+            ["agy", "--print", "--print-timeout", "30s"],
             input="Reply with exactly the word: OK",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=40,
         )
     except FileNotFoundError:
-        return "NOT INSTALLED: `gemini` CLI not found."
+        return not_installed
+
+    combined = auth_result.stdout + auth_result.stderr
+    if _needs_auth(combined):
+        return (
+            f"NOT SIGNED IN: agy {version} installed but not "
+            "authenticated.\n"
+            'Fix: run the `gemini_auth` tool (or `! agy -p "ok"`).'
+        )
 
     if auth_result.returncode != 0:
         return (
-            f"NOT AUTHENTICATED: CLI found ({version}) but auth failed.\n"
-            "Fix: run `gemini` interactively to complete Google OAuth.\n"
+            f"ERROR: agy {version} installed but a test prompt failed.\n"
             f"Error: {auth_result.stderr.strip()}"
         )
 
-    return f"READY — {version}"
+    return f"READY — agy {version}{_status_extras()}"
 
 
 if __name__ == "__main__":
