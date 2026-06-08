@@ -1,6 +1,6 @@
 [project]
 name = "claude-castor"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp",
@@ -10,3 +10,81 @@ dependencies = [
 dev = [
     "ruff>=0.15.12",
 ]
+
+[tool.ruff]
+line-length = 79
+target-version = "py38"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+
+[tool.ruff.lint]
+select = ['F', 'E', 'I']
+dummy-variable-rgx = '^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$'
+extend-select = ['W', 'N', 'ANN', 'B', 'A', 'C4', 'PERF', 'RUF']
+ignore = ['I001', 'N999', 'ANN401', 'B905', 'PERF203', 'RUF013']
+fixable = ['ALL']
+unfixable = []
+
+[tool.ruff.lint.isort]
+force-single-line = true
+force-sort-within-sections = false
+lines-after-imports = 2
+known-first-party = []
+known-local-folder = []
+known-third-party = []
+section-order = [
+    'future',
+    'standard-library',
+    'third-party',
+    'first-party',
+    'local-folder',
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pycodestyle]
+ignore-overlong-task-comments = true
+
+[tool.ruff.lint.pydocstyle]
+convention = 'google'
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+
+[tool.ruff.format]
+quote-style = 'double'
+indent-style = 'space'
+skip-magic-trailing-comma = false
+line-ending = 'auto'
+preview = false
+docstring-code-format = true
+
+[tool.pyright]
+pythonVersion = '3.12'
+typeCheckingMode = 'basic'
+# enable subset of 'strict'
+reportDuplicateImport = true
+reportInvalidStubStatement = true
+reportOverlappingOverload = true
+reportPropertyTypeMismatch = true
+reportUntypedClassDecorator = false
+reportUntypedFunctionDecorator = false
+reportUntypedNamedTuple = false
+reportUnusedImport = true
+# disable subset of 'basic'
+reportGeneralTypeIssues = false
+reportMissingModuleSource = false
+reportOptionalCall = false
+reportOptionalIterable = false
+reportOptionalMemberAccess = false
+reportOptionalOperand = false
+reportOptionalSubscript = false
+reportPrivateImportUsage = false
+reportUnboundVariable = false
+exclude = ['docs', 'setup.py', 'venv']
