@@ -1,8 +1,10 @@
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -13,7 +15,63 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+# Parse --log-file from sys.argv
+_log_file_path = None
+_new_argv = []
+_idx = 0
+while _idx < len(sys.argv):
+    _arg = sys.argv[_idx]
+    if _arg == "--log-file":
+        if _idx + 1 < len(sys.argv):
+            _log_file_path = sys.argv[_idx + 1]
+            _idx += 2
+            continue
+    elif _arg.startswith("--log-file="):
+        _log_file_path = _arg.split("=", 1)[1]
+        _idx += 1
+        continue
+    _new_argv.append(_arg)
+    _idx += 1
+sys.argv = _new_argv
+
+logger = logging.getLogger("claude-castor")
+logger.addHandler(logging.NullHandler())
+
+_file_handler = None
+if _log_file_path:
+    try:
+        _log_path = Path(_log_file_path).resolve()
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        _file_handler = logging.FileHandler(_log_path, encoding="utf-8")
+        _formatter = logging.Formatter(
+            "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        _file_handler.setFormatter(_formatter)
+        logger.addHandler(_file_handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    except Exception as _e:
+        sys.stderr.write(f"Failed to configure logging: {_e}\n")
+
 mcp = FastMCP("claude-castor")
+
+if _log_file_path and _file_handler:
+    try:
+        _fastmcp_logger = logging.getLogger("fastmcp")
+        _fastmcp_logger.addHandler(_file_handler)
+        _fastmcp_logger.setLevel(logging.INFO)
+
+        _root_logger = logging.getLogger()
+        _root_logger.addHandler(_file_handler)
+        _root_logger.setLevel(logging.INFO)
+
+        logger.info(
+            "Logging initialized. Server starting up. Writing logs to %s",
+            _log_file_path,
+        )
+    except Exception as _e:
+        pass
 
 INSTALL_CMD = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
 AUTH_HINT = (
@@ -330,6 +388,13 @@ def _run_agy(
         sandbox=sandbox,
     )
 
+    logger.info(
+        "run_agy: executing cmd=%s input_len=%d cwd=%s",
+        cmd,
+        len(prompt),
+        cwd,
+    )
+    t0 = time.time()
     try:
         result = subprocess.run(
             cmd,
@@ -340,21 +405,39 @@ def _run_agy(
             cwd=cwd,
         )
     except FileNotFoundError:
+        logger.error("run_agy: agy CLI not found")
         return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
     except subprocess.TimeoutExpired:
+        logger.error(f"run_agy: timed out after {SUBPROCESS_TIMEOUT}s")
         return (
             "[Error: Antigravity timed out. Try a narrower scope, "
             "specific files, or fewer directories.]"
         )
 
+    duration = time.time() - t0
+    logger.info(
+        "run_agy: finished in %.2fs with returncode=%d "
+        "stdout_len=%d stderr_len=%d",
+        duration,
+        result.returncode,
+        len(result.stdout),
+        len(result.stderr),
+    )
+
     combined = result.stdout + result.stderr
     if _needs_auth(combined):
+        logger.warning("run_agy: user needs authentication")
         return f"[Not signed in to Antigravity. {AUTH_HINT}]"
 
     if result.returncode != 0 and result.stderr.strip():
+        logger.error(
+            f"run_agy: subprocess failed with stderr: {result.stderr.strip()}"
+        )
         return f"[Antigravity error]\n{result.stderr.strip()}"
 
-    return result.stdout.strip() or "[No response from Antigravity]"
+    res = result.stdout.strip() or "[No response from Antigravity]"
+    logger.info(f"run_agy: returning result (length={len(res)})")
+    return res
 
 
 def _is_side_effect_free(
@@ -665,11 +748,27 @@ def _dispatch(
         agy's response, a cached response, or a bracketed error string.
     """
     if trust and not cwd:
+        logger.warning("dispatch: trust=True but cwd is missing")
         return (
             "[Error: cwd is required when trust=True so agy's workspace "
             "is rooted in the correct project directory. Pass the "
             "absolute path of the user's project.]"
         )
+
+    logger.info(
+        "dispatch: prompt_len=%d files=%s directory=%s raw=%s trust=%s "
+        "sandbox=%s model=%s cwd=%s continue_session=%s conversation_id=%s",
+        len(prompt),
+        files,
+        directory,
+        raw,
+        trust,
+        sandbox,
+        model or "default",
+        cwd,
+        continue_session,
+        conversation_id,
+    )
 
     assembled = _assemble_prompt(prompt, raw, files, directory)
     cache_key, cached = _try_cache(
@@ -683,7 +782,10 @@ def _dispatch(
         cwd,
     )
     if cached is not None:
+        logger.info(f"dispatch: cache hit for key={cache_key}")
         return cached
+    if cache_key is not None:
+        logger.info(f"dispatch: cache miss for key={cache_key}")
 
     global _session_active
     resume = continue_session and _session_active and not conversation_id
@@ -700,10 +802,13 @@ def _dispatch(
     # Bracketed returns are errors/status, not real conversations, so
     # only mark a session active (and cache) when agy actually responded.
     if not response.startswith("["):
+        logger.info(f"dispatch: success, response_len={len(response)}")
         if track_session:
             _session_active = True
         if cache_key is not None:
             _cache_put(cache_key, response, model)
+    else:
+        logger.warning(f"dispatch: returned status/error response: {response}")
     return response
 
 
