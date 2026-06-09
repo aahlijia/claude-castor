@@ -4,7 +4,45 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
- 
+
+## [0.4.0] - 2026-06-08
+
+### Added
+
+- **Three new workflow tools** — `gemini_summarize(cwd, target)` returns a
+  token-lean `{summary, key_points}` of a file or directory;
+  `gemini_semantic_search(cwd, query)` finds code by natural-language intent and
+  returns ranked `[{path, line, reason}]` hits (≤20, distinct from the
+  symbol-exact `gemini_find_usages`); `gemini_document(cwd, target)` drafts
+  docstrings/docs in the project's inferred style (return-only — it never writes
+  files). All are sandbox-tier, side-effect-free, and cached against the repo
+  state. New `/castor:summarize`, `/castor:search`, and `/castor:document` skills.
+- **Client-side sessions** — multi-turn context is now **Castor-owned**. The
+  transcript is stored under `~/.cache/claude-castor/sessions/<project>/<name>.json`
+  and replayed into a fresh `agy --print` call each turn. Pass `session="<name>"`
+  to `gemini_prompt` (or `continue_session=True` for the default session). New
+  tools `gemini_sessions`, `gemini_session_show`, and `gemini_session_delete`, plus
+  a `/castor:session` skill. Sessions are project-scoped (keyed by repo-root path,
+  so they survive commits and restarts), never cached, and evicted after 30 idle
+  days. Replays past ~24k chars auto-compress older turns into a rolling summary
+  (via a cheap model), keeping the last 3 turns verbatim.
+
+### Changed
+
+- **`gemini_prompt`** gains a `session` param and **drops `conversation_id`**.
+  `continue_session=True` now maps to the project's default session
+  (`__default__`) on the new transcript machinery, so it works across server
+  restarts for the first time. A session requires `cwd`.
+- **`gemini_reset`** now takes `cwd` and clears that project's default session
+  (it previously cleared a global in-memory flag).
+
+### Removed
+
+- The agy-`--continue` / `--conversation` session path and the in-memory
+  `_session_active` flag — superseded by Castor-owned transcript replay. This
+  also retires the previously unverified reliance on agy emitting conversation
+  state.
+
 ## [0.3.0] - 2026-06-08
 
 ### Added (continued)

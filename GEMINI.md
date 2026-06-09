@@ -125,20 +125,24 @@ Use `trust=True` when:
 ## Sessions
 
 By default every `gemini_prompt` call is **cold** — agy re-explores the codebase from
-scratch, re-spending its time budget. For multi-step work against the same project,
-pass `continue_session=True` so agy resumes its prior conversation and keeps the
-context it already built.
+scratch. For multi-step work against the same project, pass a `session` name (e.g.
+`session="refactor-auth"`), or `continue_session=True` for the project's default
+session. Sessions are **Castor-owned**: the transcript is stored on disk and replayed
+into a fresh `agy --print` call each turn (agy's own `--continue` is not used), so a
+session is project-scoped and survives restarts.
 
-- The **first** call of a server run (or the first after `gemini_reset`) always starts
-  fresh, even with `continue_session=True` — that call establishes the session.
-- **Subsequent** calls with `continue_session=True` resume it.
-- Call `gemini_reset` at a task boundary to drop stale context before starting an
-  unrelated job, so the next continued call does not carry over the prior topic.
-- `conversation_id` resumes a specific agy conversation by ID and takes precedence over
-  `continue_session`. Only use it when you have an ID to resume.
+- Sessions require `cwd` (they are keyed by the project root path).
+- The **first** call with a given `session` starts fresh and establishes it;
+  **subsequent** calls with the same name replay the accumulated transcript.
+- Long transcripts auto-compress: once a replay exceeds the budget, older turns are
+  folded into a rolling summary and the last few are kept verbatim — you don't manage
+  this.
+- Call `gemini_reset(cwd)` to clear the **default** session at a task boundary.
+  For named sessions, use `gemini_session_delete(cwd, name)`; list with
+  `gemini_sessions(cwd)` and inspect with `gemini_session_show(cwd, name)`.
 
 Pattern: run a broad `/castor:explore` first, then follow up with narrower
-`continue_session=True` prompts that build on what agy already learned.
+`session="…"` prompts that build on what agy already learned.
 
 ---
 
@@ -194,8 +198,8 @@ When to reach for it:
   questions, then poll them and synthesize — far faster than serial calls.
 
 Rules:
-- `gemini_start` is **fresh-only**: it does not take `continue_session` or
-  `conversation_id`. For stateful multi-turn work, stay on `gemini_prompt`.
+- `gemini_start` is **fresh-only**: it takes no `session` / `continue_session`.
+  For stateful multi-turn work, stay on `gemini_prompt` with a `session` name.
 - It accepts the same other args as `gemini_prompt` (`trust`, `cwd`, `sandbox`,
   `model`, `files`, `directory`, `use_cache`). A cache hit finishes instantly.
 - Don't poll in a tight loop — do real work between polls. Jobs are in-memory, so
@@ -214,7 +218,7 @@ a git repo.
 What is **not** cached:
 
 - `trust=True` calls — they may write files or run commands, so they always re-run.
-- Session continuations (`continue_session` / `conversation_id`) — stateful.
+- Session calls (`session` / `continue_session`) — stateful; stored separately.
 - `sandbox=True` calls outside a git repo — the code's freshness can't be proven.
 - Error/status responses (bracketed output).
 
@@ -240,16 +244,19 @@ Implications for how you call the tool:
 | Need to understand a large codebase (deep/custom) | `gemini_prompt` with `trust=True` + `cwd` |
 | Review a diff for free | `gemini_review` with `cwd` |
 | Trace a symbol's usages | `gemini_find_usages` with `cwd` + `symbol` |
+| Find code by intent (no exact name) | `gemini_semantic_search` with `cwd` + `query` |
+| Summarize a large file/dir | `gemini_summarize` with `cwd` + `target` |
+| Draft docs for a symbol/file | `gemini_document` with `cwd` + `target` |
 | Diagnose an error/stack trace | `gemini_explain_error` with `cwd` + `error` |
 | User mentions a specific file | `gemini_prompt` with that file in `files` |
 | User says "explore the project" | `gemini_prompt` with `trust=True` + `cwd`, no files |
 | Need raw output | `gemini_prompt` with `raw=True` |
 | Explore safely (no writes/commands) | `gemini_prompt` with `sandbox=True` + `cwd` |
-| Follow-up on the same codebase | `gemini_prompt` with `continue_session=True` |
+| Follow-up on the same codebase | `gemini_prompt` with `session="…"` (+ `cwd`) |
 | Long job — keep working meanwhile | `gemini_start`, then `gemini_poll` |
 | Fan-out across subtrees | several `gemini_start`, then poll each |
 | Check on background jobs | `gemini_jobs` |
-| Start a fresh session | `gemini_reset` |
+| Clear the default session | `gemini_reset` with `cwd` |
 | Force a fresh run (skip cache) | `gemini_prompt` with `use_cache=False` |
 | Clear all cached responses | `gemini_cache_clear` |
 | Pick a specific model | `gemini_prompt` with `model=...` |
