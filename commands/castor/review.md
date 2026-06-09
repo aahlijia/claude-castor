@@ -1,5 +1,9 @@
 Get a free second-opinion code review from Antigravity (agy).
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_review")
+
 Read `~/.claude/GEMINI.md` first for context, then call `gemini_review` with:
 - `cwd` set to the absolute path of the current working directory
 - `diff`: omit it to review the uncommitted changes (`git diff HEAD`, staged and unstaged). Only set it if the user wants a different scope ($ARGUMENTS) — e.g. "staged", "against main", or a commit range. In that case run the matching `git diff …` yourself and pass its output as `diff`.

@@ -1,8 +1,10 @@
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -13,9 +15,69 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+# Parse --log-file from sys.argv
+_log_file_path = None
+_new_argv = []
+_idx = 0
+while _idx < len(sys.argv):
+    _arg = sys.argv[_idx]
+    if _arg == "--log-file":
+        if _idx + 1 < len(sys.argv):
+            _log_file_path = sys.argv[_idx + 1]
+            _idx += 2
+            continue
+    elif _arg.startswith("--log-file="):
+        _log_file_path = _arg.split("=", 1)[1]
+        _idx += 1
+        continue
+    _new_argv.append(_arg)
+    _idx += 1
+sys.argv = _new_argv
+
+logger = logging.getLogger("claude-castor")
+logger.addHandler(logging.NullHandler())
+
+_file_handler = None
+if _log_file_path:
+    try:
+        _log_path = Path(_log_file_path).resolve()
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        _file_handler = logging.FileHandler(_log_path, encoding="utf-8")
+        _formatter = logging.Formatter(
+            "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        _file_handler.setFormatter(_formatter)
+        logger.addHandler(_file_handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    except Exception as _e:
+        sys.stderr.write(f"Failed to configure logging: {_e}\n")
+
 mcp = FastMCP("claude-castor")
 
+if _log_file_path and _file_handler:
+    try:
+        _fastmcp_logger = logging.getLogger("fastmcp")
+        _fastmcp_logger.addHandler(_file_handler)
+        _fastmcp_logger.setLevel(logging.INFO)
+
+        _root_logger = logging.getLogger()
+        _root_logger.addHandler(_file_handler)
+        _root_logger.setLevel(logging.INFO)
+
+        logger.info(
+            "Logging initialized. Server starting up. Writing logs to %s",
+            _log_file_path,
+        )
+    except Exception as _e:
+        pass
+
 INSTALL_CMD = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+AUTH_HINT = (
+    'Run the `gemini_auth` tool or type `! agy -p "ok"` '
+    "in the Claude Code prompt to sign in — it is a one-time step."
+)
 
 SYSTEM_INSTRUCTION = """\
 You are a technical assistant. Respond with precision and structure.
@@ -28,13 +90,25 @@ You are a technical assistant. Respond with precision and structure.
 - Reference files as plain paths, never as file:// links\
 """
 
-# Baked prompt for gemini_index — a compact, Claude-consumable repo map.
+# Baked prompt for gemini_index — requests a structured JSON object.
 INDEX_PROMPT = """\
-Produce a structured index of this codebase for another engineer to use as
-context. Include: the top-level directory layout with a one-line role for
-each entry, the entry points, the key modules and their main symbols, and
-how the major pieces connect. Be compact and reference real paths. Do NOT
-include file contents — just the map."""
+You are a technical assistant. Produce a structured JSON index of this
+codebase for use as context by another engineer.
+
+Return a JSON object with exactly these keys:
+
+  "summary"         — one-paragraph description of what this codebase does
+  "entry_points"    — list of top-level entry point paths as strings
+  "modules"         — object mapping each key module or class name to
+                      {"file": "<path>", "line": <int>, "role": "<desc>"}
+  "exception_types" — list of custom exception or error type names
+                      (empty list if none)
+  "architecture"    — short paragraph on how the major pieces connect
+
+Be precise — use real file paths, symbol names, and line numbers from
+the code. Do NOT wrap the output in a code fence. Return only the JSON
+object, nothing else.\
+"""
 
 # Baked prompt for gemini_review — a correctness-focused diff review.
 REVIEW_PROMPT = """\
@@ -96,6 +170,16 @@ CACHE_TTL_SECONDS = 7 * 24 * 3600
 # and gemini_reset clears it. Guards against resuming into nothing (or a
 # prior, unrelated task) when continue_session is the default for a caller.
 _session_active = False
+
+_INDEX_KEYS = frozenset(
+    {
+        "summary",
+        "entry_points",
+        "modules",
+        "exception_types",
+        "architecture",
+    }
+)
 
 
 def _read_bytes(path: Path) -> bytes | None:
@@ -304,6 +388,13 @@ def _run_agy(
         sandbox=sandbox,
     )
 
+    logger.info(
+        "run_agy: executing cmd=%s input_len=%d cwd=%s",
+        cmd,
+        len(prompt),
+        cwd,
+    )
+    t0 = time.time()
     try:
         result = subprocess.run(
             cmd,
@@ -314,24 +405,39 @@ def _run_agy(
             cwd=cwd,
         )
     except FileNotFoundError:
+        logger.error("run_agy: agy CLI not found")
         return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
     except subprocess.TimeoutExpired:
+        logger.error(f"run_agy: timed out after {SUBPROCESS_TIMEOUT}s")
         return (
             "[Error: Antigravity timed out. Try a narrower scope, "
             "specific files, or fewer directories.]"
         )
 
+    duration = time.time() - t0
+    logger.info(
+        "run_agy: finished in %.2fs with returncode=%d "
+        "stdout_len=%d stderr_len=%d",
+        duration,
+        result.returncode,
+        len(result.stdout),
+        len(result.stderr),
+    )
+
     combined = result.stdout + result.stderr
     if _needs_auth(combined):
-        return (
-            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
-            "to complete Google sign-in — it is a one-time step.]"
-        )
+        logger.warning("run_agy: user needs authentication")
+        return f"[Not signed in to Antigravity. {AUTH_HINT}]"
 
     if result.returncode != 0 and result.stderr.strip():
+        logger.error(
+            f"run_agy: subprocess failed with stderr: {result.stderr.strip()}"
+        )
         return f"[Antigravity error]\n{result.stderr.strip()}"
 
-    return result.stdout.strip() or "[No response from Antigravity]"
+    res = result.stdout.strip() or "[No response from Antigravity]"
+    logger.info(f"run_agy: returning result (length={len(res)})")
+    return res
 
 
 def _is_side_effect_free(
@@ -379,6 +485,29 @@ def _repo_fingerprint(cwd: str | None) -> str | None:
     return f"{head.stdout.strip()}:{porcelain}"
 
 
+def _get_git_sha(cwd: str) -> str | None:
+    """Return the HEAD commit SHA for cwd, or None.
+
+    Args:
+        cwd: Working directory to query.
+
+    Returns:
+        The HEAD SHA string, or None if cwd is not a git repo or git
+        is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def _git_diff(cwd: str) -> str:
     """Return uncommitted changes in cwd, or a bracketed error string.
 
@@ -408,6 +537,32 @@ def _cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME")
     root = Path(base) if base else Path.home() / ".cache"
     return root / "claude-castor"
+
+
+def _cache_size_mb() -> float:
+    """Return the total size of all cache files in MB.
+
+    Walks the entire cache directory recursively, covering both the flat
+    response-cache entries and the projects/ subdirectory added by the
+    project-state store. Best-effort — returns 0.0 on any error.
+
+    Returns:
+        Total size in megabytes, rounded to one decimal place by callers.
+    """
+    cache_dir = _cache_dir()
+    if not cache_dir.exists():
+        return 0.0
+    total = 0
+    try:
+        for entry in cache_dir.rglob("*"):
+            if entry.is_file():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total / (1024 * 1024)
 
 
 def _cache_key(
@@ -478,6 +633,43 @@ def _cache_put(key: str, response: str, model: str | None) -> None:
                 }
             )
         )
+    except OSError:
+        pass
+
+
+def _project_key(cwd: str) -> str:
+    """SHA-256 of the resolved absolute project path."""
+    return hashlib.sha256(str(Path(cwd).resolve()).encode("utf-8")).hexdigest()
+
+
+def _project_state_path(cwd: str) -> Path:
+    """Path to the per-project state sidecar JSON."""
+    return _cache_dir() / "projects" / f"{_project_key(cwd)}.json"
+
+
+def _load_project_state(cwd: str) -> dict:
+    """Load the project state dict, returning {} on miss or parse error."""
+    path = _project_state_path(cwd)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_project_state(cwd: str, state: dict) -> None:
+    """Atomically persist the project state dict. Best-effort; never raises.
+
+    Uses write-to-tmp + os.replace so concurrent writes from background
+    jobs cannot corrupt the file (POSIX rename is atomic).
+    """
+    path = _project_state_path(cwd)
+    tmp = path.with_suffix(".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -556,11 +748,27 @@ def _dispatch(
         agy's response, a cached response, or a bracketed error string.
     """
     if trust and not cwd:
+        logger.warning("dispatch: trust=True but cwd is missing")
         return (
             "[Error: cwd is required when trust=True so agy's workspace "
             "is rooted in the correct project directory. Pass the "
             "absolute path of the user's project.]"
         )
+
+    logger.info(
+        "dispatch: prompt_len=%d files=%s directory=%s raw=%s trust=%s "
+        "sandbox=%s model=%s cwd=%s continue_session=%s conversation_id=%s",
+        len(prompt),
+        files,
+        directory,
+        raw,
+        trust,
+        sandbox,
+        model or "default",
+        cwd,
+        continue_session,
+        conversation_id,
+    )
 
     assembled = _assemble_prompt(prompt, raw, files, directory)
     cache_key, cached = _try_cache(
@@ -574,7 +782,10 @@ def _dispatch(
         cwd,
     )
     if cached is not None:
+        logger.info(f"dispatch: cache hit for key={cache_key}")
         return cached
+    if cache_key is not None:
+        logger.info(f"dispatch: cache miss for key={cache_key}")
 
     global _session_active
     resume = continue_session and _session_active and not conversation_id
@@ -591,10 +802,13 @@ def _dispatch(
     # Bracketed returns are errors/status, not real conversations, so
     # only mark a session active (and cache) when agy actually responded.
     if not response.startswith("["):
+        logger.info(f"dispatch: success, response_len={len(response)}")
         if track_session:
             _session_active = True
         if cache_key is not None:
             _cache_put(cache_key, response, model)
+    else:
+        logger.warning(f"dispatch: returned status/error response: {response}")
     return response
 
 
@@ -753,25 +967,102 @@ def gemini_prompt(
     )
 
 
+def _strip_fences(text: str) -> str:
+    """Strip a single outermost markdown code fence from text."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    first_newline = stripped.find("\n")
+    if first_newline == -1 or not stripped.endswith("```"):
+        return stripped
+    return stripped[first_newline + 1 : -3].strip()
+
+
+def _validate_index_keys(data: dict) -> bool:
+    """True when data contains all required gemini_index keys."""
+    return _INDEX_KEYS.issubset(data.keys())
+
+
+def _update_last_index(cwd: str) -> None:
+    """Record a successful gemini_index run in the project state store.
+
+    Best-effort — never raises. Consumed by FR-4 (gemini_status with cwd)
+    to surface when the project was last indexed and at which commit.
+
+    Args:
+        cwd: Absolute project root that was just indexed.
+    """
+    state = _load_project_state(cwd)
+    state["last_index"] = {
+        "timestamp": time.time(),
+        "git_sha": _get_git_sha(cwd) or "",
+    }
+    state["updated_at"] = time.time()
+    _save_project_state(cwd, state)
+
+
+def _parse_index(raw: str, cwd: str) -> str:
+    """Parse agy's index response into a structured JSON string.
+
+    Tries to extract a JSON object from raw (stripping code fences),
+    validates required keys are present, then injects git_sha and
+    raw_markdown. Falls back to a minimal envelope on parse failure.
+
+    Args:
+        raw: agy's raw index response.
+        cwd: Project root; used to inject the current git SHA.
+
+    Returns:
+        A JSON string with structured index fields, or a minimal JSON
+        envelope with git_sha and raw_markdown when parsing fails.
+    """
+    git_sha = _get_git_sha(cwd)
+    fallback: dict[str, Any] = {
+        "git_sha": git_sha,
+        "raw_markdown": raw,
+    }
+    try:
+        data = json.loads(_strip_fences(raw))
+    except (ValueError, TypeError):
+        return json.dumps(fallback)
+    if not isinstance(data, dict) or not _validate_index_keys(data):
+        return json.dumps(fallback)
+    data["git_sha"] = git_sha
+    data["raw_markdown"] = raw
+    return json.dumps(data)
+
+
 @mcp.tool()
 def gemini_index(cwd: str, model: str | None = None) -> str:
-    """Produce a structured map of a codebase for use as context.
+    """Produce a structured JSON index of a codebase for use as context.
 
     Runs agy as a sandboxed explorer rooted at cwd — it navigates the
-    project on its own and returns a compact index: directory layout,
-    entry points, key modules and symbols, and how they connect. This is
-    the canonical "give me context I can reuse" call: it is side-effect-
-    free, so when cwd is a git repo the result is cached against the repo
-    state and re-runs are instant.
+    project on its own and returns a structured JSON index: a summary,
+    entry points, key modules with file/line/role, custom exception
+    types, and an architecture overview. Also includes raw_markdown
+    (the full agy response) and git_sha.
+
+    This is the canonical "give me context I can reuse" call: it is
+    side-effect-free, so when cwd is a git repo the result is cached
+    against the repo state and re-runs are instant.
 
     Args:
         cwd: Absolute path to the project root to index.
         model: Optional agy model override (see gemini_models).
 
     Returns:
-        A structured codebase index, or a bracketed error string.
+        A JSON string with keys: summary, entry_points, modules,
+        exception_types, architecture, raw_markdown, git_sha. On
+        parse failure, returns a minimal JSON object with raw_markdown
+        and git_sha only. On agy error, returns a bracketed error
+        string.
     """
-    return _dispatch(INDEX_PROMPT, sandbox=True, cwd=cwd, model=model)
+    raw = _dispatch(INDEX_PROMPT, raw=True, sandbox=True, cwd=cwd, model=model)
+    if raw.startswith("["):
+        return raw
+    result = _parse_index(raw, cwd)
+    _update_last_index(cwd)
+    return result
 
 
 @mcp.tool()
@@ -954,7 +1245,7 @@ def gemini_poll(job_id: str) -> str:
         if job is None:
             return (
                 f"[Unknown job {job_id} — it may have been evicted or "
-                "never existed.]"
+                "never existed. Run gemini_jobs to list current jobs.]"
             )
         status, response = job.status, job.response
         started, finished = job.started_at, job.finished_at
@@ -1051,10 +1342,7 @@ def gemini_models() -> str:
 
     combined = result.stdout + result.stderr
     if _needs_auth(combined):
-        return (
-            "[Not signed in to Antigravity. Run the `gemini_auth` tool "
-            "to complete Google sign-in — it is a one-time step.]"
-        )
+        return f"[Not signed in to Antigravity. {AUTH_HINT}]"
 
     if result.returncode != 0 and result.stderr.strip():
         return f"[Antigravity error]\n{result.stderr.strip()}"
@@ -1154,13 +1442,39 @@ def _status_extras() -> str:
     return f"\nModels available:\n{shown}"
 
 
+def _format_last_index(state: dict) -> str:
+    """Format the last_index entry from a project state dict as a status line.
+
+    Args:
+        state: Project state dict from _load_project_state.
+
+    Returns:
+        A newline-prefixed "last_index: ..." line, or "" when no index
+        has been recorded for the project yet.
+    """
+    entry = state.get("last_index")
+    if not entry:
+        return ""
+    ts = entry.get("timestamp", 0.0)
+    git_sha = entry.get("git_sha", "")
+    ts_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+    sha_str = f"  git_sha: {git_sha[:7]}" if git_sha else ""
+    return f"\nlast_index: {ts_str}{sha_str}"
+
+
 @mcp.tool()
-def gemini_status() -> str:
+def gemini_status(cwd: str | None = None) -> str:
     """Check that the agy CLI is installed and signed in.
 
-    Run before first use or when troubleshooting. Returns a status
-    string with fix instructions if not ready. When READY, also lists the
-    available models (best-effort; omitted silently if unavailable).
+    Run before first use or when troubleshooting. Returns a status string
+    with fix instructions if not ready. When READY, appends cache size and
+    available models (best-effort). When cwd is provided, also appends the
+    last-index timestamp and git SHA for that project (from the project
+    state store populated by gemini_index).
+
+    Args:
+        cwd: Optional absolute path to a project root. When given, per-
+            project index metadata is included in the output.
     """
     not_installed = f"NOT INSTALLED: `agy` CLI not found.\nFix: {INSTALL_CMD}"
 
@@ -1191,8 +1505,7 @@ def gemini_status() -> str:
     if _needs_auth(combined):
         return (
             f"NOT SIGNED IN: agy {version} installed but not "
-            "authenticated.\n"
-            'Fix: run the `gemini_auth` tool (or `! agy -p "ok"`).'
+            f"authenticated.\nFix: {AUTH_HINT}"
         )
 
     if auth_result.returncode != 0:
@@ -1201,7 +1514,11 @@ def gemini_status() -> str:
             f"Error: {auth_result.stderr.strip()}"
         )
 
-    return f"READY — agy {version}{_status_extras()}"
+    suffix = _status_extras()
+    suffix += f"\ncache_size_mb: {_cache_size_mb():.1f}"
+    if cwd is not None:
+        suffix += _format_last_index(_load_project_state(cwd))
+    return f"READY — agy {version}{suffix}"
 
 
 if __name__ == "__main__":

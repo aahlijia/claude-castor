@@ -5,6 +5,72 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
  
+## [0.3.0] - 2026-06-08
+
+### Added (continued)
+
+- **`gemini_status` now accepts an optional `cwd` argument** — when provided,
+  the response includes the last-index timestamp and git SHA for that project
+  (read from the project state store populated by `gemini_index`). The response
+  also always includes a `cache_size_mb` line showing the total size of all
+  files under `~/.cache/claude-castor/` (response cache + project store). The
+  `/castor:status` skill now passes `cwd` automatically.
+
+### Improved
+
+- **Castor skills now load the MCP tool schema automatically** — the manual
+  `ToolSearch` pre-load step is no longer required. Each `/castor:*` skill
+  opens with the exact `ToolSearch("select:…")` call for the tool it drives,
+  so the first invocation succeeds in a cold session without any preamble.
+
+### Fixed
+
+- **Auth error messages are now consistent across all call sites.** Every
+  not-signed-in response now names both the `gemini_auth` tool and the
+  `! agy -p "ok"` command via a shared `AUTH_HINT` constant, replacing three
+  near-duplicate strings that disagreed in wording.
+- `gemini_poll` on an unknown or evicted job ID now suggests running
+  `gemini_jobs` to list current jobs.
+
+### Added
+
+- **`/castor:index` now persists the index to project memory** — after a
+  successful structured `gemini_index` response, the skill writes a compact
+  `castor-index.md` to the project's Claude memory directory
+  (`~/.claude/projects/<slug>/memory/`) and adds a pointer to `MEMORY.md`.
+  On subsequent sessions, the skill reads the memory file and compares its
+  `git_sha` against the current HEAD — if they match, the tool call is
+  skipped entirely. Only a new commit invalidates the memory index (HEAD-only
+  comparison, not the full working-tree fingerprint, so uncommitted edits
+  during development do not cause unnecessary re-indexing). Parse-failure
+  fallback responses are never written to memory.
+
+- **`gemini_index` records `last_index` in the project state store** —
+  timestamp and git SHA of the last successful index run are written to
+  `~/.cache/claude-castor/projects/<hash>.json` for consumption by FR-4
+  (`gemini_status` with `cwd`).
+
+- **`gemini_index` now returns structured JSON** — the response includes
+  `summary`, `entry_points`, `modules` (name → `{file, line, role}`),
+  `exception_types`, `architecture`, `raw_markdown`, and `git_sha`.
+  Consumers can route on individual fields (e.g. auto-populate
+  `gemini_find_usages` targets from `modules`) while `raw_markdown`
+  preserves the full agy response. Falls back to a minimal
+  `{git_sha, raw_markdown}` envelope when the response cannot be parsed
+  as JSON. Implemented by `_parse_index` (calls `_strip_fences` +
+  `_validate_index_keys` + `_get_git_sha`); `INDEX_PROMPT` updated to
+  request JSON output; `gemini_index` now dispatches with `raw=True` to
+  avoid `SYSTEM_INSTRUCTION` interfering with JSON-only output.
+
+- **Project-state store helpers** (`_project_key`, `_project_state_path`,
+  `_load_project_state`, `_save_project_state`) under
+  `~/.cache/claude-castor/projects/`. Foundation for FR-6 structured index
+  output, FR-2 memory persistence, and FR-4 richer status — consumed by later
+  Round-3 features. Writes are atomic (`os.replace`) to avoid corruption from
+  concurrent background jobs.
+
+---
+
 ## [0.2.0] - 2026-06-08
 
 ### Changed

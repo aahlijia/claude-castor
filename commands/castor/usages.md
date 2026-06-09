@@ -2,6 +2,10 @@ Trace where and how a symbol is used across the current codebase using Antigravi
 
 The symbol to trace is: $ARGUMENTS
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_find_usages")
+
 Read `~/.claude/GEMINI.md` first for context, then call `gemini_find_usages` with:
 - `cwd` set to the absolute path of the current working directory
 - `symbol` set to the symbol named in $ARGUMENTS
