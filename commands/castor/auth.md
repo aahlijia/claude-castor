@@ -1,5 +1,9 @@
 Sign in to the Antigravity (agy) CLI so the MCP tools can run.
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_auth")
+
 Call the `gemini_auth` tool, then relay its instruction to the user clearly:
 
 - If it returns the sign-in instruction, tell the user to type this directly in

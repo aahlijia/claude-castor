@@ -2,6 +2,10 @@ Research a specific topic, feature, symbol, or file in the codebase using Antigr
 
 The research target is: $ARGUMENTS
 
+Load the tool schema before calling — MCP tools are deferred and cannot be called until hydrated:
+
+    ToolSearch("select:mcp__claude-castor__gemini_prompt")
+
 Read `~/.claude/GEMINI.md` first for prompting guidance, then call `gemini_prompt` with:
 - `trust=True` (full agent mode — agy can search, grep, and follow imports)
 - `cwd` set to the absolute path of the current working directory
