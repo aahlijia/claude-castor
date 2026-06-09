@@ -119,6 +119,56 @@ Skip pure style nitpicks. For each finding give the file, the relevant hunk,
 the problem, and a concrete fix. If you find nothing substantive, say so
 plainly rather than inventing concerns."""
 
+# Baked prompt for gemini_summarize — structured, token-lean summary.
+SUMMARIZE_PROMPT = """\
+Read `{target}` (a file or directory under the project root) and summarize
+it. Return ONLY a JSON object with exactly these keys:
+
+  "summary"     — one short paragraph on what {target} is and does
+  "key_points"  — list of terse, information-dense bullets. For a
+                  directory, make each bullet a per-area roll-up prefixed
+                  with the area's path.
+
+Every bullet must carry information. Do NOT wrap the output in a code
+fence. Return only the JSON object, nothing else.\
+"""
+
+# Baked prompt for gemini_semantic_search — ranked hits as JSON.
+SEMANTIC_SEARCH_PROMPT = """\
+Search this codebase for code relevant to: "{query}".
+
+Return ONLY a JSON array of at most {n} objects, most relevant first:
+
+  [{{"path": "<repo-relative path>", "line": <int>, "reason": "<=12 words"}}]
+
+Use real paths and line numbers from the code. Do NOT wrap the output in a
+code fence. Return only the JSON array, nothing else.\
+"""
+
+# Baked prompt for gemini_document — proposed docs in the project's style.
+DOCUMENT_PROMPT = """\
+Generate documentation for `{target}` in this project. If `{target}`
+resolves to a file, document its public items; otherwise treat it as a
+symbol name and document that symbol. Match the project's existing
+docstring and comment style — infer it from neighboring code. Return only
+the proposed docstrings or markdown; do not restate or rewrite the
+implementation, and do not modify any file.\
+"""
+
+# Internal prompt for compressing a session transcript (FR-F4).
+SUMMARIZE_TEXT_PROMPT = """\
+Summarize the following prior conversation into a compact paragraph that
+preserves decisions made, facts established, and open threads. Be terse —
+this becomes the memory of an ongoing session. Output only the summary.\
+"""
+
+# Framing prepended to a replayed session transcript (FR-F3).
+SESSION_REPLAY_HEADER = (
+    "This is a continuing conversation. Earlier context is provided below "
+    "so you can continue it consistently. Do not reintroduce yourself or "
+    "repeat prior answers — just continue from where it left off."
+)
+
 SKIP_DIRS = {
     ".git",
     "node_modules",
@@ -164,12 +214,16 @@ SUBPROCESS_TIMEOUT = 310
 # staleness even when the git-SHA match would otherwise hold an entry.
 CACHE_TTL_SECONDS = 7 * 24 * 3600
 
-# True once a resumable agy conversation exists this server run. The MCP
-# server is long-lived, so this persists across tool calls: the first
-# gemini_prompt starts fresh, later continue_session=True calls resume it,
-# and gemini_reset clears it. Guards against resuming into nothing (or a
-# prior, unrelated task) when continue_session is the default for a caller.
-_session_active = False
+# Client-side session machinery (FR-F). Castor owns the transcript and
+# replays it into fresh `agy --print` calls — agy's own --continue is not
+# used, so sessions are project-scoped and survive restarts.
+DEFAULT_SESSION = "__default__"  # name continue_session=True maps to
+SESSION_BUDGET_CHARS = 24000  # replay size before older turns are summarized
+SESSION_KEEP_VERBATIM = 3  # most-recent turns kept uncompressed
+SESSION_TTL_SECONDS = 30 * 24 * 3600  # idle sessions evicted after this
+
+# Max hits gemini_semantic_search asks agy to return.
+SEMANTIC_SEARCH_MAX_HITS = 20
 
 _INDEX_KEYS = frozenset(
     {
@@ -312,16 +366,14 @@ def _needs_auth(text: str) -> bool:
 def _build_agy_cmd(
     trust: bool,
     add_dirs: list[str] | None,
-    continue_session: bool,
-    conversation_id: str | None,
     model: str | None,
     sandbox: bool,
 ) -> list[str]:
     """Assemble the agy print-mode command with the requested flags.
 
     Access tier is mutually exclusive: trust (--dangerously-skip-
-    permissions) wins over sandbox (--sandbox); session resume by
-    conversation_id wins over continue_session.
+    permissions) wins over sandbox (--sandbox). Multi-turn context is
+    handled by Castor's own transcript replay, not agy's --continue.
 
     Returns:
         The full argv list for the agy subprocess.
@@ -333,10 +385,6 @@ def _build_agy_cmd(
         cmd.append("--sandbox")
     for directory in add_dirs or []:
         cmd.extend(["--add-dir", directory])
-    if conversation_id:
-        cmd.extend(["--conversation", conversation_id])
-    elif continue_session:
-        cmd.append("--continue")
     if model:
         cmd.extend(["--model", model])
     return cmd
@@ -347,8 +395,6 @@ def _run_agy(
     trust: bool = False,
     cwd: str | None = None,
     add_dirs: list[str] | None = None,
-    continue_session: bool = False,
-    conversation_id: str | None = None,
     model: str | None = None,
     sandbox: bool = False,
 ) -> str:
@@ -365,11 +411,6 @@ def _run_agy(
             workspace so it explores the correct project.
         add_dirs: Extra directories to grant agy read access to via
             repeated --add-dir flags.
-        continue_session: If True, pass --continue to resume agy's most
-            recent conversation. Ignored when conversation_id is set.
-        conversation_id: If set, pass --conversation <id> to resume a
-            specific conversation; takes precedence over
-            continue_session.
         model: If set, pass --model <model> to select the agy model.
             Call gemini_models for the available names.
         sandbox: If True, pass --sandbox so agy explores with terminal
@@ -382,8 +423,6 @@ def _run_agy(
     cmd = _build_agy_cmd(
         trust=trust,
         add_dirs=add_dirs,
-        continue_session=continue_session,
-        conversation_id=conversation_id,
         model=model,
         sandbox=sandbox,
     )
@@ -440,15 +479,14 @@ def _run_agy(
     return res
 
 
-def _is_side_effect_free(
-    trust: bool, continue_session: bool, conversation_id: str | None
-) -> bool:
-    """True when a call only reads — safe to cache or replay.
+def _is_side_effect_free(trust: bool, session: str | None) -> bool:
+    """True when a call only reads — safe to cache.
 
-    trust=True may write files or run commands; session continuations
-    depend on mutable server state. Neither is safely cacheable.
+    trust=True may write files or run commands; a session call is
+    stateful (its result feeds the transcript and depends on prior
+    turns). Neither is safely cacheable.
     """
-    return not trust and not continue_session and not conversation_id
+    return not trust and not session
 
 
 def _repo_fingerprint(cwd: str | None) -> str | None:
@@ -586,8 +624,7 @@ def _cache_lookup_key(
     model: str | None,
     sandbox: bool,
     trust: bool,
-    continue_session: bool,
-    conversation_id: str | None,
+    session: str | None,
     cwd: str | None,
 ) -> str | None:
     """Return a cache key if this call is cacheable, else None.
@@ -597,7 +634,7 @@ def _cache_lookup_key(
     the code is unchanged; non-explore (inline/read-only) calls are
     determined by the prompt alone and cache without one.
     """
-    if not _is_side_effect_free(trust, continue_session, conversation_id):
+    if not _is_side_effect_free(trust, session):
         return None
     fingerprint = _repo_fingerprint(cwd)
     if sandbox and fingerprint is None:
@@ -674,13 +711,242 @@ def _save_project_state(cwd: str, state: dict) -> None:
         pass
 
 
+def _list_models() -> list[str]:
+    """Return agy's model names (raw lines), or [] on any failure."""
+    try:
+        result = subprocess.run(
+            ["agy", "models"], capture_output=True, text=True, timeout=15
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    out = result.stdout.strip()
+    if not out or _needs_auth(out + result.stderr):
+        return []
+    return out.splitlines()
+
+
+def _cheapest_model() -> str | None:
+    """Pick a cheap/fast model token from agy's list, or None.
+
+    Used to keep session-transcript summarization off the expensive
+    models. Returns None when no light tier is found, so the caller falls
+    back to agy's default model.
+    """
+    for needle in ("flash-lite", "flash", "lite", "8b"):
+        for line in _list_models():
+            for token in line.replace(",", " ").split():
+                if needle in token.lower():
+                    return token.strip()
+    return None
+
+
+def _summarize_text(text: str, model: str | None = None) -> str:
+    """Summarize arbitrary text into prose (read-only agy call).
+
+    The internal primitive behind session compaction (FR-F4). Defaults to
+    the cheapest available model to conserve free-tier quota.
+
+    Args:
+        text: The text to compress.
+        model: Optional model override; defaults to _cheapest_model().
+
+    Returns:
+        A prose summary, or a bracketed error/status string.
+    """
+    prompt = f"{SUMMARIZE_TEXT_PROMPT}\n\n{text}"
+    return _run_agy(prompt, model=model or _cheapest_model())
+
+
+def _safe_session_name(name: str) -> str:
+    """Slugify a session name to a filesystem-safe token."""
+    safe = "".join(
+        c if c.isalnum() or c in "-_" else "_" for c in name.strip()
+    )
+    return safe or "session"
+
+
+def _session_dir(cwd: str) -> Path:
+    """Directory holding one project's session files."""
+    return _cache_dir() / "sessions" / _project_key(cwd)
+
+
+def _session_path(cwd: str, name: str) -> Path:
+    """Path to a single session's transcript JSON."""
+    return _session_dir(cwd) / f"{_safe_session_name(name)}.json"
+
+
+def _load_session(cwd: str, name: str) -> dict:
+    """Load a session dict, evicting it first if older than the TTL.
+
+    Returns {} on miss, parse error, or TTL expiry.
+    """
+    path = _session_path(cwd, name)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if time.time() - mtime > SESSION_TTL_SECONDS:
+        path.unlink(missing_ok=True)
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_session(cwd: str, name: str, session: dict) -> None:
+    """Atomically persist a session dict. Best-effort; never raises."""
+    path = _session_path(cwd, name)
+    tmp = path.with_suffix(".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(session))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _delete_session(cwd: str, name: str) -> bool:
+    """Delete a session file. Returns True if one existed."""
+    try:
+        _session_path(cwd, name).unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _render_turns(turns: list[dict]) -> str:
+    """Render verbatim exchanges as role-tagged replay text."""
+    blocks = []
+    for i, turn in enumerate(turns, 1):
+        blocks.append(
+            f"[EXCHANGE {i}]\nUser: {turn.get('prompt', '')}\n"
+            f"Assistant: {turn.get('response', '')}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _render_session(session: dict) -> str:
+    """Render a session as a replay block, or "" when it has no content."""
+    if not session:
+        return ""
+    parts = [SESSION_REPLAY_HEADER]
+    summary = session.get("summary") or ""
+    if summary:
+        parts.append(f"[EARLIER SUMMARY]\n{summary}")
+    turns = session.get("turns") or []
+    if turns:
+        parts.append(_render_turns(turns))
+    if len(parts) == 1:  # header only — no prior context yet
+        return ""
+    return "\n\n".join(parts)
+
+
+def _session_prefix(cwd: str, name: str) -> str:
+    """Load a session and render it as a history prefix for _dispatch."""
+    return _render_session(_load_session(cwd, name))
+
+
+def _compact_session(session: dict) -> dict:
+    """Summarize older turns when the replay exceeds the char budget.
+
+    Folds everything but the most recent SESSION_KEEP_VERBATIM turns into
+    the rolling `summary` prefix via _summarize_text. If summarization
+    fails (bracketed agy response), the session is left untouched so a
+    transient error never corrupts the transcript.
+    """
+    if len(_render_session(session)) <= SESSION_BUDGET_CHARS:
+        return session
+    turns = session.get("turns") or []
+    old = turns[:-SESSION_KEEP_VERBATIM]
+    if not old:
+        return session
+    text = (session.get("summary") or "") + "\n" + _render_turns(old)
+    summary = _summarize_text(text)
+    if summary.startswith("["):
+        return session
+    session["summary"] = summary
+    session["turns"] = turns[-SESSION_KEEP_VERBATIM:]
+    return session
+
+
+def _append_turn(cwd: str, name: str, prompt: str, response: str) -> None:
+    """Append a successful exchange to a session, compacting if needed."""
+    now = time.time()
+    session = _load_session(cwd, name)
+    if not session:
+        session = {
+            "name": name,
+            "summary": "",
+            "turns": [],
+            "created_at": now,
+        }
+    session.setdefault("turns", [])
+    session["turns"].append(
+        {"prompt": prompt, "response": response, "at": now}
+    )
+    session["updated_at"] = now
+    session = _compact_session(session)
+    _save_session(cwd, name, session)
+
+
+def _parse_summary(raw: str) -> str:
+    """Parse agy's summarize response into a {summary, key_points} JSON.
+
+    Falls back to {"summary": raw, "key_points": []} when the response is
+    not valid JSON or lacks a summary.
+    """
+    fallback = {"summary": raw, "key_points": []}
+    try:
+        data = json.loads(_strip_fences(raw))
+    except (ValueError, TypeError):
+        return json.dumps(fallback)
+    if not isinstance(data, dict) or "summary" not in data:
+        return json.dumps(fallback)
+    return json.dumps(
+        {
+            "summary": data.get("summary", ""),
+            "key_points": data.get("key_points", []),
+        }
+    )
+
+
+def _parse_hits(raw: str) -> str:
+    """Parse agy's semantic-search response into a JSON array of hits.
+
+    Falls back to {"raw_markdown": raw} when the response is not a JSON
+    array, so the caller can tell parsing failed.
+    """
+    try:
+        data = json.loads(_strip_fences(raw))
+    except (ValueError, TypeError):
+        return json.dumps({"raw_markdown": raw})
+    if not isinstance(data, list):
+        return json.dumps({"raw_markdown": raw})
+    return json.dumps(data)
+
+
 def _assemble_prompt(
-    prompt: str, raw: bool, files: list[str] | None, directory: str | None
+    prompt: str,
+    raw: bool,
+    files: list[str] | None,
+    directory: str | None,
+    history: str | None = None,
 ) -> str:
-    """Build the full prompt: system prefix, ask, then inlined content."""
+    """Build the full prompt: system prefix, history, ask, inlined content.
+
+    Args:
+        history: A replayed session transcript (see _session_prefix) to
+            inject between the system instruction and the current ask.
+            None for stateless calls.
+    """
     parts: list[str] = []
     if not raw:
         parts.append(SYSTEM_INSTRUCTION)
+    if history:
+        parts.append(history)
     parts.append(prompt)
     if files:
         parts.append(_inline_files(files))
@@ -695,8 +961,7 @@ def _try_cache(
     model: str | None,
     sandbox: bool,
     trust: bool,
-    continue_session: bool,
-    conversation_id: str | None,
+    session: str | None,
     cwd: str | None,
 ) -> tuple[str | None, str | None]:
     """Resolve the cache for a call.
@@ -708,9 +973,7 @@ def _try_cache(
     """
     if not use_cache:
         return None, None
-    key = _cache_lookup_key(
-        prompt, model, sandbox, trust, continue_session, conversation_id, cwd
-    )
+    key = _cache_lookup_key(prompt, model, sandbox, trust, session, cwd)
     if key is None:
         return None, None
     return key, _cache_get(key)
@@ -724,25 +987,22 @@ def _dispatch(
     trust: bool = False,
     cwd: str | None = None,
     add_dirs: list[str] | None = None,
-    continue_session: bool = False,
-    conversation_id: str | None = None,
     model: str | None = None,
     sandbox: bool = False,
     use_cache: bool = True,
-    track_session: bool = True,
+    session: str | None = None,
 ) -> str:
     """Assemble, cache-check, run, and store a single agy prompt.
 
     The shared core of gemini_prompt and the workflow tools
     (gemini_index, gemini_review, ...). Enforces the trust/cwd guard, the
-    side-effect-free cache gate, and session bookkeeping in one place so
+    side-effect-free cache gate, and session replay/append in one place so
     every caller handles caching and sessions identically.
 
     Args:
-        track_session: When True, mark the server session active after a
-            real response so later continue_session calls resume it. Set
-            False for background jobs, which run concurrently and must not
-            race on the shared session state.
+        session: When set (and cwd is given), replay that project-scoped
+            session's transcript as context and append this turn to it on
+            success. Session calls are stateful, so they are never cached.
 
     Returns:
         agy's response, a cached response, or a bracketed error string.
@@ -755,9 +1015,10 @@ def _dispatch(
             "absolute path of the user's project.]"
         )
 
+    in_session = bool(session and cwd)
     logger.info(
         "dispatch: prompt_len=%d files=%s directory=%s raw=%s trust=%s "
-        "sandbox=%s model=%s cwd=%s continue_session=%s conversation_id=%s",
+        "sandbox=%s model=%s cwd=%s session=%s",
         len(prompt),
         files,
         directory,
@@ -766,20 +1027,13 @@ def _dispatch(
         sandbox,
         model or "default",
         cwd,
-        continue_session,
-        conversation_id,
+        session,
     )
 
-    assembled = _assemble_prompt(prompt, raw, files, directory)
+    history = _session_prefix(cwd, session) if in_session else None
+    assembled = _assemble_prompt(prompt, raw, files, directory, history)
     cache_key, cached = _try_cache(
-        use_cache,
-        assembled,
-        model,
-        sandbox,
-        trust,
-        continue_session,
-        conversation_id,
-        cwd,
+        use_cache, assembled, model, sandbox, trust, session, cwd
     )
     if cached is not None:
         logger.info(f"dispatch: cache hit for key={cache_key}")
@@ -787,24 +1041,20 @@ def _dispatch(
     if cache_key is not None:
         logger.info(f"dispatch: cache miss for key={cache_key}")
 
-    global _session_active
-    resume = continue_session and _session_active and not conversation_id
     response = _run_agy(
         assembled,
         trust=trust,
         cwd=cwd,
         add_dirs=add_dirs,
-        continue_session=resume,
-        conversation_id=conversation_id,
         model=model,
         sandbox=sandbox,
     )
     # Bracketed returns are errors/status, not real conversations, so
-    # only mark a session active (and cache) when agy actually responded.
+    # only append to the session (and cache) when agy actually responded.
     if not response.startswith("["):
         logger.info(f"dispatch: success, response_len={len(response)}")
-        if track_session:
-            _session_active = True
+        if in_session:
+            _append_turn(cwd, session, prompt, response)
         if cache_key is not None:
             _cache_put(cache_key, response, model)
     else:
@@ -869,12 +1119,12 @@ def _evict_jobs() -> None:
 def _run_job(job_id: str, kwargs: dict[str, Any]) -> None:
     """Worker body: run the prompt, then record the outcome on the job.
 
-    Runs with track_session=False so background completion never mutates
-    the shared session state the synchronous path depends on. A bracketed
-    response (agy error/status) is recorded as an "error" outcome.
+    Background jobs are session-free by construction (gemini_start takes no
+    session param), so concurrent workers never race on a transcript file.
+    A bracketed response (agy error/status) is recorded as an "error".
     """
     try:
-        response = _dispatch(track_session=False, **kwargs)
+        response = _dispatch(**kwargs)
     except Exception as exc:  # worker must never crash silently
         response = f"[Job crashed: {exc}]"
 
@@ -897,7 +1147,7 @@ def gemini_prompt(
     cwd: str | None = None,
     add_dirs: list[str] | None = None,
     continue_session: bool = False,
-    conversation_id: str | None = None,
+    session: str | None = None,
     model: str | None = None,
     sandbox: bool = False,
     use_cache: bool = True,
@@ -914,9 +1164,12 @@ def gemini_prompt(
     prefer that over inlining. Only pass `files` or `directory` to inline
     content when the user explicitly named specific files.
 
-    For multi-step work against the same codebase, pass
-    continue_session=True so agy resumes its prior conversation instead
-    of re-exploring from cold. Call gemini_reset to start fresh.
+    For multi-step work against the same codebase, pass a `session` name
+    (or continue_session=True for the default session) so the prior
+    transcript is replayed as context. Sessions are Castor-owned and
+    project-scoped (they require cwd), and they survive restarts. Clear
+    the default session with gemini_reset; manage named ones with
+    gemini_sessions / gemini_session_delete.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
@@ -927,16 +1180,17 @@ def gemini_prompt(
             auto-approves tool actions (writes, commands). Requires
             `cwd`. Default False keeps agy read-only.
         cwd: Working directory for the agy subprocess. Required when
-            using trust=True so agy's workspace is rooted in the user's
-            project. Pass the absolute project path.
+            using trust=True, and whenever a session is used (sessions
+            are project-scoped). Pass the absolute project path.
         add_dirs: Extra directories to grant agy read access to (via
             --add-dir) without inlining them. Lets agy explore them.
-        continue_session: If True, resume agy's existing conversation so
-            it keeps prior context. Has no effect on the first call of a
-            server run (or right after gemini_reset) — that call starts
-            fresh and establishes the session.
-        conversation_id: Resume a specific agy conversation by ID. Takes
-            precedence over continue_session when set.
+        continue_session: Convenience flag — resume the project's default
+            session ("__default__"). Equivalent to session="__default__".
+            Ignored when `session` is set explicitly. Requires cwd.
+        session: Name a project-scoped conversation to continue (e.g.
+            "refactor-auth"). Castor replays its transcript as context and
+            appends this turn on success. Requires cwd. Session calls are
+            stateful and never cached.
         model: Select the agy model (e.g. a faster model for light
             summarization, a stronger one for deep reasoning). Call
             gemini_models for the available names. Defaults to agy's
@@ -948,9 +1202,10 @@ def gemini_prompt(
         use_cache: If True (default), reuse a stored response when the
             same prompt is re-sent against an unchanged repo (matched by
             git HEAD + working-tree state). Only side-effect-free calls
-            are cached — never trust mode or session continuations. Set
-            False to force a fresh run. Clear with gemini_cache_clear.
+            are cached — never trust mode or session calls. Set False to
+            force a fresh run. Clear with gemini_cache_clear.
     """
+    resolved = session or (DEFAULT_SESSION if continue_session else None)
     return _dispatch(
         prompt,
         files=files,
@@ -959,11 +1214,10 @@ def gemini_prompt(
         trust=trust,
         cwd=cwd,
         add_dirs=add_dirs,
-        continue_session=continue_session,
-        conversation_id=conversation_id,
         model=model,
         sandbox=sandbox,
         use_cache=use_cache,
+        session=resolved,
     )
 
 
@@ -1155,6 +1409,95 @@ def gemini_explain_error(
 
 
 @mcp.tool()
+def gemini_summarize(cwd: str, target: str, model: str | None = None) -> str:
+    """Summarize a large file or directory that would blow Claude's context.
+
+    Runs agy as a sandboxed explorer rooted at cwd to read `target` and
+    return a structured, token-lean summary. Side-effect-free, so the
+    result is cached against the repo state when cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        target: A file or directory path (under cwd) to summarize.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        A JSON string with keys: summary, key_points. On parse failure,
+        {"summary": <raw>, "key_points": []}. On agy error, a bracketed
+        error string.
+    """
+    raw = _dispatch(
+        SUMMARIZE_PROMPT.format(target=target),
+        raw=True,
+        sandbox=True,
+        cwd=cwd,
+        model=model,
+    )
+    if raw.startswith("["):
+        return raw
+    return _parse_summary(raw)
+
+
+@mcp.tool()
+def gemini_semantic_search(
+    cwd: str, query: str, model: str | None = None
+) -> str:
+    """Find code by natural-language intent, not an exact symbol name.
+
+    Runs agy as a sandboxed explorer rooted at cwd to locate code matching
+    `query` (e.g. "where is auth validated?") and return ranked hits with
+    paths and lines. Complements gemini_find_usages, which is symbol-exact.
+    Side-effect-free, so the result is cached against the repo state when
+    cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        query: A natural-language description of the code to find.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        A JSON array of at most 20 objects {path, line, reason}, most
+        relevant first. On parse failure, {"raw_markdown": <raw>}. On agy
+        error, a bracketed error string.
+    """
+    raw = _dispatch(
+        SEMANTIC_SEARCH_PROMPT.format(query=query, n=SEMANTIC_SEARCH_MAX_HITS),
+        raw=True,
+        sandbox=True,
+        cwd=cwd,
+        model=model,
+    )
+    if raw.startswith("["):
+        return raw
+    return _parse_hits(raw)
+
+
+@mcp.tool()
+def gemini_document(cwd: str, target: str, model: str | None = None) -> str:
+    """Generate documentation for a symbol or file in the project's style.
+
+    Runs agy as a sandboxed explorer rooted at cwd to draft docstrings or
+    docs for `target`, inferring the project's existing style. Return-only
+    — it never writes files; Claude applies the result. Side-effect-free,
+    so the result is cached against the repo state when cwd is a git repo.
+
+    Args:
+        cwd: Absolute path to the project root.
+        target: A file path or a symbol name to document.
+        model: Optional agy model override (see gemini_models).
+
+    Returns:
+        Proposed docstrings/markdown, or a bracketed error string.
+    """
+    return _dispatch(
+        DOCUMENT_PROMPT.format(target=target),
+        sandbox=True,
+        cwd=cwd,
+        model=model,
+    )
+
+
+@mcp.tool()
 def gemini_start(
     prompt: str,
     files: list[str] | None = None,
@@ -1173,10 +1516,10 @@ def gemini_start(
     subtrees, then synthesize) so Claude is not blocked for the full agy
     timeout. The job runs off-thread; collect its result with gemini_poll.
 
-    Background jobs are fresh-only by construction — they do not accept
-    continue_session or conversation_id and never touch the shared session
-    state, because concurrent jobs would race on it. For stateful,
-    multi-turn work use the synchronous gemini_prompt instead.
+    Background jobs are fresh-only by construction — they take no session
+    param and never touch a transcript, because concurrent jobs would race
+    on it. For stateful, multi-turn work use the synchronous gemini_prompt
+    with a session name instead.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
@@ -1283,20 +1626,92 @@ def gemini_jobs() -> str:
 
 
 @mcp.tool()
-def gemini_reset() -> str:
-    """Forget the current Antigravity session so the next call is fresh.
+def gemini_reset(cwd: str | None = None) -> str:
+    """Clear a project's default session so the next call starts fresh.
 
-    Clears the server-side marker that continue_session relies on, so the
-    next gemini_prompt with continue_session=True starts a new agy
-    conversation instead of resuming the prior one. Use this at task
-    boundaries to avoid carrying stale context between unrelated jobs.
+    Deletes the reserved "__default__" session (the one continue_session
+    resumes) for cwd. Named sessions are untouched — manage those with
+    gemini_sessions and gemini_session_delete. Sessions are project-
+    scoped, so cwd is required to know which project's default to clear.
+
+    Args:
+        cwd: Absolute project root whose default session to reset.
     """
-    global _session_active
-    _session_active = False
-    return (
-        "Session reset — the next gemini_prompt with continue_session=True "
-        "will start a fresh context instead of resuming."
-    )
+    if not cwd:
+        return (
+            "[Error: cwd is required — sessions are project-scoped. Pass "
+            "the absolute project root whose default session to reset.]"
+        )
+    if _delete_session(cwd, DEFAULT_SESSION):
+        return (
+            "Default session cleared — the next continue_session call "
+            "starts fresh."
+        )
+    return "No default session to clear — the next call already starts fresh."
+
+
+@mcp.tool()
+def gemini_sessions(cwd: str) -> str:
+    """List the client-side sessions stored for a project.
+
+    Evicts any sessions past the TTL, then lists the rest with turn count
+    and last-updated time.
+
+    Args:
+        cwd: Absolute path to the project root.
+
+    Returns:
+        One line per session, or a note when there are none.
+    """
+    sessions_dir = _session_dir(cwd)
+    if not sessions_dir.exists():
+        return "[No sessions for this project.]"
+    lines = []
+    for path in sorted(sessions_dir.glob("*.json")):
+        session = _load_session(cwd, path.stem)
+        if not session:
+            continue
+        turns = len(session.get("turns") or [])
+        compacted = " +summary" if session.get("summary") else ""
+        updated = session.get("updated_at", 0.0)
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(updated))
+        lines.append(f"{path.stem}  turns={turns}{compacted}  updated={when}")
+    if not lines:
+        return "[No sessions for this project.]"
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def gemini_session_show(cwd: str, session: str) -> str:
+    """Return a session's stored transcript as JSON.
+
+    Args:
+        cwd: Absolute path to the project root.
+        session: The session name to inspect.
+
+    Returns:
+        The session JSON (summary + turns), or a bracketed not-found note.
+    """
+    data = _load_session(cwd, session)
+    if not data:
+        return f"[No such session '{session}' for this project.]"
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+def gemini_session_delete(cwd: str, session: str) -> str:
+    """Delete a stored session.
+
+    Args:
+        cwd: Absolute path to the project root.
+        session: The session name to delete.
+
+    Returns:
+        A confirmation, or a bracketed not-found note.
+    """
+    if _delete_session(cwd, session):
+        return f"Deleted session '{session}'."
+    return f"[No such session '{session}' for this project.]"
 
 
 @mcp.tool()
