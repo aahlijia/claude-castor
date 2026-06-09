@@ -73,8 +73,8 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `trust` | `bool` | Full agent mode — `--dangerously-skip-permissions`; requires `cwd` (default: false) |
 | `cwd` | `str \| None` | Project root for agy's workspace (required when `trust=True`) |
 | `add_dirs` | `list[str] \| None` | Extra dirs to grant agy read access (`--add-dir`) |
-| `continue_session` | `bool` | Resume agy's prior conversation instead of re-exploring (default: false) |
-| `conversation_id` | `str \| None` | Resume a specific agy conversation by ID (takes precedence over `continue_session`) |
+| `continue_session` | `bool` | Resume the project's default session (`__default__`); requires `cwd` (default: false) |
+| `session` | `str \| None` | Name a project-scoped session to continue; Castor replays its transcript. Requires `cwd`; never cached |
 | `model` | `str \| None` | Select the agy model (see `gemini_models`; defaults to agy's default) |
 | `sandbox` | `bool` | Explore under terminal restrictions — safe middle tier (default: false; ignored when `trust=True`) |
 | `use_cache` | `bool` | Reuse a stored response for the same prompt against an unchanged repo (default: true; side-effect-free calls only) |
@@ -91,6 +91,9 @@ side-effect-free, so results are cached against the repo state in a git repo.
 | `gemini_review` | `(cwd, diff=None, model=None)` | read-only | Correctness review of a diff (defaults to `git diff HEAD`) |
 | `gemini_find_usages` | `(cwd, symbol, model=None)` | sandbox | Every use of a symbol, with paths/lines |
 | `gemini_explain_error` | `(cwd, error, model=None)` | sandbox | Ranked root-cause hypotheses for an error |
+| `gemini_summarize` | `(cwd, target, model=None)` | sandbox | Token-lean `{summary, key_points}` of a file/dir |
+| `gemini_semantic_search` | `(cwd, query, model=None)` | sandbox | NL code search → ranked `[{path, line, reason}]` (≤20) |
+| `gemini_document` | `(cwd, target, model=None)` | sandbox | Proposed docstrings/docs in the project's style (return-only) |
 
 ### Background jobs
 
@@ -101,10 +104,24 @@ lists them. Use for long explorations and fan-out. Concurrency is capped at 4
 workers; jobs are in-memory (lost on restart) and bounded to 50 (oldest finished
 evicted, never a running job).
 
-### `gemini_reset`
+### Sessions
 
-Forgets the current Antigravity session so the next `gemini_prompt` with
-`continue_session=True` starts a fresh conversation. Use at task boundaries.
+Multi-turn context is **Castor-owned**, not agy's: the transcript is stored under
+`~/.cache/claude-castor/sessions/<project>/<name>.json` and replayed into fresh
+`agy --print` calls. Sessions are project-scoped (keyed by repo-root path, so they
+survive commits and restarts), never cached, and evicted after 30 idle days. When
+a replay exceeds ~24k chars, older turns are folded into a rolling summary (via a
+cheap model), keeping the last 3 turns verbatim.
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `gemini_sessions` | `(cwd)` | List a project's sessions (turn count, last-updated) |
+| `gemini_session_show` | `(cwd, session)` | Print a session's stored transcript |
+| `gemini_session_delete` | `(cwd, session)` | Delete a session |
+| `gemini_reset` | `(cwd)` | Clear the project's default (`__default__`) session |
+
+Drive a session from `gemini_prompt` with `session="<name>"` (or
+`continue_session=True` for the default). `gemini_reset` now requires `cwd`.
 
 ### `gemini_cache_clear`
 
@@ -187,4 +204,9 @@ See `.docs/development-plan.md` for the full roadmap. Key items:
   `gemini_explain_error`; thin wrappers over the shared `_dispatch` core) — **done**
 - Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`;
   thread-pool workers, poll model, fresh-only) — **done**
+- More workflow tools (`gemini_summarize`, `gemini_semantic_search`,
+  `gemini_document`; thin wrappers over `_dispatch`) — **done**
+- Client-side sessions (`session` param + `gemini_sessions` / `_show` /
+  `_delete`; Castor-owned transcripts replayed into fresh `agy --print`,
+  auto-summarized over budget — replaces the agy `--continue` path) — **done**
 - Streaming output (token-by-token, vs. the current poll model)
