@@ -370,6 +370,7 @@ def _build_agy_cmd(
     add_dirs: list[str] | None,
     model: str | None,
     sandbox: bool,
+    effort: str | None = None,
 ) -> list[str]:
     """Assemble the agy print-mode command with the requested flags.
 
@@ -391,10 +392,17 @@ def _build_agy_cmd(
     permissions) wins over sandbox (--sandbox). Multi-turn context is
     handled by Castor's own transcript replay, not agy's --continue.
 
+    `--disable-slash-commands` is always passed: Castor's prompts
+    routinely inline arbitrary file/directory content, and inlined
+    text that happens to start with `/` at the start of a line must
+    never be interpreted by agy as a skill invocation rather than
+    inert content handed over for analysis.
+
     Returns:
         The full argv list for the agy subprocess.
     """
     cmd = ["agy", "--print", prompt, f"--print-timeout={PRINT_TIMEOUT}"]
+    cmd.append("--disable-slash-commands")
     if trust:
         cmd.append("--dangerously-skip-permissions")
     elif sandbox:
@@ -405,6 +413,8 @@ def _build_agy_cmd(
         cmd.extend(["--add-dir", directory])
     if model:
         cmd.extend(["--model", model])
+    if effort:
+        cmd.extend(["--effort", effort])
     return cmd
 
 
@@ -415,6 +425,7 @@ def _run_agy(
     add_dirs: list[str] | None = None,
     model: str | None = None,
     sandbox: bool = False,
+    effort: str | None = None,
 ) -> str:
     """Run an agy print-mode prompt and return its stdout.
 
@@ -436,6 +447,9 @@ def _run_agy(
         sandbox: If True, pass --sandbox so agy explores with terminal
             restrictions instead of auto-approving everything. Ignored
             when trust is True (trust is the broader grant).
+        effort: If set, pass --effort <effort> to select agy's reasoning
+            effort (low/medium/high). Not validated server-side; an
+            invalid value is rejected by agy itself.
 
     Returns:
         agy's stdout, or a bracketed error/status string.
@@ -447,6 +461,7 @@ def _run_agy(
         add_dirs=add_dirs,
         model=model,
         sandbox=sandbox,
+        effort=effort,
     )
 
     logged_cmd = [
@@ -628,7 +643,11 @@ def _cache_size_mb() -> float:
 
 
 def _cache_key(
-    prompt: str, model: str | None, sandbox: bool, fingerprint: str | None
+    prompt: str,
+    model: str | None,
+    sandbox: bool,
+    fingerprint: str | None,
+    effort: str | None = None,
 ) -> str:
     """Hash everything that affects the response into a stable key."""
     payload = json.dumps(
@@ -637,6 +656,7 @@ def _cache_key(
             "model": model or "",
             "sandbox": sandbox,
             "repo": fingerprint or "",
+            "effort": effort or "",
         },
         sort_keys=True,
     )
@@ -650,6 +670,7 @@ def _cache_lookup_key(
     trust: bool,
     session: str | None,
     cwd: str | None,
+    effort: str | None = None,
 ) -> str | None:
     """Return a cache key if this call is cacheable, else None.
 
@@ -663,7 +684,7 @@ def _cache_lookup_key(
     fingerprint = _repo_fingerprint(cwd)
     if sandbox and fingerprint is None:
         return None
-    return _cache_key(prompt, model, sandbox, fingerprint)
+    return _cache_key(prompt, model, sandbox, fingerprint, effort)
 
 
 def _cache_get(key: str) -> str | None:
@@ -680,7 +701,12 @@ def _cache_get(key: str) -> str | None:
     return entry.get("response")
 
 
-def _cache_put(key: str, response: str, model: str | None) -> None:
+def _cache_put(
+    key: str,
+    response: str,
+    model: str | None,
+    effort: str | None = None,
+) -> None:
     """Store a response under key. Best-effort; never raises."""
     cache_dir = _cache_dir()
     try:
@@ -690,6 +716,7 @@ def _cache_put(key: str, response: str, model: str | None) -> None:
                 {
                     "response": response,
                     "model": model or "",
+                    "effort": effort or "",
                     "created_at": time.time(),
                 }
             )
@@ -754,33 +781,47 @@ def _list_models() -> list[str]:
 def _cheapest_model() -> str | None:
     """Pick a cheap/fast model token from agy's list, or None.
 
-    Used to keep session-transcript summarization off the expensive
-    models. Returns None when no light tier is found, so the caller falls
-    back to agy's default model.
+    Matches only against the first token of each line (the model id
+    itself, e.g. "gemini-3.6-flash-low") — never the human-readable name
+    column that follows it — so a display name that happens to contain a
+    needle as a substring can't produce a false match. Needles are
+    ordered to prefer an explicit "-low" effort suffix first, since that's
+    the actual "cheapest" signal; the family-name needles that follow are
+    a fallback for naming schemes without effort suffixes.
+
+    Returns None when no light tier is found, so the caller falls back to
+    agy's default model. Kept as a fallback for callers that want a
+    specific lightweight model rather than a low-effort pass of the
+    default one (see --effort, preferred for that case).
     """
-    for needle in ("flash-lite", "flash", "lite", "8b"):
+    for needle in ("-low", "flash-lite", "lite", "8b"):
         for line in _list_models():
-            for token in line.replace(",", " ").split():
-                if needle in token.lower():
-                    return token.strip()
+            tokens = line.replace(",", " ").split()
+            if not tokens:
+                continue
+            model_id = tokens[0]
+            if needle in model_id.lower():
+                return model_id.strip()
     return None
 
 
-def _summarize_text(text: str, model: str | None = None) -> str:
+def _summarize_text(text: str, effort: str = "low") -> str:
     """Summarize arbitrary text into prose (read-only agy call).
 
-    The internal primitive behind session compaction (FR-F4). Defaults to
-    the cheapest available model to conserve free-tier quota.
+    The internal primitive behind session compaction (FR-F4). Runs a
+    low-effort pass of agy's default model to conserve free-tier quota,
+    rather than overriding to a specific lightweight model.
 
     Args:
         text: The text to compress.
-        model: Optional model override; defaults to _cheapest_model().
+        effort: agy reasoning effort to request (low/medium/high).
+            Defaults to "low" for cheap/fast compaction.
 
     Returns:
         A prose summary, or a bracketed error/status string.
     """
     prompt = f"{SUMMARIZE_TEXT_PROMPT}\n\n{text}"
-    return _run_agy(prompt, model=model or _cheapest_model())
+    return _run_agy(prompt, effort=effort)
 
 
 def _safe_session_name(name: str) -> str:
@@ -987,6 +1028,7 @@ def _try_cache(
     trust: bool,
     session: str | None,
     cwd: str | None,
+    effort: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve the cache for a call.
 
@@ -997,7 +1039,9 @@ def _try_cache(
     """
     if not use_cache:
         return None, None
-    key = _cache_lookup_key(prompt, model, sandbox, trust, session, cwd)
+    key = _cache_lookup_key(
+        prompt, model, sandbox, trust, session, cwd, effort
+    )
     if key is None:
         return None, None
     return key, _cache_get(key)
@@ -1015,6 +1059,7 @@ def _dispatch(
     sandbox: bool = False,
     use_cache: bool = True,
     session: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Assemble, cache-check, run, and store a single agy prompt.
 
@@ -1027,6 +1072,9 @@ def _dispatch(
         session: When set (and cwd is given), replay that project-scoped
             session's transcript as context and append this turn to it on
             success. Session calls are stateful, so they are never cached.
+        effort: agy reasoning effort (low/medium/high), passed straight
+            through to --effort. Included in the cache key alongside
+            model, since it affects the response.
 
     Returns:
         agy's response, a cached response, or a bracketed error string.
@@ -1042,7 +1090,7 @@ def _dispatch(
     in_session = bool(session and cwd)
     logger.info(
         "dispatch: prompt_len=%d files=%s directory=%s raw=%s trust=%s "
-        "sandbox=%s model=%s cwd=%s session=%s",
+        "sandbox=%s model=%s effort=%s cwd=%s session=%s",
         len(prompt),
         files,
         directory,
@@ -1050,6 +1098,7 @@ def _dispatch(
         trust,
         sandbox,
         model or "default",
+        effort or "default",
         cwd,
         session,
     )
@@ -1057,7 +1106,7 @@ def _dispatch(
     history = _session_prefix(cwd, session) if in_session else None
     assembled = _assemble_prompt(prompt, raw, files, directory, history)
     cache_key, cached = _try_cache(
-        use_cache, assembled, model, sandbox, trust, session, cwd
+        use_cache, assembled, model, sandbox, trust, session, cwd, effort
     )
     if cached is not None:
         logger.info(f"dispatch: cache hit for key={cache_key}")
@@ -1072,6 +1121,7 @@ def _dispatch(
         add_dirs=add_dirs,
         model=model,
         sandbox=sandbox,
+        effort=effort,
     )
     # Bracketed returns are errors/status, not real conversations, so
     # only append to the session (and cache) when agy actually responded.
@@ -1080,7 +1130,7 @@ def _dispatch(
         if in_session:
             _append_turn(cwd, session, prompt, response)
         if cache_key is not None:
-            _cache_put(cache_key, response, model)
+            _cache_put(cache_key, response, model, effort)
     else:
         logger.warning(f"dispatch: returned status/error response: {response}")
     return response
@@ -1175,6 +1225,7 @@ def gemini_prompt(
     model: str | None = None,
     sandbox: bool = False,
     use_cache: bool = True,
+    effort: str | None = None,
 ) -> str:
     """Send a prompt to Antigravity (agy) and return the response.
 
@@ -1219,6 +1270,9 @@ def gemini_prompt(
             summarization, a stronger one for deep reasoning). Call
             gemini_models for the available names. Defaults to agy's
             configured default.
+        effort: Select agy's reasoning effort (low/medium/high) — a
+            cheap/fast-vs-capable tradeoff independent of model choice.
+            Defaults to agy's own default when omitted.
         sandbox: If True, agy explores the filesystem (like trust) but
             runs under terminal restrictions and does not blindly
             auto-approve actions — the safe middle ground between
@@ -1242,6 +1296,7 @@ def gemini_prompt(
         sandbox=sandbox,
         use_cache=use_cache,
         session=resolved,
+        effort=effort,
     )
 
 
@@ -1305,16 +1360,17 @@ def _parse_index(raw: str, cwd: str) -> str:
     """Parse agy's index response into a structured JSON string.
 
     Tries to extract a JSON object from raw (stripping code fences),
-    validates required keys are present, then injects git_sha and
-    raw_markdown. Falls back to a minimal envelope on parse failure.
+    validates required keys are present, then injects git_sha. Falls
+    back to a minimal envelope with raw_markdown on parse failure.
 
     Args:
         raw: agy's raw index response.
         cwd: Project root; used to inject the current git SHA.
 
     Returns:
-        A JSON string with structured index fields, or a minimal JSON
-        envelope with git_sha and raw_markdown when parsing fails.
+        A JSON string with structured index fields plus git_sha, or
+        (on parse failure) a minimal JSON envelope with git_sha and
+        raw_markdown.
     """
     git_sha = _get_git_sha(cwd)
     fallback: dict[str, Any] = {
@@ -1328,7 +1384,6 @@ def _parse_index(raw: str, cwd: str) -> str:
     if not isinstance(data, dict) or not _validate_index_keys(data):
         return json.dumps(fallback)
     data["git_sha"] = git_sha
-    data["raw_markdown"] = raw
     return json.dumps(data)
 
 
@@ -1339,8 +1394,7 @@ def gemini_index(cwd: str, model: str | None = None) -> str:
     Runs agy as a sandboxed explorer rooted at cwd — it navigates the
     project on its own and returns a structured JSON index: a summary,
     entry points, key modules with file/line/role, custom exception
-    types, and an architecture overview. Also includes raw_markdown
-    (the full agy response) and git_sha.
+    types, and an architecture overview. Also includes git_sha.
 
     This is the canonical "give me context I can reuse" call: it is
     side-effect-free, so when cwd is a git repo the result is cached
@@ -1352,10 +1406,9 @@ def gemini_index(cwd: str, model: str | None = None) -> str:
 
     Returns:
         A JSON string with keys: summary, entry_points, modules,
-        exception_types, architecture, raw_markdown, git_sha. On
-        parse failure, returns a minimal JSON object with raw_markdown
-        and git_sha only. On agy error, returns a bracketed error
-        string.
+        exception_types, architecture, git_sha. On parse failure,
+        {"git_sha": <sha>, "raw_markdown": <raw>}. On agy error,
+        returns a bracketed error string.
     """
     raw = _dispatch(INDEX_PROMPT, raw=True, sandbox=True, cwd=cwd, model=model)
     if raw.startswith("["):
@@ -1555,6 +1608,7 @@ def gemini_start(
     model: str | None = None,
     sandbox: bool = False,
     use_cache: bool = True,
+    effort: str | None = None,
 ) -> str:
     """Start an agy prompt in the background and return a job id.
 
@@ -1578,6 +1632,8 @@ def gemini_start(
             trust=True.
         add_dirs: Extra directories to grant agy read access to.
         model: Select the agy model (see gemini_models).
+        effort: Select agy's reasoning effort (low/medium/high). Defaults
+            to agy's own default when omitted.
         sandbox: If True, agy explores under terminal restrictions.
             Ignored when trust=True.
         use_cache: If True (default), a cache hit completes the job
@@ -1605,6 +1661,7 @@ def gemini_start(
         "model": model,
         "sandbox": sandbox,
         "use_cache": use_cache,
+        "effort": effort,
     }
     job_id = uuid.uuid4().hex[:8]
     with _jobs_lock:
@@ -1809,6 +1866,34 @@ def gemini_models() -> str:
         return f"[Antigravity error]\n{result.stderr.strip()}"
 
     return result.stdout.strip() or "[No models reported by Antigravity]"
+
+
+@mcp.tool()
+def gemini_agents() -> str:
+    """List agy's built-in specialized agents.
+
+    Returns the names you can pass as the `agent` argument to
+    gemini_prompt (and any workflow tools that accept one). Requires
+    sign-in — if not authenticated, returns the sign-in instruction
+    instead.
+    """
+    try:
+        result = subprocess.run(
+            ["agy", "agents"], capture_output=True, text=True, timeout=30
+        )
+    except FileNotFoundError:
+        return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
+    except subprocess.TimeoutExpired:
+        return "[Error: `agy agents` timed out.]"
+
+    combined = result.stdout + result.stderr
+    if _needs_auth(combined):
+        return f"[Not signed in to Antigravity. {AUTH_HINT}]"
+
+    if result.returncode != 0 and result.stderr.strip():
+        return f"[Antigravity error]\n{result.stderr.strip()}"
+
+    return result.stdout.strip() or "[No agents reported by Antigravity]"
 
 
 @mcp.tool()

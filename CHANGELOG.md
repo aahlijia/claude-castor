@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-31
+
+### Added
+
+- **`gemini_agents()`** — lists agy's built-in specialized agents (calls
+  `agy agents`), mirroring `gemini_models()`. Live-verified against a
+  signed-in agy 1.1.9: returns a flat, task-named roster
+  (`backend-architect`, `security-engineer`, `code-reviewer`,
+  `root-cause-analyst`, etc.). New `/castor:agents` skill; `GEMINI.md`
+  gains an "Agent Selection" section (discovery only — no tool routes to a
+  specific agent yet).
+- **`effort` parameter** on `gemini_prompt`/`gemini_start` (`low` / `medium`
+  / `high`) — selects agy's reasoning effort independent of model choice,
+  threaded through `_build_agy_cmd`/`_run_agy`/`_dispatch` the same way
+  `model` already is, including the cache key (so two different `effort`
+  values on the same prompt no longer collide on one cache entry).
+  `GEMINI.md` gains an "Effort Selection" section.
+
+### Fixed
+
+- **`_cheapest_model()` returned the *most* expensive flash-tier model**
+  (`gemini-3.6-flash-high`), not the cheapest. Its needle-matching scanned
+  family names before effort suffixes and matched the first line of `agy
+  models`' output unconditionally, silently sending every session-transcript
+  compaction call to the priciest flash tier since the feature shipped.
+  `_cheapest_model()` itself is fixed (prefers an explicit `-low` suffix,
+  matches only the model-id token, not the display-name column) and kept as
+  a fallback for future callers; the actual compaction call
+  (`_summarize_text`) now uses `effort="low"` against agy's default model
+  instead of relying on the heuristic at all.
+- **`gemini_index` duplicated its full raw response into `raw_markdown`
+  even on successful parses** — every successful call was paying roughly
+  double the token cost of the single most context-hungry tool in the
+  surface. `raw_markdown` is now present only in the fallback envelope on
+  parse failure, matching `gemini_summarize`/`gemini_semantic_search`.
+
+### Security
+
+- **`--disable-slash-commands` is now always passed to agy.** Castor's
+  prompts routinely inline arbitrary file/directory content; without this
+  flag, inlined text starting with `/` at the start of a line could be
+  misinterpreted by agy as one of its own skill invocations rather than
+  inert content handed over for analysis.
+
 ## [0.4.1] - 2026-07-31
 
 ### Fixed

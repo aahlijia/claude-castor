@@ -159,6 +159,34 @@ trading speed for capability — otherwise the default is fine.
 
 ---
 
+## Effort Selection
+
+`gemini_prompt` also accepts an `effort` argument (`low` / `medium` / `high`) to
+pick how much reasoning effort agy's model applies to the prompt, independent of
+which model is selected. Leave it unset to use agy's own default.
+
+- `low` is a good fit for cheap/fast passes — light summarization, quick lookups,
+  anything where depth doesn't matter.
+- `medium`/`high` are worth it when the task needs deeper reasoning, at the cost
+  of more time and quota.
+
+Only set `effort` when the task clearly calls for trading depth for speed (or vice
+versa) — otherwise the default is fine. Note: if `effort` is set on a model that
+doesn't support reasoning effort, agy fails loudly (non-zero exit) rather than
+silently ignoring the flag.
+
+---
+
+## Agent Selection
+
+Call `gemini_agents` to list agy's built-in specialized agents (e.g.
+`backend-architect`, `security-engineer`, `code-reviewer`, `root-cause-analyst`).
+This is discovery only — no tool currently routes a prompt to a specific agent;
+`gemini_prompt` and the workflow tools all run against agy's default agent for
+now.
+
+---
+
 ## Workflow Tools
 
 For common shapes, prefer a purpose-built tool over assembling a raw
