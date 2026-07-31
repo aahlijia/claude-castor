@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-31
+
+### Fixed
+
+- **`agy --print` regression (agy 1.1.9): prompts never reached the CLI.**
+  `--print` now requires its value inline in argv — there is no stdin
+  fallback. Because `_build_agy_cmd` built `["agy", "--print",
+  "--print-timeout", PRINT_TIMEOUT]` and `_run_agy` piped the real prompt via
+  `subprocess.run(..., input=prompt)`, agy's parser swallowed the literal
+  string `"--print-timeout"` as the entire prompt and narrated trying to
+  explain that flag to itself instead of doing the work. Fixed: the prompt is
+  now placed inline immediately after `--print`, with
+  `--print-timeout={PRINT_TIMEOUT}` passed as a single `=`-joined token so it
+  can't be mistaken for the prompt value. `gemini_status`'s own ad-hoc
+  auth-check subprocess had the identical bug and is fixed the same way.
+- **Workspace never bound in sandbox/trust calls.** agy's workspace comes
+  from `--add-dir`, not the subprocess's OS-level `cwd` — every sandbox/trust
+  call was silently exploring agy's own default scratch directory instead of
+  the project. `cwd` is now always also passed to agy as its own `--add-dir`
+  entry.
+- **Valid JSON responses misreported as parse failures.** agy sometimes
+  prefixes a narration line before its JSON output even when told to return
+  bare JSON, so `_parse_index` / `_parse_summary` / `_parse_hits` running
+  `json.loads()` on the raw response would fall into the fallback envelope.
+  New `_extract_json_blob()` helper strips fences, then — if the result isn't
+  already clean JSON — slices from the first `{`/`[` to the last matching
+  close bracket; wired into all three parsers in place of bare
+  `_strip_fences`.
+
 ## [0.4.0] - 2026-06-08
 
 ### Added

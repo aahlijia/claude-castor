@@ -20,7 +20,7 @@ No API key required. Uses Google sign-in (free individual tier).
 1. Claude recognizes a task that would benefit from a large context window
 2. Claude constructs a context-rich prompt describing the task and what it needs
 3. Claude calls `gemini_prompt` via the MCP bridge
-4. The server pipes the prompt to the `agy --print` CLI as a subprocess
+4. The server passes the prompt inline to the `agy --print` CLI as a subprocess
 5. agy's response comes back as a tool result Claude uses to continue the task
 
 In **agent mode** (`trust=True`), agy auto-approves tool actions

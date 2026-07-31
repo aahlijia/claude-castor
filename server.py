@@ -364,12 +364,28 @@ def _needs_auth(text: str) -> bool:
 
 
 def _build_agy_cmd(
+    prompt: str,
     trust: bool,
+    cwd: str | None,
     add_dirs: list[str] | None,
     model: str | None,
     sandbox: bool,
 ) -> list[str]:
     """Assemble the agy print-mode command with the requested flags.
+
+    agy's `--print` takes the prompt as its own inline argv value —
+    it has no stdin fallback (`agy --print ""` errors rather than
+    reading stdin). The prompt must therefore sit immediately after
+    `--print`, and `--print-timeout` must be passed as a single
+    `=`-joined token so it can't be swallowed as --print's value
+    instead of the real prompt.
+
+    agy's workspace is registered via `--add-dir`, not inherited from
+    the subprocess's working directory — setting the subprocess cwd
+    alone leaves agy rooted in its own default scratch directory, blind
+    to the actual project. So `cwd` is passed to agy as its own
+    `--add-dir` entry (in addition to being the subprocess's OS-level
+    working directory, set separately in `_run_agy`).
 
     Access tier is mutually exclusive: trust (--dangerously-skip-
     permissions) wins over sandbox (--sandbox). Multi-turn context is
@@ -378,11 +394,13 @@ def _build_agy_cmd(
     Returns:
         The full argv list for the agy subprocess.
     """
-    cmd = ["agy", "--print", "--print-timeout", PRINT_TIMEOUT]
+    cmd = ["agy", "--print", prompt, f"--print-timeout={PRINT_TIMEOUT}"]
     if trust:
         cmd.append("--dangerously-skip-permissions")
     elif sandbox:
         cmd.append("--sandbox")
+    if cwd:
+        cmd.extend(["--add-dir", cwd])
     for directory in add_dirs or []:
         cmd.extend(["--add-dir", directory])
     if model:
@@ -400,8 +418,10 @@ def _run_agy(
 ) -> str:
     """Run an agy print-mode prompt and return its stdout.
 
-    The prompt is piped via stdin (agy --print reads it from stdin),
-    so prompt size is not bounded by the command-line argument limit.
+    The prompt is passed as --print's inline argv value — agy's print
+    mode has no stdin fallback, so prompt size is bounded by the
+    command-line argument limit (ARG_MAX; ~1MB on macOS), not unbounded
+    as stdin piping would allow.
 
     Args:
         prompt: The fully-assembled prompt to send to agy.
@@ -421,23 +441,27 @@ def _run_agy(
         agy's stdout, or a bracketed error/status string.
     """
     cmd = _build_agy_cmd(
+        prompt,
         trust=trust,
+        cwd=cwd,
         add_dirs=add_dirs,
         model=model,
         sandbox=sandbox,
     )
 
+    logged_cmd = [
+        f"<prompt: {len(prompt)} chars>" if arg is prompt else arg
+        for arg in cmd
+    ]
     logger.info(
-        "run_agy: executing cmd=%s input_len=%d cwd=%s",
-        cmd,
-        len(prompt),
+        "run_agy: executing cmd=%s cwd=%s",
+        logged_cmd,
         cwd,
     )
     t0 = time.time()
     try:
         result = subprocess.run(
             cmd,
-            input=prompt,
             capture_output=True,
             text=True,
             timeout=SUBPROCESS_TIMEOUT,
@@ -900,7 +924,7 @@ def _parse_summary(raw: str) -> str:
     """
     fallback = {"summary": raw, "key_points": []}
     try:
-        data = json.loads(_strip_fences(raw))
+        data = json.loads(_extract_json_blob(raw))
     except (ValueError, TypeError):
         return json.dumps(fallback)
     if not isinstance(data, dict) or "summary" not in data:
@@ -920,7 +944,7 @@ def _parse_hits(raw: str) -> str:
     array, so the caller can tell parsing failed.
     """
     try:
-        data = json.loads(_strip_fences(raw))
+        data = json.loads(_extract_json_blob(raw))
     except (ValueError, TypeError):
         return json.dumps({"raw_markdown": raw})
     if not isinstance(data, list):
@@ -1232,6 +1256,28 @@ def _strip_fences(text: str) -> str:
     return stripped[first_newline + 1 : -3].strip()
 
 
+def _extract_json_blob(text: str) -> str:
+    """Pull the outermost JSON object/array out of a prose-wrapped reply.
+
+    agy is told to return bare JSON but sometimes leads with a line of
+    narration anyway (e.g. "Let me produce the JSON index.\\n\\n{...}").
+    Strips fences, then — if the result isn't already clean JSON — slices
+    from the first '{' or '[' to the last matching close bracket.
+    """
+    stripped = _strip_fences(text)
+    starts = [i for i in (stripped.find("{"), stripped.find("[")) if i != -1]
+    if not starts:
+        return stripped
+    start = min(starts)
+    if start == 0:
+        return stripped
+    close = "}" if stripped[start] == "{" else "]"
+    end = stripped.rfind(close)
+    if end == -1 or end < start:
+        return stripped
+    return stripped[start : end + 1]
+
+
 def _validate_index_keys(data: dict) -> bool:
     """True when data contains all required gemini_index keys."""
     return _INDEX_KEYS.issubset(data.keys())
@@ -1276,7 +1322,7 @@ def _parse_index(raw: str, cwd: str) -> str:
         "raw_markdown": raw,
     }
     try:
-        data = json.loads(_strip_fences(raw))
+        data = json.loads(_extract_json_blob(raw))
     except (ValueError, TypeError):
         return json.dumps(fallback)
     if not isinstance(data, dict) or not _validate_index_keys(data):
@@ -1907,8 +1953,12 @@ def gemini_status(cwd: str | None = None) -> str:
 
     try:
         auth_result = subprocess.run(
-            ["agy", "--print", "--print-timeout", "30s"],
-            input="Reply with exactly the word: OK",
+            [
+                "agy",
+                "--print",
+                "Reply with exactly the word: OK",
+                "--print-timeout=30s",
+            ],
             capture_output=True,
             text=True,
             timeout=40,
