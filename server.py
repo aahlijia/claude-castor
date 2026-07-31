@@ -119,6 +119,18 @@ Skip pure style nitpicks. For each finding give the file, the relevant hunk,
 the problem, and a concrete fix. If you find nothing substantive, say so
 plainly rather than inventing concerns."""
 
+# Baked prompt for gemini_security_review — a security-focused diff
+# review. Complements REVIEW_PROMPT (correctness) rather than
+# overlapping it — each explicitly defers the other's concerns.
+SECURITY_REVIEW_PROMPT = """\
+Review this code diff as a security engineer. Focus on: injection risks,
+auth/authz gaps, secrets or credentials handled unsafely, unsafe
+deserialization, path traversal, SSRF, insecure defaults, and anything that
+would be exploitable if this code ran with attacker-influenced input. Skip
+pure correctness/style nitpicks — that's a separate review. For each finding
+give the file, the relevant hunk, the risk, and a concrete fix. If nothing
+substantive stands out, say so plainly."""
+
 # Baked prompt for gemini_summarize — structured, token-lean summary.
 SUMMARIZE_PROMPT = """\
 Read `{target}` (a file or directory under the project root) and summarize
@@ -133,16 +145,21 @@ Every bullet must carry information. Do NOT wrap the output in a code
 fence. Return only the JSON object, nothing else.\
 """
 
-# Baked prompt for gemini_semantic_search — ranked hits as JSON.
+# Baked prompt for gemini_semantic_search — ranked hits as JSON. Wrapped
+# in a "hits" object (rather than a bare array) because agy's
+# --json-schema enforcement requires a root object schema — see
+# SEMANTIC_SEARCH_JSON_SCHEMA and _parse_hits.
 SEMANTIC_SEARCH_PROMPT = """\
 Search this codebase for code relevant to: "{query}".
 
-Return ONLY a JSON array of at most {n} objects, most relevant first:
+Return ONLY a JSON object with one key "hits", an array of at most {n}
+objects, most relevant first:
 
-  [{{"path": "<repo-relative path>", "line": <int>, "reason": "<=12 words"}}]
+  {{"hits": [{{"path": "<repo-relative path>", "line": <int>,
+  "reason": "<=12 words"}}]}}
 
 Use real paths and line numbers from the code. Do NOT wrap the output in a
-code fence. Return only the JSON array, nothing else.\
+code fence. Return only the JSON object, nothing else.\
 """
 
 # Baked prompt for gemini_document — proposed docs in the project's style.
@@ -232,6 +249,88 @@ _INDEX_KEYS = frozenset(
         "modules",
         "exception_types",
         "architecture",
+    }
+)
+
+# --json-schema payloads enforced on the three JSON-emitting workflow
+# tools (gemini_index, gemini_summarize, gemini_semantic_search), so
+# structure is a contract agy enforces rather than a request it might
+# ignore (see _parse_ndjson_result). Confirmed live against agy 1.1.9
+# that --json-schema requires a root object schema — a root array
+# schema returns an error result with no structured_output at all —
+# which is why SEMANTIC_SEARCH_JSON_SCHEMA wraps its array in a "hits"
+# object instead of matching gemini_semantic_search's bare-array prompt
+# shape 1:1 (see SEMANTIC_SEARCH_PROMPT and _parse_hits).
+INDEX_JSON_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "entry_points": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "modules": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "role": {"type": "string"},
+                    },
+                    "required": ["file", "line", "role"],
+                },
+            },
+            "exception_types": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "architecture": {"type": "string"},
+        },
+        "required": [
+            "summary",
+            "entry_points",
+            "modules",
+            "exception_types",
+            "architecture",
+        ],
+    }
+)
+
+SUMMARIZE_JSON_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "key_points": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["summary", "key_points"],
+    }
+)
+
+SEMANTIC_SEARCH_JSON_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "hits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["path", "line", "reason"],
+                },
+                "maxItems": SEMANTIC_SEARCH_MAX_HITS,
+            },
+        },
+        "required": ["hits"],
     }
 )
 
@@ -363,6 +462,28 @@ def _needs_auth(text: str) -> bool:
     return any(marker in low for marker in _AUTH_MARKERS)
 
 
+def _json_schema_args(schema: str | None) -> list[str]:
+    """Return the agy flags that enforce structured JSON output.
+
+    agy only applies --json-schema to the terminal event of the
+    stream-json output format, so the two flags travel together. When
+    schema is set, this switches the run from plain text to NDJSON —
+    see _parse_ndjson_result for how the terminal result event (and its
+    structured_output field) is recovered from that stream.
+
+    Args:
+        schema: A JSON Schema string to enforce, or None to leave the
+            command in normal text mode.
+
+    Returns:
+        ["--output-format", "stream-json", "--json-schema", schema], or
+        [] when schema is falsy.
+    """
+    if not schema:
+        return []
+    return ["--output-format", "stream-json", "--json-schema", schema]
+
+
 def _build_agy_cmd(
     prompt: str,
     trust: bool,
@@ -371,6 +492,8 @@ def _build_agy_cmd(
     model: str | None,
     sandbox: bool,
     effort: str | None = None,
+    agent: str | None = None,
+    json_schema: str | None = None,
 ) -> list[str]:
     """Assemble the agy print-mode command with the requested flags.
 
@@ -398,6 +521,23 @@ def _build_agy_cmd(
     never be interpreted by agy as a skill invocation rather than
     inert content handed over for analysis.
 
+    `agent`, like `model`, is passed straight through with no
+    server-side validation — an unknown agent name is rejected by agy
+    itself. `json_schema` is internal-only (no public tool param sets
+    it directly): when set, it also switches `--output-format` to
+    `stream-json`, since agy only enforces `--json-schema` on the
+    terminal result event of that format — see _json_schema_args.
+
+    Note: agy's `--mode` flag (accept-edits/plan) was spiked and
+    deliberately left out of this command builder entirely.
+    `accept-edits` hangs headless `--print` calls waiting for an
+    approval prompt that can never be answered non-interactively.
+    `plan` doesn't hang, but adds no real capability: without
+    trust/sandbox it's a silent no-op (any tool request auto-denied),
+    and with trust it behaves identically to omitting `--mode`
+    entirely. Neither is worth the added API surface — see the design
+    doc's item #10 for the full spike writeup.
+
     Returns:
         The full argv list for the agy subprocess.
     """
@@ -415,6 +555,9 @@ def _build_agy_cmd(
         cmd.extend(["--model", model])
     if effort:
         cmd.extend(["--effort", effort])
+    if agent:
+        cmd.extend(["--agent", agent])
+    cmd.extend(_json_schema_args(json_schema))
     return cmd
 
 
@@ -426,6 +569,8 @@ def _run_agy(
     model: str | None = None,
     sandbox: bool = False,
     effort: str | None = None,
+    agent: str | None = None,
+    json_schema: str | None = None,
 ) -> str:
     """Run an agy print-mode prompt and return its stdout.
 
@@ -450,6 +595,14 @@ def _run_agy(
         effort: If set, pass --effort <effort> to select agy's reasoning
             effort (low/medium/high). Not validated server-side; an
             invalid value is rejected by agy itself.
+        agent: If set, pass --agent <agent> to route the prompt to one
+            of agy's built-in specialized agents (see gemini_agents).
+            Not validated server-side; an unknown name is rejected by
+            agy itself.
+        json_schema: Internal-only. If set, enforce structured JSON
+            output via --json-schema (and --output-format stream-json),
+            returning NDJSON — see _parse_ndjson_result. Not a public
+            tool parameter; workflow tools set it with a fixed schema.
 
     Returns:
         agy's stdout, or a bracketed error/status string.
@@ -462,6 +615,8 @@ def _run_agy(
         model=model,
         sandbox=sandbox,
         effort=effort,
+        agent=agent,
+        json_schema=json_schema,
     )
 
     logged_cmd = [
@@ -648,6 +803,8 @@ def _cache_key(
     sandbox: bool,
     fingerprint: str | None,
     effort: str | None = None,
+    agent: str | None = None,
+    json_schema: str | None = None,
 ) -> str:
     """Hash everything that affects the response into a stable key."""
     payload = json.dumps(
@@ -657,6 +814,8 @@ def _cache_key(
             "sandbox": sandbox,
             "repo": fingerprint or "",
             "effort": effort or "",
+            "agent": agent or "",
+            "json_schema": json_schema or "",
         },
         sort_keys=True,
     )
@@ -671,6 +830,8 @@ def _cache_lookup_key(
     session: str | None,
     cwd: str | None,
     effort: str | None = None,
+    agent: str | None = None,
+    json_schema: str | None = None,
 ) -> str | None:
     """Return a cache key if this call is cacheable, else None.
 
@@ -684,7 +845,15 @@ def _cache_lookup_key(
     fingerprint = _repo_fingerprint(cwd)
     if sandbox and fingerprint is None:
         return None
-    return _cache_key(prompt, model, sandbox, fingerprint, effort)
+    return _cache_key(
+        prompt,
+        model,
+        sandbox,
+        fingerprint,
+        effort,
+        agent,
+        json_schema,
+    )
 
 
 def _cache_get(key: str) -> str | None:
@@ -706,6 +875,7 @@ def _cache_put(
     response: str,
     model: str | None,
     effort: str | None = None,
+    agent: str | None = None,
 ) -> None:
     """Store a response under key. Best-effort; never raises."""
     cache_dir = _cache_dir()
@@ -717,6 +887,7 @@ def _cache_put(
                     "response": response,
                     "model": model or "",
                     "effort": effort or "",
+                    "agent": agent or "",
                     "created_at": time.time(),
                 }
             )
@@ -960,12 +1131,27 @@ def _append_turn(cwd: str, name: str, prompt: str, response: str) -> None:
 def _parse_summary(raw: str) -> str:
     """Parse agy's summarize response into a {summary, key_points} JSON.
 
-    Falls back to {"summary": raw, "key_points": []} when the response is
-    not valid JSON or lacks a summary.
+    First tries the schema-enforced NDJSON path (_parse_ndjson_result) —
+    raw is stream-json output produced with SUMMARIZE_JSON_SCHEMA — then
+    falls back to extracting a JSON object the old way (best-effort)
+    when that path comes back empty. That fallback text is narrowed via
+    _ndjson_response_text first when raw is NDJSON, so a schema miss
+    degrades to the old plain-text failure surface rather than the full
+    multi-line transcript. Falls back to {"summary": raw, "key_points":
+    []} when neither path yields a valid summary.
     """
-    fallback = {"summary": raw, "key_points": []}
+    structured = _parse_ndjson_result(raw)
+    if isinstance(structured, dict) and "summary" in structured:
+        return json.dumps(
+            {
+                "summary": structured.get("summary", ""),
+                "key_points": structured.get("key_points", []),
+            }
+        )
+    text = _ndjson_response_text(raw) or raw
+    fallback = {"summary": text, "key_points": []}
     try:
-        data = json.loads(_extract_json_blob(raw))
+        data = json.loads(_extract_json_blob(text))
     except (ValueError, TypeError):
         return json.dumps(fallback)
     if not isinstance(data, dict) or "summary" not in data:
@@ -981,15 +1167,30 @@ def _parse_summary(raw: str) -> str:
 def _parse_hits(raw: str) -> str:
     """Parse agy's semantic-search response into a JSON array of hits.
 
-    Falls back to {"raw_markdown": raw} when the response is not a JSON
-    array, so the caller can tell parsing failed.
+    First tries the schema-enforced NDJSON path (_parse_ndjson_result) —
+    raw is stream-json output produced with SEMANTIC_SEARCH_JSON_SCHEMA,
+    whose root object wraps the array under a "hits" key (agy's
+    --json-schema requires a root object, not a root array — see
+    SEMANTIC_SEARCH_JSON_SCHEMA). Falls back to extracting a bare JSON
+    array from raw the old way (best-effort) when that path comes back
+    empty. That fallback text is narrowed via _ndjson_response_text
+    first when raw is NDJSON, so a schema miss degrades to the old
+    plain-text failure surface rather than the full multi-line
+    transcript. Falls back to {"raw_markdown": raw} when neither path
+    yields a list, so the caller can tell parsing failed.
     """
+    structured = _parse_ndjson_result(raw)
+    if isinstance(structured, dict) and isinstance(
+        structured.get("hits"), list
+    ):
+        return json.dumps(structured["hits"])
+    text = _ndjson_response_text(raw) or raw
     try:
-        data = json.loads(_extract_json_blob(raw))
+        data = json.loads(_extract_json_blob(text))
     except (ValueError, TypeError):
-        return json.dumps({"raw_markdown": raw})
+        return json.dumps({"raw_markdown": text})
     if not isinstance(data, list):
-        return json.dumps({"raw_markdown": raw})
+        return json.dumps({"raw_markdown": text})
     return json.dumps(data)
 
 
@@ -1029,6 +1230,8 @@ def _try_cache(
     session: str | None,
     cwd: str | None,
     effort: str | None = None,
+    agent: str | None = None,
+    json_schema: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve the cache for a call.
 
@@ -1040,7 +1243,15 @@ def _try_cache(
     if not use_cache:
         return None, None
     key = _cache_lookup_key(
-        prompt, model, sandbox, trust, session, cwd, effort
+        prompt,
+        model,
+        sandbox,
+        trust,
+        session,
+        cwd,
+        effort,
+        agent,
+        json_schema,
     )
     if key is None:
         return None, None
@@ -1060,6 +1271,8 @@ def _dispatch(
     use_cache: bool = True,
     session: str | None = None,
     effort: str | None = None,
+    agent: str | None = None,
+    json_schema: str | None = None,
 ) -> str:
     """Assemble, cache-check, run, and store a single agy prompt.
 
@@ -1075,6 +1288,11 @@ def _dispatch(
         effort: agy reasoning effort (low/medium/high), passed straight
             through to --effort. Included in the cache key alongside
             model, since it affects the response.
+        agent: agy agent name, passed straight through to --agent.
+            Included in the cache key alongside model/effort.
+        json_schema: Internal-only structured-output schema (see
+            _run_agy). Included in the cache key, since it changes the
+            response format (NDJSON vs. plain text).
 
     Returns:
         agy's response, a cached response, or a bracketed error string.
@@ -1090,7 +1308,7 @@ def _dispatch(
     in_session = bool(session and cwd)
     logger.info(
         "dispatch: prompt_len=%d files=%s directory=%s raw=%s trust=%s "
-        "sandbox=%s model=%s effort=%s cwd=%s session=%s",
+        "sandbox=%s model=%s effort=%s agent=%s cwd=%s session=%s",
         len(prompt),
         files,
         directory,
@@ -1099,6 +1317,7 @@ def _dispatch(
         sandbox,
         model or "default",
         effort or "default",
+        agent or "default",
         cwd,
         session,
     )
@@ -1106,7 +1325,16 @@ def _dispatch(
     history = _session_prefix(cwd, session) if in_session else None
     assembled = _assemble_prompt(prompt, raw, files, directory, history)
     cache_key, cached = _try_cache(
-        use_cache, assembled, model, sandbox, trust, session, cwd, effort
+        use_cache,
+        assembled,
+        model,
+        sandbox,
+        trust,
+        session,
+        cwd,
+        effort,
+        agent,
+        json_schema,
     )
     if cached is not None:
         logger.info(f"dispatch: cache hit for key={cache_key}")
@@ -1122,6 +1350,8 @@ def _dispatch(
         model=model,
         sandbox=sandbox,
         effort=effort,
+        agent=agent,
+        json_schema=json_schema,
     )
     # Bracketed returns are errors/status, not real conversations, so
     # only append to the session (and cache) when agy actually responded.
@@ -1130,7 +1360,7 @@ def _dispatch(
         if in_session:
             _append_turn(cwd, session, prompt, response)
         if cache_key is not None:
-            _cache_put(cache_key, response, model, effort)
+            _cache_put(cache_key, response, model, effort, agent)
     else:
         logger.warning(f"dispatch: returned status/error response: {response}")
     return response
@@ -1226,6 +1456,7 @@ def gemini_prompt(
     sandbox: bool = False,
     use_cache: bool = True,
     effort: str | None = None,
+    agent: str | None = None,
 ) -> str:
     """Send a prompt to Antigravity (agy) and return the response.
 
@@ -1273,6 +1504,10 @@ def gemini_prompt(
         effort: Select agy's reasoning effort (low/medium/high) — a
             cheap/fast-vs-capable tradeoff independent of model choice.
             Defaults to agy's own default when omitted.
+        agent: Route the prompt to one of agy's built-in specialized
+            agents (e.g. "security-engineer", "root-cause-analyst").
+            Call gemini_agents for the available names. Defaults to
+            agy's own default agent when omitted.
         sandbox: If True, agy explores the filesystem (like trust) but
             runs under terminal restrictions and does not blindly
             auto-approve actions — the safe middle ground between
@@ -1297,6 +1532,7 @@ def gemini_prompt(
         use_cache=use_cache,
         session=resolved,
         effort=effort,
+        agent=agent,
     )
 
 
@@ -1333,6 +1569,82 @@ def _extract_json_blob(text: str) -> str:
     return stripped[start : end + 1]
 
 
+def _parse_ndjson_result(stdout: str) -> Any:
+    """Extract structured_output from the terminal NDJSON result event.
+
+    With `--output-format stream-json` + `--json-schema` (see
+    _json_schema_args), agy emits one JSON object per line: an "init"
+    event, N "step_update" events, and exactly one terminal event
+    carrying the schema-validated payload.
+
+    Confirmed live against agy 1.1.9: the terminal event's discriminator
+    is the top-level "event" key with value "result" — NOT a "type" key
+    as agy's own docs describe — and the payload sits one level down,
+    at `event["result"]["structured_output"]`, not flattened onto the
+    event itself. A schema-validation failure surfaces as a "result"
+    event with no `structured_output` key at all (status "ERROR"), which
+    this naturally returns None for.
+
+    Args:
+        stdout: The full NDJSON stdout from an agy run.
+
+    Returns:
+        The parsed structured_output value (dict or list, depending on
+        the schema's root type), or None on any parse failure, missing
+        terminal event, or missing structured_output.
+    """
+    lines = [line for line in stdout.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        event = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(event, dict) or event.get("event") != "result":
+        return None
+    result = event.get("result")
+    if not isinstance(result, dict):
+        return None
+    return result.get("structured_output")
+
+
+def _ndjson_response_text(stdout: str) -> str | None:
+    """Recover the terminal event's plain response text from NDJSON.
+
+    Used as the fallback input when _parse_ndjson_result finds no
+    structured_output (confirmed live: schema enforcement is not fully
+    reliable once an --agent is combined with --sandbox multi-turn
+    exploration — the terminal result event can omit structured_output
+    entirely). Falling back to the *full* multi-line NDJSON stdout
+    (tool-call step_updates, the tool list, permission_mode, the schema
+    echo) would be a far noisier failure surface than a schema miss
+    deserves — the terminal event's own "response" field is the same
+    plain text `--output-format text` would have returned directly, so
+    recovering just that keeps the old, narrow fallback shape.
+
+    Args:
+        stdout: The full NDJSON stdout from an agy run.
+
+    Returns:
+        The terminal event's response string, or None if no terminal
+        result event (or no response field) is found.
+    """
+    lines = [line for line in stdout.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        event = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(event, dict) or event.get("event") != "result":
+        return None
+    result = event.get("result")
+    if not isinstance(result, dict):
+        return None
+    response = result.get("response")
+    return response if isinstance(response, str) else None
+
+
 def _validate_index_keys(data: dict) -> bool:
     """True when data contains all required gemini_index keys."""
     return _INDEX_KEYS.issubset(data.keys())
@@ -1359,12 +1671,22 @@ def _update_last_index(cwd: str) -> None:
 def _parse_index(raw: str, cwd: str) -> str:
     """Parse agy's index response into a structured JSON string.
 
-    Tries to extract a JSON object from raw (stripping code fences),
-    validates required keys are present, then injects git_sha. Falls
-    back to a minimal envelope with raw_markdown on parse failure.
+    First tries the schema-enforced NDJSON path (_parse_ndjson_result) —
+    raw is the stream-json output produced with INDEX_JSON_SCHEMA, so
+    structure is a contract agy validated, not a request it might have
+    ignored. Falls back to extracting a JSON object from raw the old
+    way (stripping code fences, best-effort) if that path comes back
+    empty — e.g. schema enforcement failed, or agy fell back to plain
+    text. That fallback text is narrowed via _ndjson_response_text
+    first when raw is NDJSON, so a schema miss degrades to the old
+    plain-text failure surface rather than dumping the full multi-line
+    transcript (tool calls, permission list, schema echo) as
+    raw_markdown. Either way, required keys are (re-)validated and
+    git_sha is injected; a minimal envelope with raw_markdown is
+    returned as the last resort.
 
     Args:
-        raw: agy's raw index response.
+        raw: agy's raw index response (NDJSON or plain text).
         cwd: Project root; used to inject the current git SHA.
 
     Returns:
@@ -1373,12 +1695,17 @@ def _parse_index(raw: str, cwd: str) -> str:
         raw_markdown.
     """
     git_sha = _get_git_sha(cwd)
+    structured = _parse_ndjson_result(raw)
+    if isinstance(structured, dict) and _validate_index_keys(structured):
+        structured["git_sha"] = git_sha
+        return json.dumps(structured)
+    text = _ndjson_response_text(raw) or raw
     fallback: dict[str, Any] = {
         "git_sha": git_sha,
-        "raw_markdown": raw,
+        "raw_markdown": text,
     }
     try:
-        data = json.loads(_extract_json_blob(raw))
+        data = json.loads(_extract_json_blob(text))
     except (ValueError, TypeError):
         return json.dumps(fallback)
     if not isinstance(data, dict) or not _validate_index_keys(data):
@@ -1388,7 +1715,11 @@ def _parse_index(raw: str, cwd: str) -> str:
 
 
 @mcp.tool()
-def gemini_index(cwd: str, model: str | None = None) -> str:
+def gemini_index(
+    cwd: str,
+    model: str | None = None,
+    agent: str | None = None,
+) -> str:
     """Produce a structured JSON index of a codebase for use as context.
 
     Runs agy as a sandboxed explorer rooted at cwd — it navigates the
@@ -1403,6 +1734,15 @@ def gemini_index(cwd: str, model: str | None = None) -> str:
     Args:
         cwd: Absolute path to the project root to index.
         model: Optional agy model override (see gemini_models).
+        agent: Optional agy agent override (see gemini_agents). Defaults
+            to agy's default agent — the built-in "repo-index" agent
+            was tried and measurably regressed reliability here (agy
+            1.1.9): combined with sandboxed multi-turn exploration and
+            --json-schema enforcement, it tends to restate its JSON
+            answer across turns, which breaks both schema enforcement
+            and the plain-text fallback. Pass agent="repo-index"
+            explicitly to opt back in if a future agy version fixes
+            this.
 
     Returns:
         A JSON string with keys: summary, entry_points, modules,
@@ -1410,7 +1750,15 @@ def gemini_index(cwd: str, model: str | None = None) -> str:
         {"git_sha": <sha>, "raw_markdown": <raw>}. On agy error,
         returns a bracketed error string.
     """
-    raw = _dispatch(INDEX_PROMPT, raw=True, sandbox=True, cwd=cwd, model=model)
+    raw = _dispatch(
+        INDEX_PROMPT,
+        raw=True,
+        sandbox=True,
+        cwd=cwd,
+        model=model,
+        agent=agent,
+        json_schema=INDEX_JSON_SCHEMA,
+    )
     if raw.startswith("["):
         return raw
     result = _parse_index(raw, cwd)
@@ -1420,7 +1768,10 @@ def gemini_index(cwd: str, model: str | None = None) -> str:
 
 @mcp.tool()
 def gemini_review(
-    cwd: str, diff: str | None = None, model: str | None = None
+    cwd: str,
+    diff: str | None = None,
+    model: str | None = None,
+    agent: str | None = "code-reviewer",
 ) -> str:
     """Get a free second-opinion review of a code diff from agy.
 
@@ -1435,6 +1786,10 @@ def gemini_review(
         diff: A unified diff to review. When None, the uncommitted
             changes in cwd are captured automatically.
         model: Optional agy model override (see gemini_models).
+        agent: agy agent to run this under. Defaults to agy's built-in
+            "code-reviewer" agent, purpose-built for this task. Pass
+            None to fall back to agy's default agent, or another name
+            to override (see gemini_agents).
 
     Returns:
         Review findings, or a bracketed error/status string.
@@ -1448,7 +1803,54 @@ def gemini_review(
             "[No diff to review — the working tree is clean or the "
             "provided diff is empty.]"
         )
-    return _dispatch(f"{REVIEW_PROMPT}\n\n[DIFF]\n{diff}", model=model)
+    return _dispatch(
+        f"{REVIEW_PROMPT}\n\n[DIFF]\n{diff}", model=model, agent=agent
+    )
+
+
+@mcp.tool()
+def gemini_security_review(
+    cwd: str,
+    diff: str | None = None,
+    model: str | None = None,
+    agent: str | None = "security-engineer",
+) -> str:
+    """Get a free security-focused review of a code diff from agy.
+
+    Sends a diff to agy for a security-focused review at no cost to
+    Claude's context. Complements — does not replace — gemini_review
+    (which is correctness-focused and explicitly skips security); run
+    both for a full pass. When diff is omitted, the uncommitted changes
+    in cwd (staged and unstaged, via `git diff HEAD`) are reviewed. The
+    diff is inlined, so the review is cached on the diff content.
+
+    Args:
+        cwd: Absolute path to the git repository.
+        diff: A unified diff to review. When None, the uncommitted
+            changes in cwd are captured automatically.
+        model: Optional agy model override (see gemini_models).
+        agent: agy agent to run this under. Defaults to agy's built-in
+            "security-engineer" agent, purpose-built for this task.
+            Pass None to fall back to agy's default agent, or another
+            name to override (see gemini_agents).
+
+    Returns:
+        Security findings, or a bracketed error/status string.
+    """
+    if diff is None:
+        diff = _git_diff(cwd)
+        if diff.startswith("["):
+            return diff
+    if not diff.strip():
+        return (
+            "[No diff to review — the working tree is clean or the "
+            "provided diff is empty.]"
+        )
+    return _dispatch(
+        f"{SECURITY_REVIEW_PROMPT}\n\n[DIFF]\n{diff}",
+        model=model,
+        agent=agent,
+    )
 
 
 @mcp.tool()
@@ -1481,7 +1883,10 @@ def gemini_find_usages(cwd: str, symbol: str, model: str | None = None) -> str:
 
 @mcp.tool()
 def gemini_explain_error(
-    cwd: str, error: str, model: str | None = None
+    cwd: str,
+    error: str,
+    model: str | None = None,
+    agent: str | None = "root-cause-analyst",
 ) -> str:
     """Explain an error or stack trace against the codebase.
 
@@ -1494,6 +1899,10 @@ def gemini_explain_error(
         cwd: Absolute path to the project root.
         error: The error message or stack trace to diagnose.
         model: Optional agy model override (see gemini_models).
+        agent: agy agent to run this under. Defaults to agy's built-in
+            "root-cause-analyst" agent, purpose-built for this task.
+            Pass None to fall back to agy's default agent, or another
+            name to override (see gemini_agents).
 
     Returns:
         Ranked root-cause hypotheses, or a bracketed error string.
@@ -1504,7 +1913,7 @@ def gemini_explain_error(
         "with the specific file(s) and line(s) to check and why. Be "
         f"concrete.\n\n[ERROR]\n{error}"
     )
-    return _dispatch(prompt, sandbox=True, cwd=cwd, model=model)
+    return _dispatch(prompt, sandbox=True, cwd=cwd, model=model, agent=agent)
 
 
 @mcp.tool()
@@ -1531,6 +1940,7 @@ def gemini_summarize(cwd: str, target: str, model: str | None = None) -> str:
         sandbox=True,
         cwd=cwd,
         model=model,
+        json_schema=SUMMARIZE_JSON_SCHEMA,
     )
     if raw.startswith("["):
         return raw
@@ -1565,6 +1975,7 @@ def gemini_semantic_search(
         sandbox=True,
         cwd=cwd,
         model=model,
+        json_schema=SEMANTIC_SEARCH_JSON_SCHEMA,
     )
     if raw.startswith("["):
         return raw
@@ -1609,6 +2020,7 @@ def gemini_start(
     sandbox: bool = False,
     use_cache: bool = True,
     effort: str | None = None,
+    agent: str | None = None,
 ) -> str:
     """Start an agy prompt in the background and return a job id.
 
@@ -1634,6 +2046,9 @@ def gemini_start(
         model: Select the agy model (see gemini_models).
         effort: Select agy's reasoning effort (low/medium/high). Defaults
             to agy's own default when omitted.
+        agent: Route the prompt to one of agy's built-in specialized
+            agents (see gemini_agents). Defaults to agy's own default
+            agent when omitted.
         sandbox: If True, agy explores under terminal restrictions.
             Ignored when trust=True.
         use_cache: If True (default), a cache hit completes the job
@@ -1662,6 +2077,7 @@ def gemini_start(
         "sandbox": sandbox,
         "use_cache": use_cache,
         "effort": effort,
+        "agent": agent,
     }
     job_id = uuid.uuid4().hex[:8]
     with _jobs_lock:
@@ -1962,30 +2378,46 @@ tools, and follows imports on its own.\
 def _status_extras() -> str:
     """Best-effort niceties appended to a READY status line.
 
-    Every lookup is non-fatal — any failure returns an empty string, so a
-    missing nicety never downgrades a READY status. Account and version
-    freshness are intentionally omitted: agy exposes no whoami command,
-    and `agy update` performs an update rather than a safe check.
+    Every lookup is non-fatal — any failure leaves its piece out of the
+    suffix, so a missing nicety never downgrades a READY status. Account
+    and version freshness are intentionally omitted: agy exposes no
+    whoami command, and `agy update` performs an update rather than a
+    safe check. `agy changelog` is intentionally never called here (or
+    anywhere in Castor): it mutates a disk cache on every invocation, so
+    wiring it into a diagnostics tool that can be polled repeatedly
+    would give every status check a hidden filesystem side effect.
 
     Returns:
-        A newline-prefixed suffix listing available models, or "".
+        A newline-prefixed suffix listing available models and agents
+        (whichever lookups succeeded), or "".
     """
+    suffix = ""
+
     try:
         result = subprocess.run(
             ["agy", "models"], capture_output=True, text=True, timeout=15
         )
+        if result.returncode == 0:
+            models = result.stdout.strip()
+            if models and not _needs_auth(models + result.stderr):
+                shown = "\n".join(models.splitlines()[:10])
+                suffix += f"\nModels available:\n{shown}"
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return ""
+        pass
 
-    if result.returncode != 0:
-        return ""
+    try:
+        agents = subprocess.run(
+            ["agy", "agents"], capture_output=True, text=True, timeout=15
+        )
+        if agents.returncode == 0:
+            agent_names = agents.stdout.strip()
+            if agent_names and not _needs_auth(agent_names + agents.stderr):
+                shown = "\n".join(agent_names.splitlines()[:15])
+                suffix += f"\nAgents available:\n{shown}"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
-    models = result.stdout.strip()
-    if not models or _needs_auth(models + result.stderr):
-        return ""
-
-    shown = "\n".join(models.splitlines()[:10])
-    return f"\nModels available:\n{shown}"
+    return suffix
 
 
 def _format_last_index(state: dict) -> str:

@@ -5,6 +5,87 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-31
+
+### Added
+
+- **`scripts/check_agy_surface.py`** — a standalone maintenance script (not
+  part of the MCP tool surface) that diffs `agy --help`'s tracked
+  flags/subcommands against a checked-in snapshot
+  (`scripts/agy_surface_snapshot.json`), flagging additions, removals, and
+  description changes in the specific CLI surface `server.py` depends on.
+  Run it before releases (see README's new "Maintainer Notes" section) —
+  it exists precisely to catch drift like the 1.1.9 `--print`/workspace/
+  JSON-parse regression (see `[0.4.1]`) before it silently breaks every
+  real dispatch call again. Deliberately lives in a tracked directory, not
+  `.dev/`, so it actually reaches a fresh clone.
+
+### Changed
+
+- Investigated `agy`'s `--mode plan` flag as a potential fourth access
+  tier between `sandbox` and `trust`. Live-verified (agy 1.1.9) it never
+  hangs in headless print mode, unlike `--mode accept-edits` (ruled out
+  entirely, confirmed to hang on any shell-command request). But it also
+  provides no genuine "preview" capability: without `trust` it's a silent
+  no-op indistinguishable from a generic no-response error, and with
+  `trust` it behaves identically to omitting `--mode` entirely. A
+  restricted `mode` passthrough was built, then removed after this
+  finding — the added public API surface (tool param, cache-key
+  dimension) wasn't worth a capability with no observable effect. See
+  `.dev/design-improvements-2026-07-31.md` item #10 for the full
+  investigation trail; `_build_agy_cmd`'s docstring in `server.py` carries
+  a short pointer for future maintainers.
+
+## [0.6.0] - 2026-07-31
+
+### Added
+
+- **`agent` parameter** on `gemini_prompt`/`gemini_start`, threaded through
+  the full dispatch chain (including the cache key) the same way
+  `model`/`effort` already are. `gemini_review`, `gemini_explain_error`, and
+  `gemini_security_review` (new, below) default-bind it to the matching
+  built-in agy agent (`code-reviewer`, `root-cause-analyst`,
+  `security-engineer`); each stays overridable via `agent=` or optable-out
+  via `agent=None`. `gemini_index` intentionally does **not** default-bind
+  an agent — see Changed.
+- **`gemini_security_review`** — a new tool mirroring `gemini_review`'s
+  diff-or-uncommitted-changes handling, but scoped to security concerns
+  (injection, auth/authz, secrets, deserialization, path traversal, SSRF,
+  insecure defaults) via agy's `security-engineer` agent. Complements
+  `gemini_review` (correctness-focused) rather than replacing it. New
+  `/castor:security-review` skill.
+- **Schema-enforced JSON** for `gemini_index`/`gemini_summarize`/
+  `gemini_semantic_search`, via agy's `--json-schema` + `--output-format
+  stream-json` (NDJSON), replacing "ask nicely for bare JSON and scrape the
+  response" with structure agy actually validates. Confirmed live against
+  agy 1.1.9 that the terminal NDJSON event's discriminator is
+  `event["event"] == "result"` (not `event["type"]`, as agy's own docs
+  describe) with the payload nested at `event["result"]["structured_output"]`;
+  also confirmed `--json-schema` requires a root **object** schema, so
+  `gemini_semantic_search`'s array of hits is wrapped under a `"hits"` key
+  internally (the tool's public contract — a bare JSON array — is
+  unchanged). Falls back to the prior best-effort text parsing when schema
+  enforcement misses, now recovering just the terminal event's plain
+  response text rather than the full noisy NDJSON transcript.
+- **`gemini_status`** now lists agy's available agents alongside its
+  models, using the same best-effort, non-fatal pattern (each lookup fails
+  independently — one missing never suppresses the other or downgrades a
+  READY status). `agy changelog` was considered and deliberately excluded:
+  it mutates a disk cache on every invocation, which is unacceptable in a
+  diagnostics call that can be polled repeatedly.
+
+### Changed
+
+- **`gemini_index` does not default-bind agy's `repo-index` agent.**
+  Measured live (agy 1.1.9): combined with sandboxed multi-turn exploration
+  and `--json-schema` enforcement, `repo-index` tends to restate its JSON
+  answer across turns, which breaks both schema enforcement and the
+  plain-text fallback. `agent=None` (agy's own default agent) was
+  confirmed to produce clean, schema-validated JSON reliably on the same
+  repo where `repo-index` fell back to `raw_markdown`. Pass
+  `agent="repo-index"` explicitly to opt back in if a future agy version
+  fixes this.
+
 ## [0.5.0] - 2026-07-31
 
 ### Added
