@@ -27,7 +27,12 @@ called until hydrated:
     ToolSearch("select:mcp__claude-castor__gemini_index")
 
 Call `gemini_index` with `cwd` set to the absolute path of the current
-working directory.
+working directory. It uses agy's default agent (pass `agent="repo-index"`
+to opt into agy's purpose-built indexing agent — measured less reliable
+on agy 1.1.9 combined with sandboxed exploration and `--json-schema`
+enforcement, so it isn't the default) and enforces the JSON shape below
+via agy's `--json-schema` rather than just requesting it — the fallback
+envelope described in Step 2 still applies if schema enforcement misses.
 
 `gemini_index` returns a JSON string. Parse it and check whether it
 contains a `summary` key:

@@ -159,6 +159,49 @@ trading speed for capability — otherwise the default is fine.
 
 ---
 
+## Effort Selection
+
+`gemini_prompt` also accepts an `effort` argument (`low` / `medium` / `high`) to
+pick how much reasoning effort agy's model applies to the prompt, independent of
+which model is selected. Leave it unset to use agy's own default.
+
+- `low` is a good fit for cheap/fast passes — light summarization, quick lookups,
+  anything where depth doesn't matter.
+- `medium`/`high` are worth it when the task needs deeper reasoning, at the cost
+  of more time and quota.
+
+Only set `effort` when the task clearly calls for trading depth for speed (or vice
+versa) — otherwise the default is fine. Note: if `effort` is set on a model that
+doesn't support reasoning effort, agy fails loudly (non-zero exit) rather than
+silently ignoring the flag.
+
+---
+
+## Agent Selection
+
+Call `gemini_agents` to list agy's built-in specialized agents (e.g.
+`backend-architect`, `security-engineer`, `code-reviewer`, `root-cause-analyst`).
+`gemini_prompt` and `gemini_start` accept an `agent` argument to route the
+prompt to one of these — pass the name straight through, no validation is
+done client-side (an unknown name is rejected by agy itself).
+
+Two workflow tools already default-bind the agent that matches their task,
+so you get it for free: `gemini_review` → `code-reviewer`,
+`gemini_explain_error` → `root-cause-analyst`. `gemini_security_review`
+(below) defaults to `security-engineer`. Each still takes an `agent`
+override — pass a different name to try another agent, or `agent=None` to
+fall back to agy's own default agent.
+
+`gemini_index` does **not** default-bind an agent — agy's purpose-built
+`repo-index` agent was tried and measured less reliable (agy 1.1.9):
+combined with sandboxed multi-turn exploration and `--json-schema`
+enforcement, it tends to restate its JSON answer across turns, breaking
+both schema enforcement and the plain-text fallback. Pass
+`agent="repo-index"` explicitly to opt in if a future agy version fixes
+this.
+
+---
+
 ## Workflow Tools
 
 For common shapes, prefer a purpose-built tool over assembling a raw
@@ -167,16 +210,25 @@ caching. Each takes a `cwd` (project root) and an optional `model`.
 
 | Tool | Use when | Tier |
 |---|---|---|
-| `gemini_index(cwd)` | You need a map of an unfamiliar codebase before deeper work | sandbox |
-| `gemini_review(cwd, diff=None)` | You want a free second opinion on a diff (defaults to `git diff HEAD`) | read-only |
+| `gemini_index(cwd)` | You need a map of an unfamiliar codebase before deeper work | sandbox, schema-enforced JSON |
+| `gemini_review(cwd, diff=None)` | You want a free second opinion on a diff (defaults to `git diff HEAD`) | read-only, agent `code-reviewer` |
+| `gemini_security_review(cwd, diff=None)` | You want a free security-focused pass on a diff (defaults to `git diff HEAD`) | read-only, agent `security-engineer` |
 | `gemini_find_usages(cwd, symbol)` | "Where/how is X used across the project?" | sandbox |
-| `gemini_explain_error(cwd, error)` | You have a stack trace and want root-cause hypotheses | sandbox |
+| `gemini_explain_error(cwd, error)` | You have a stack trace and want root-cause hypotheses | sandbox, agent `root-cause-analyst` |
 
 Notes:
 - `gemini_index` is the canonical first call on a new codebase — run it once and
   build on the result (it is cached against the repo state in a git repo).
 - `gemini_review` complements your own `/code-review`; it is a cheap extra pass,
-  not a replacement, and costs no Claude context.
+  not a replacement, and costs no Claude context. `gemini_security_review`
+  complements `gemini_review` the same way — correctness vs. security are
+  separate passes; run both for full coverage.
+- `gemini_index`, `gemini_summarize`, and `gemini_semantic_search` enforce
+  their JSON shape via agy's `--json-schema` (structured output agy validates,
+  not just a prompt request) rather than parsing prose best-effort. This is
+  informational only — it doesn't change how you call these tools or what
+  they return; a schema-enforcement miss still falls back to the same
+  best-effort parsing as before.
 - These cover the frequent cases. For anything else, construct a `gemini_prompt`.
 
 ---
@@ -243,6 +295,7 @@ Implications for how you call the tool:
 | Need to understand a large codebase | `gemini_index` with `cwd` |
 | Need to understand a large codebase (deep/custom) | `gemini_prompt` with `trust=True` + `cwd` |
 | Review a diff for free | `gemini_review` with `cwd` |
+| Security-review a diff for free | `gemini_security_review` with `cwd` |
 | Trace a symbol's usages | `gemini_find_usages` with `cwd` + `symbol` |
 | Find code by intent (no exact name) | `gemini_semantic_search` with `cwd` + `query` |
 | Summarize a large file/dir | `gemini_summarize` with `cwd` + `target` |

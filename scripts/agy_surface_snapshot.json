@@ -1,0 +1,19 @@
+{
+  "flags": {
+    "--add-dir": "Add a directory to the workspace (repeatable) (default [])",
+    "--agent": "Agent for the current CLI session",
+    "--dangerously-skip-permissions": "Auto-approve all tool permission requests without prompting",
+    "--disable-slash-commands": "Disable slash command and skill expansion in print mode",
+    "--effort": "Reasoning effort for the current CLI session (low|medium|high)",
+    "--json-schema": "Optional JSON schema string or path to a schema file to enforce structured output (for stream-json, only applicable to the final result)",
+    "--model": "Model for the current CLI session",
+    "--output-format": "Output format for print mode (text, json, stream-json) (default text)",
+    "--print": "Run a single prompt non-interactively and print the response",
+    "--print-timeout": "Timeout for print mode wait (default 5m0s)",
+    "--sandbox": "Run in a sandbox with terminal restrictions enabled"
+  },
+  "subcommands": {
+    "agents": "List available agents",
+    "models": "List available models"
+  }
+}
