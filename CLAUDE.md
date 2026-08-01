@@ -157,7 +157,7 @@ Returns step-by-step setup instructions. Claude calls this when setup is needed.
 2. Claude reads `GEMINI.md` to construct a context-rich prompt
 3. Claude calls `gemini_prompt` with the assembled prompt
 4. The MCP server prepends a system instruction and inlines any files
-5. The prompt is piped via stdin to `agy --print` as a subprocess
+5. The prompt is passed inline (argv) to `agy --print` as a subprocess
 6. agy's response comes back as the tool result
 7. Claude uses the response as research context to continue the task
 

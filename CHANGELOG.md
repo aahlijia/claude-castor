@@ -5,6 +5,160 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-31
+
+### Added
+
+- **`scripts/check_agy_surface.py`** — a standalone maintenance script (not
+  part of the MCP tool surface) that diffs `agy --help`'s tracked
+  flags/subcommands against a checked-in snapshot
+  (`scripts/agy_surface_snapshot.json`), flagging additions, removals, and
+  description changes in the specific CLI surface `server.py` depends on.
+  Run it before releases (see README's new "Maintainer Notes" section) —
+  it exists precisely to catch drift like the 1.1.9 `--print`/workspace/
+  JSON-parse regression (see `[0.4.1]`) before it silently breaks every
+  real dispatch call again. Deliberately lives in a tracked directory, not
+  `.dev/`, so it actually reaches a fresh clone.
+
+### Changed
+
+- Investigated `agy`'s `--mode plan` flag as a potential fourth access
+  tier between `sandbox` and `trust`. Live-verified (agy 1.1.9) it never
+  hangs in headless print mode, unlike `--mode accept-edits` (ruled out
+  entirely, confirmed to hang on any shell-command request). But it also
+  provides no genuine "preview" capability: without `trust` it's a silent
+  no-op indistinguishable from a generic no-response error, and with
+  `trust` it behaves identically to omitting `--mode` entirely. A
+  restricted `mode` passthrough was built, then removed after this
+  finding — the added public API surface (tool param, cache-key
+  dimension) wasn't worth a capability with no observable effect. See
+  `.dev/design-improvements-2026-07-31.md` item #10 for the full
+  investigation trail; `_build_agy_cmd`'s docstring in `server.py` carries
+  a short pointer for future maintainers.
+
+## [0.6.0] - 2026-07-31
+
+### Added
+
+- **`agent` parameter** on `gemini_prompt`/`gemini_start`, threaded through
+  the full dispatch chain (including the cache key) the same way
+  `model`/`effort` already are. `gemini_review`, `gemini_explain_error`, and
+  `gemini_security_review` (new, below) default-bind it to the matching
+  built-in agy agent (`code-reviewer`, `root-cause-analyst`,
+  `security-engineer`); each stays overridable via `agent=` or optable-out
+  via `agent=None`. `gemini_index` intentionally does **not** default-bind
+  an agent — see Changed.
+- **`gemini_security_review`** — a new tool mirroring `gemini_review`'s
+  diff-or-uncommitted-changes handling, but scoped to security concerns
+  (injection, auth/authz, secrets, deserialization, path traversal, SSRF,
+  insecure defaults) via agy's `security-engineer` agent. Complements
+  `gemini_review` (correctness-focused) rather than replacing it. New
+  `/castor:security-review` skill.
+- **Schema-enforced JSON** for `gemini_index`/`gemini_summarize`/
+  `gemini_semantic_search`, via agy's `--json-schema` + `--output-format
+  stream-json` (NDJSON), replacing "ask nicely for bare JSON and scrape the
+  response" with structure agy actually validates. Confirmed live against
+  agy 1.1.9 that the terminal NDJSON event's discriminator is
+  `event["event"] == "result"` (not `event["type"]`, as agy's own docs
+  describe) with the payload nested at `event["result"]["structured_output"]`;
+  also confirmed `--json-schema` requires a root **object** schema, so
+  `gemini_semantic_search`'s array of hits is wrapped under a `"hits"` key
+  internally (the tool's public contract — a bare JSON array — is
+  unchanged). Falls back to the prior best-effort text parsing when schema
+  enforcement misses, now recovering just the terminal event's plain
+  response text rather than the full noisy NDJSON transcript.
+- **`gemini_status`** now lists agy's available agents alongside its
+  models, using the same best-effort, non-fatal pattern (each lookup fails
+  independently — one missing never suppresses the other or downgrades a
+  READY status). `agy changelog` was considered and deliberately excluded:
+  it mutates a disk cache on every invocation, which is unacceptable in a
+  diagnostics call that can be polled repeatedly.
+
+### Changed
+
+- **`gemini_index` does not default-bind agy's `repo-index` agent.**
+  Measured live (agy 1.1.9): combined with sandboxed multi-turn exploration
+  and `--json-schema` enforcement, `repo-index` tends to restate its JSON
+  answer across turns, which breaks both schema enforcement and the
+  plain-text fallback. `agent=None` (agy's own default agent) was
+  confirmed to produce clean, schema-validated JSON reliably on the same
+  repo where `repo-index` fell back to `raw_markdown`. Pass
+  `agent="repo-index"` explicitly to opt back in if a future agy version
+  fixes this.
+
+## [0.5.0] - 2026-07-31
+
+### Added
+
+- **`gemini_agents()`** — lists agy's built-in specialized agents (calls
+  `agy agents`), mirroring `gemini_models()`. Live-verified against a
+  signed-in agy 1.1.9: returns a flat, task-named roster
+  (`backend-architect`, `security-engineer`, `code-reviewer`,
+  `root-cause-analyst`, etc.). New `/castor:agents` skill; `GEMINI.md`
+  gains an "Agent Selection" section (discovery only — no tool routes to a
+  specific agent yet).
+- **`effort` parameter** on `gemini_prompt`/`gemini_start` (`low` / `medium`
+  / `high`) — selects agy's reasoning effort independent of model choice,
+  threaded through `_build_agy_cmd`/`_run_agy`/`_dispatch` the same way
+  `model` already is, including the cache key (so two different `effort`
+  values on the same prompt no longer collide on one cache entry).
+  `GEMINI.md` gains an "Effort Selection" section.
+
+### Fixed
+
+- **`_cheapest_model()` returned the *most* expensive flash-tier model**
+  (`gemini-3.6-flash-high`), not the cheapest. Its needle-matching scanned
+  family names before effort suffixes and matched the first line of `agy
+  models`' output unconditionally, silently sending every session-transcript
+  compaction call to the priciest flash tier since the feature shipped.
+  `_cheapest_model()` itself is fixed (prefers an explicit `-low` suffix,
+  matches only the model-id token, not the display-name column) and kept as
+  a fallback for future callers; the actual compaction call
+  (`_summarize_text`) now uses `effort="low"` against agy's default model
+  instead of relying on the heuristic at all.
+- **`gemini_index` duplicated its full raw response into `raw_markdown`
+  even on successful parses** — every successful call was paying roughly
+  double the token cost of the single most context-hungry tool in the
+  surface. `raw_markdown` is now present only in the fallback envelope on
+  parse failure, matching `gemini_summarize`/`gemini_semantic_search`.
+
+### Security
+
+- **`--disable-slash-commands` is now always passed to agy.** Castor's
+  prompts routinely inline arbitrary file/directory content; without this
+  flag, inlined text starting with `/` at the start of a line could be
+  misinterpreted by agy as one of its own skill invocations rather than
+  inert content handed over for analysis.
+
+## [0.4.1] - 2026-07-31
+
+### Fixed
+
+- **`agy --print` regression (agy 1.1.9): prompts never reached the CLI.**
+  `--print` now requires its value inline in argv — there is no stdin
+  fallback. Because `_build_agy_cmd` built `["agy", "--print",
+  "--print-timeout", PRINT_TIMEOUT]` and `_run_agy` piped the real prompt via
+  `subprocess.run(..., input=prompt)`, agy's parser swallowed the literal
+  string `"--print-timeout"` as the entire prompt and narrated trying to
+  explain that flag to itself instead of doing the work. Fixed: the prompt is
+  now placed inline immediately after `--print`, with
+  `--print-timeout={PRINT_TIMEOUT}` passed as a single `=`-joined token so it
+  can't be mistaken for the prompt value. `gemini_status`'s own ad-hoc
+  auth-check subprocess had the identical bug and is fixed the same way.
+- **Workspace never bound in sandbox/trust calls.** agy's workspace comes
+  from `--add-dir`, not the subprocess's OS-level `cwd` — every sandbox/trust
+  call was silently exploring agy's own default scratch directory instead of
+  the project. `cwd` is now always also passed to agy as its own `--add-dir`
+  entry.
+- **Valid JSON responses misreported as parse failures.** agy sometimes
+  prefixes a narration line before its JSON output even when told to return
+  bare JSON, so `_parse_index` / `_parse_summary` / `_parse_hits` running
+  `json.loads()` on the raw response would fall into the fallback envelope.
+  New `_extract_json_blob()` helper strips fences, then — if the result isn't
+  already clean JSON — slices from the first `{`/`[` to the last matching
+  close bracket; wired into all three parsers in place of bare
+  `_strip_fences`.
+
 ## [0.4.0] - 2026-06-08
 
 ### Added

@@ -20,7 +20,7 @@ No API key required. Uses Google sign-in (free individual tier).
 1. Claude recognizes a task that would benefit from a large context window
 2. Claude constructs a context-rich prompt describing the task and what it needs
 3. Claude calls `gemini_prompt` via the MCP bridge
-4. The server pipes the prompt to the `agy --print` CLI as a subprocess
+4. The server passes the prompt inline to the `agy --print` CLI as a subprocess
 5. agy's response comes back as a tool result Claude uses to continue the task
 
 In **agent mode** (`trust=True`), agy auto-approves tool actions
@@ -117,11 +117,13 @@ over via the system keyring — no extra steps needed.
 | Command | Description |
 |---|---|
 | `/castor:status` | Check Antigravity CLI installation and sign-in |
+| `/castor:agents` | List agy's built-in specialized agents |
 | `/castor:auth` | Sign in to the Antigravity CLI |
 | `/castor:explore` | Full codebase exploration in agent mode |
 | `/castor:research <topic>` | Deep-dive on a symbol, feature, or file |
 | `/castor:index` | Compact, reusable map of the current codebase |
 | `/castor:review` | Free second-opinion review of your uncommitted changes |
+| `/castor:security-review` | Free security-focused review of your uncommitted changes |
 | `/castor:usages <symbol>` | Trace where and how a symbol is used |
 | `/castor:explain <error>` | Diagnose an error or stack trace against the codebase |
 | `/castor:summarize <path>` | Token-lean summary of a large file or directory |
@@ -136,10 +138,11 @@ over via the system keyring — no extra steps needed.
 | Tool | Description |
 |---|---|
 | `gemini_prompt` | Send a prompt to Antigravity and get a response |
-| `gemini_index` | Produce a structured map of a codebase for use as context |
-| `gemini_review` | Free second-opinion review of a code diff |
+| `gemini_index` | Produce a structured map of a codebase for use as context; schema-enforced JSON |
+| `gemini_review` | Free second-opinion review of a code diff; runs agy's `code-reviewer` agent by default |
+| `gemini_security_review` | Free security-focused review of a code diff; runs agy's `security-engineer` agent by default |
 | `gemini_find_usages` | Find where and how a symbol is used across a codebase |
-| `gemini_explain_error` | Explain an error or stack trace against the codebase |
+| `gemini_explain_error` | Explain an error or stack trace against the codebase; runs agy's `root-cause-analyst` agent by default |
 | `gemini_summarize` | Token-lean `{summary, key_points}` of a file or directory |
 | `gemini_semantic_search` | Natural-language code search → ranked `[{path, line, reason}]` |
 | `gemini_document` | Draft docstrings/docs for a symbol or file (return-only) |
@@ -152,8 +155,9 @@ over via the system keyring — no extra steps needed.
 | `gemini_reset` | Clear the project's default session (requires `cwd`) |
 | `gemini_cache_clear` | Delete all cached responses to force fresh runs |
 | `gemini_models` | List the models available to agy |
+| `gemini_agents` | List agy's built-in specialized agents |
 | `gemini_auth` | Get sign-in instructions when not authenticated |
-| `gemini_status` | Check CLI installation and sign-in; lists available models when READY |
+| `gemini_status` | Check CLI installation and sign-in; lists available models and agents when READY |
 | `gemini_setup` | Get step-by-step setup instructions |
 
 ### `gemini_prompt` parameters
@@ -170,6 +174,7 @@ over via the system keyring — no extra steps needed.
 | `continue_session` | `bool` | `false` | Resume the project's default session (requires `cwd`) |
 | `session` | `str` | `None` | Name a project-scoped session to continue (requires `cwd`; never cached) |
 | `model` | `str` | `None` | Select the agy model (see `gemini_models`) |
+| `agent` | `str` | `None` | Route the prompt to one of agy's built-in agents (see `gemini_agents`) |
 | `sandbox` | `bool` | `false` | Explore under terminal restrictions (safe middle tier; ignored if `trust`) |
 | `use_cache` | `bool` | `true` | Reuse a stored response for the same prompt against an unchanged repo |
 
@@ -234,19 +239,28 @@ them by hand. Each takes a `cwd` (the project root) and an optional `model`.
 
 | Tool | What it does | Tier |
 |---|---|---|
-| `gemini_index(cwd)` | Compact repo map: layout, entry points, key symbols, how they connect | sandbox |
-| `gemini_review(cwd, diff=None)` | Correctness-focused review of a diff (defaults to `git diff HEAD`) | read-only |
+| `gemini_index(cwd)` | Compact repo map: layout, entry points, key symbols, how they connect | sandbox, schema-enforced JSON |
+| `gemini_review(cwd, diff=None)` | Correctness-focused review of a diff (defaults to `git diff HEAD`) | read-only, agent `code-reviewer` |
+| `gemini_security_review(cwd, diff=None)` | Security-focused review of a diff (defaults to `git diff HEAD`) | read-only, agent `security-engineer` |
 | `gemini_find_usages(cwd, symbol)` | Every use of a symbol, with paths and line refs | sandbox |
-| `gemini_explain_error(cwd, error)` | Ranked root-cause hypotheses for an error/stack trace | sandbox |
-| `gemini_summarize(cwd, target)` | Token-lean `{summary, key_points}` of a file or directory | sandbox |
-| `gemini_semantic_search(cwd, query)` | NL code search → ranked `[{path, line, reason}]` (≤20) | sandbox |
+| `gemini_explain_error(cwd, error)` | Ranked root-cause hypotheses for an error/stack trace | sandbox, agent `root-cause-analyst` |
+| `gemini_summarize(cwd, target)` | Token-lean `{summary, key_points}` of a file or directory | sandbox, schema-enforced JSON |
+| `gemini_semantic_search(cwd, query)` | NL code search → ranked `[{path, line, reason}]` (≤20) | sandbox, schema-enforced JSON |
 | `gemini_document(cwd, target)` | Proposed docstrings/docs in the project's style (return-only) | sandbox |
 
 All are side-effect-free, so their results are cached against the repo state when
 `cwd` is a git repo (see below). `gemini_index` is the canonical "give me context
 I can reuse" call — run it once, then build on it. `gemini_review` complements
-(does not replace) Claude's own `/code-review`. `gemini_semantic_search` finds
-code by intent, where `gemini_find_usages` needs an exact symbol name.
+(does not replace) Claude's own `/code-review`; `gemini_security_review`
+complements `gemini_review` the same way — correctness vs. security are separate
+passes, run both for full coverage. `gemini_semantic_search` finds code by
+intent, where `gemini_find_usages` needs an exact symbol name. The four
+agent-defaulting tools (`gemini_index`, `gemini_review`,
+`gemini_security_review`, `gemini_explain_error`) each accept an `agent`
+override, or `agent=None` to fall back to agy's own default agent (see
+`gemini_agents`). "Schema-enforced JSON" means the shape is a contract agy
+validates via `--json-schema`, not just a prompt request — informational only,
+it doesn't change how these tools are called or what they return.
 
 ---
 
@@ -305,6 +319,16 @@ sign-in command, then run `agy -p "ok"` to complete Google sign-in
 agent mode (`trust=True`) over pre-loading a full directory
 
 **Empty response** — Try `raw=True` to see unfiltered output
+
+---
+
+## Maintainer Notes
+
+Before releasing, run `python3 scripts/check_agy_surface.py` to check that
+agy's CLI (the flags/subcommands `server.py` depends on) hasn't drifted since
+the last release. It diffs a live `agy --help` against a checked-in snapshot
+and exits non-zero on drift; pass `--update-snapshot` to refresh the snapshot
+after a deliberate agy upgrade.
 
 ---
 

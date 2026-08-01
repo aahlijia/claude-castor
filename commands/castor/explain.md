@@ -10,6 +10,6 @@ Read `~/.claude/GEMINI.md` first for context, then call `gemini_explain_error` w
 - `cwd` set to the absolute path of the current working directory
 - `error` set to the error text in $ARGUMENTS
 
-`gemini_explain_error` runs agy as a sandboxed explorer, traces the error to its likely source, and returns the most probable root causes — ranked — each with the specific files and lines to check and why.
+`gemini_explain_error` runs agy as a sandboxed explorer, traces the error to its likely source, and returns the most probable root causes — ranked — each with the specific files and lines to check and why. It runs agy's `root-cause-analyst` agent by default (pass `agent=None` to fall back to agy's default agent, or another name to override).
 
 After agy responds, present the ranked hypotheses and the files to inspect. Verify the specifics against the actual code before acting, and propose a concrete next step.
