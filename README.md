@@ -1,4 +1,17 @@
-# Claude Castor
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+    <img alt="Claude Castor" src="assets/logo.svg" width="480">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/aahlijia/claude-castor/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/aahlijia/claude-castor?style=flat&color=7CE8FF"></a>
+  <a href="https://github.com/aahlijia/claude-castor/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/aahlijia/claude-castor?color=7CE8FF"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-7CE8FF"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-7CE8FF">
+</p>
 
 > An Antigravity MCP for Claude Code.
 
@@ -8,6 +21,9 @@ research — to Google's free [Antigravity CLI](https://antigravity.google)
 orchestrates and reasons; Antigravity handles the heavy lifting.
 
 No API key required. Uses Google sign-in (free individual tier).
+
+If Claude Castor saves you tokens or time, consider starring the repo — it
+helps other Claude Code users find it.
 
 > **Note:** Antigravity CLI replaces the retired Gemini CLI (shut down
 > June 18, 2026). The MCP tools keep their `gemini_*` names for
@@ -64,7 +80,7 @@ stored in the system keyring.
 ### 3. Clone the repo
 
 ```bash
-git clone https://github.com/yourusername/claude-castor
+git clone https://github.com/aahlijia/claude-castor
 cd claude-castor
 ```
 
