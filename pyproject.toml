@@ -1,10 +1,18 @@
 [project]
 name = "claude-castor"
 version = "0.7.0"
+description = "An Antigravity MCP for Claude Code — offloads large-context work to Google's free agy CLI."
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aahlijia/claude-castor"
+Repository = "https://github.com/aahlijia/claude-castor"
+Changelog = "https://github.com/aahlijia/claude-castor/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
