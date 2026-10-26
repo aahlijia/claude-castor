@@ -191,7 +191,7 @@ over via the system keyring — no extra steps needed.
 | `session` | `str` | `None` | Name a project-scoped session to continue (requires `cwd`; never cached) |
 | `model` | `str` | `None` | Select the agy model (see `gemini_models`) |
 | `agent` | `str` | `None` | Route the prompt to one of agy's built-in agents (see `gemini_agents`) |
-| `sandbox` | `bool` | `false` | Explore under terminal restrictions (safe middle tier; ignored if `trust`) |
+| `sandbox` | `bool` | `false` | Explore with auto-approved commands inside agy's OS sandbox, workspace read-only (middle tier; ignored if `trust`) |
 | `use_cache` | `bool` | `true` | Reuse a stored response for the same prompt against an unchanged repo |
 
 ---
@@ -203,10 +203,14 @@ By default, agy runs read-only and responds in Q&A mode. With `trust=True`
 read files, search the codebase, follow imports, and auto-approve tool actions
 on its own without needing content pre-loaded.
 
-`sandbox=True` is a safer middle tier: agy still explores the filesystem
-actively, but under terminal restrictions and without blindly auto-approving
-actions. `trust` takes precedence if both are set. Prefer `sandbox` unless the
-task genuinely needs agy to write files or run arbitrary commands.
+`sandbox=True` is a safer middle tier: agy explores the filesystem and runs
+read commands (find, grep, git) inside its OS sandbox, which keeps the project
+read-only. Castor auto-approves those commands, because since agy 1.3 headless
+print mode denies any command it can't prompt for, and one denial ends the run
+with no output. The sandbox blocks writes to the workspace, but not writes
+elsewhere in your home directory or network access. `trust` takes precedence
+if both are set. Prefer `sandbox` unless the task needs agy to write project
+files.
 
 Best for (trust or sandbox):
 - Deep codebase exploration

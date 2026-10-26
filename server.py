@@ -230,6 +230,10 @@ SUBPROCESS_TIMEOUT = 310
 # Cached responses older than this are treated as misses, bounding
 # staleness even when the git-SHA match would otherwise hold an entry.
 CACHE_TTL_SECONDS = 7 * 24 * 3600
+# Part of every cache key. Bump it when a change makes stored responses
+# untrustworthy. 2: the sandbox tier gained auto-approval, and older
+# entries can hold denied runs (empty NDJSON) cached as successes.
+CACHE_KEY_VERSION = 2
 
 # Client-side session machinery (FR-F). Castor owns the transcript and
 # replays it into fresh `agy --print` calls — agy's own --continue is not
@@ -462,6 +466,57 @@ def _needs_auth(text: str) -> bool:
     return any(marker in low for marker in _AUTH_MARKERS)
 
 
+# agy's stderr line when headless print mode refuses a tool permission.
+_DENIAL_MARKER = "auto-denied"
+
+DENIED_MSG = (
+    "[Antigravity produced no output: it tried to run a shell command, "
+    "and headless agy auto-denies commands it cannot prompt for. Retry "
+    "with sandbox=True (read commands allowed, workspace read-only) or "
+    "trust=True (full access), with cwd set to the project root.]"
+)
+
+
+def _empty_output_error(
+    stdout: str,
+    stderr: str,
+    ndjson: bool,
+) -> str | None:
+    """Explain an agy run that exited 0 without an answer.
+
+    agy 1.3+ ends a print-mode turn with empty output and exit code 0
+    when it auto-denies a tool permission, so the exit code alone can't
+    tell a denial from a real answer. In text mode the only trace is a
+    stderr line; in stream-json mode the result event carries an empty
+    response and a `denied_actions` list.
+
+    Args:
+        stdout: agy's stdout.
+        stderr: agy's stderr.
+        ndjson: True when the run used --output-format stream-json.
+
+    Returns:
+        A bracketed error string, or None when stdout holds an answer.
+    """
+    if ndjson:
+        result = _ndjson_result_event(stdout) or {}
+        response = result.get("response")
+        has_text = isinstance(response, str) and response.strip()
+        if has_text or result.get("structured_output") is not None:
+            return None
+        denied = bool(result.get("denied_actions"))
+    elif stdout.strip():
+        return None
+    else:
+        denied = False
+
+    if denied or _DENIAL_MARKER in stderr:
+        return DENIED_MSG
+
+    detail = stderr.strip()
+    return "[No response from Antigravity]" + (f"\n{detail}" if detail else "")
+
+
 def _json_schema_args(schema: str | None) -> list[str]:
     """Return the agy flags that enforce structured JSON output.
 
@@ -512,8 +567,19 @@ def _build_agy_cmd(
     working directory, set separately in `_run_agy`).
 
     Access tier is mutually exclusive: trust (--dangerously-skip-
-    permissions) wins over sandbox (--sandbox). Multi-turn context is
-    handled by Castor's own transcript replay, not agy's --continue.
+    permissions) wins over sandbox. Multi-turn context is handled by
+    Castor's own transcript replay, not agy's --continue.
+
+    The sandbox tier passes --sandbox together with
+    --dangerously-skip-permissions. Since agy 1.3, headless print mode
+    auto-denies every shell command outside trust (allow-rules in
+    settings.json did not match either, tested on agy 1.4.7), and one
+    denial ends the turn with empty output and exit 0. Auto-approving
+    inside --sandbox lets agy run find/grep/git while the OS sandbox
+    keeps the workspace read-only. Confirmed live on 1.4.7: writes to
+    the workspace fail with "Operation not permitted", but writes to
+    the home directory and network access still succeed, so this tier
+    protects the project, not the whole machine.
 
     `--disable-slash-commands` is always passed: Castor's prompts
     routinely inline arbitrary file/directory content, and inlined
@@ -546,7 +612,7 @@ def _build_agy_cmd(
     if trust:
         cmd.append("--dangerously-skip-permissions")
     elif sandbox:
-        cmd.append("--sandbox")
+        cmd.extend(["--sandbox", "--dangerously-skip-permissions"])
     if cwd:
         cmd.extend(["--add-dir", cwd])
     for directory in add_dirs or []:
@@ -589,12 +655,13 @@ def _run_agy(
             repeated --add-dir flags.
         model: If set, pass --model <model> to select the agy model.
             Call gemini_models for the available names.
-        sandbox: If True, pass --sandbox so agy explores with terminal
-            restrictions instead of auto-approving everything. Ignored
-            when trust is True (trust is the broader grant).
+        sandbox: If True, pass --sandbox with auto-approval so agy can
+            run read commands while the workspace stays read-only (see
+            _build_agy_cmd). Ignored when trust is True (trust is the
+            broader grant).
         effort: If set, pass --effort <effort> to select agy's reasoning
-            effort (low/medium/high). Not validated server-side; an
-            invalid value is rejected by agy itself.
+            effort (low/medium/high/xhigh/max). Not validated
+            server-side; an invalid value is rejected by agy itself.
         agent: If set, pass --agent <agent> to route the prompt to one
             of agy's built-in specialized agents (see gemini_agents).
             Not validated server-side; an unknown name is rejected by
@@ -633,6 +700,7 @@ def _run_agy(
         result = subprocess.run(
             cmd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=SUBPROCESS_TIMEOUT,
             cwd=cwd,
@@ -668,7 +736,16 @@ def _run_agy(
         )
         return f"[Antigravity error]\n{result.stderr.strip()}"
 
-    res = result.stdout.strip() or "[No response from Antigravity]"
+    empty = _empty_output_error(
+        result.stdout,
+        result.stderr,
+        ndjson=bool(json_schema),
+    )
+    if empty is not None:
+        logger.warning(f"run_agy: no usable output: {empty}")
+        return empty
+
+    res = result.stdout.strip()
     logger.info(f"run_agy: returning result (length={len(res)})")
     return res
 
@@ -698,6 +775,7 @@ def _repo_fingerprint(cwd: str | None) -> str | None:
             ["git", "rev-parse", "HEAD"],
             cwd=cwd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=10,
         )
@@ -707,6 +785,7 @@ def _repo_fingerprint(cwd: str | None) -> str | None:
             ["git", "status", "--porcelain"],
             cwd=cwd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=10,
         )
@@ -732,6 +811,7 @@ def _get_git_sha(cwd: str) -> str | None:
             ["git", "rev-parse", "HEAD"],
             cwd=cwd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=10,
         )
@@ -751,6 +831,7 @@ def _git_diff(cwd: str) -> str:
             ["git", "diff", "HEAD"],
             cwd=cwd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=30,
         )
@@ -809,6 +890,7 @@ def _cache_key(
     """Hash everything that affects the response into a stable key."""
     payload = json.dumps(
         {
+            "version": CACHE_KEY_VERSION,
             "prompt": prompt,
             "model": model or "",
             "sandbox": sandbox,
@@ -937,7 +1019,11 @@ def _list_models() -> list[str]:
     """Return agy's model names (raw lines), or [] on any failure."""
     try:
         result = subprocess.run(
-            ["agy", "models"], capture_output=True, text=True, timeout=15
+            ["agy", "models"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
@@ -985,8 +1071,8 @@ def _summarize_text(text: str, effort: str = "low") -> str:
 
     Args:
         text: The text to compress.
-        effort: agy reasoning effort to request (low/medium/high).
-            Defaults to "low" for cheap/fast compaction.
+        effort: agy reasoning effort to request (low/medium/high/
+            xhigh/max). Defaults to "low" for cheap/fast compaction.
 
     Returns:
         A prose summary, or a bracketed error/status string.
@@ -1135,7 +1221,7 @@ def _parse_summary(raw: str) -> str:
     raw is stream-json output produced with SUMMARIZE_JSON_SCHEMA — then
     falls back to extracting a JSON object the old way (best-effort)
     when that path comes back empty. That fallback text is narrowed via
-    _ndjson_response_text first when raw is NDJSON, so a schema miss
+    _fallback_text first when raw is NDJSON, so a schema miss
     degrades to the old plain-text failure surface rather than the full
     multi-line transcript. Falls back to {"summary": raw, "key_points":
     []} when neither path yields a valid summary.
@@ -1148,7 +1234,7 @@ def _parse_summary(raw: str) -> str:
                 "key_points": structured.get("key_points", []),
             }
         )
-    text = _ndjson_response_text(raw) or raw
+    text = _fallback_text(raw)
     fallback = {"summary": text, "key_points": []}
     try:
         data = json.loads(_extract_json_blob(text))
@@ -1173,7 +1259,7 @@ def _parse_hits(raw: str) -> str:
     --json-schema requires a root object, not a root array — see
     SEMANTIC_SEARCH_JSON_SCHEMA). Falls back to extracting a bare JSON
     array from raw the old way (best-effort) when that path comes back
-    empty. That fallback text is narrowed via _ndjson_response_text
+    empty. That fallback text is narrowed via _fallback_text
     first when raw is NDJSON, so a schema miss degrades to the old
     plain-text failure surface rather than the full multi-line
     transcript. Falls back to {"raw_markdown": raw} when neither path
@@ -1184,7 +1270,7 @@ def _parse_hits(raw: str) -> str:
         structured.get("hits"), list
     ):
         return json.dumps(structured["hits"])
-    text = _ndjson_response_text(raw) or raw
+    text = _fallback_text(raw)
     try:
         data = json.loads(_extract_json_blob(text))
     except (ValueError, TypeError):
@@ -1285,9 +1371,9 @@ def _dispatch(
         session: When set (and cwd is given), replay that project-scoped
             session's transcript as context and append this turn to it on
             success. Session calls are stateful, so they are never cached.
-        effort: agy reasoning effort (low/medium/high), passed straight
-            through to --effort. Included in the cache key alongside
-            model, since it affects the response.
+        effort: agy reasoning effort (low/medium/high/xhigh/max),
+            passed straight through to --effort. Included in the cache
+            key alongside model, since it affects the response.
         agent: agy agent name, passed straight through to --agent.
             Included in the cache key alongside model/effort.
         json_schema: Internal-only structured-output schema (see
@@ -1501,17 +1587,20 @@ def gemini_prompt(
             summarization, a stronger one for deep reasoning). Call
             gemini_models for the available names. Defaults to agy's
             configured default.
-        effort: Select agy's reasoning effort (low/medium/high) — a
-            cheap/fast-vs-capable tradeoff independent of model choice.
+        effort: Select agy's reasoning effort (low/medium/high/xhigh/
+            max): a cheap/fast-vs-capable tradeoff independent of
+            model choice.
             Defaults to agy's own default when omitted.
         agent: Route the prompt to one of agy's built-in specialized
             agents (e.g. "security-engineer", "root-cause-analyst").
             Call gemini_agents for the available names. Defaults to
             agy's own default agent when omitted.
-        sandbox: If True, agy explores the filesystem (like trust) but
-            runs under terminal restrictions and does not blindly
-            auto-approve actions — the safe middle ground between
-            read-only and trust. Ignored when trust=True.
+        sandbox: If True, agy explores the filesystem and auto-approves
+            read commands (find/grep/git) inside agy's OS sandbox, which
+            keeps the workspace read-only. Writes outside the workspace
+            and network access are not blocked. The middle ground
+            between read-only (where any shell command is auto-denied)
+            and trust. Ignored when trust=True.
         use_cache: If True (default), reuse a stored response when the
             same prompt is re-sent against an unchanged repo (matched by
             git HEAD + working-tree state). Only side-effect-free calls
@@ -1569,6 +1658,26 @@ def _extract_json_blob(text: str) -> str:
     return stripped[start : end + 1]
 
 
+def _ndjson_result_event(stdout: str) -> dict | None:
+    """Return the terminal NDJSON "result" event's payload, or None.
+
+    The payload is the dict under `event["result"]` (see
+    _parse_ndjson_result for the event layout). None means stdout is
+    empty, is not NDJSON, or ended without a result event.
+    """
+    lines = [line for line in stdout.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        event = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(event, dict) or event.get("event") != "result":
+        return None
+    result = event.get("result")
+    return result if isinstance(result, dict) else None
+
+
 def _parse_ndjson_result(stdout: str) -> Any:
     """Extract structured_output from the terminal NDJSON result event.
 
@@ -1583,7 +1692,11 @@ def _parse_ndjson_result(stdout: str) -> Any:
     at `event["result"]["structured_output"]`, not flattened onto the
     event itself. A schema-validation failure surfaces as a "result"
     event with no `structured_output` key at all (status "ERROR"), which
-    this naturally returns None for.
+    this naturally returns None for. Re-checked on agy 1.4.7: the layout
+    is unchanged, and structured_output sits beside a `response` string
+    holding the same JSON as text. A run that ended on a denied tool
+    action has neither (empty response plus a `denied_actions` list);
+    _run_agy turns that into an error before any parser sees it.
 
     Args:
         stdout: The full NDJSON stdout from an agy run.
@@ -1593,22 +1706,11 @@ def _parse_ndjson_result(stdout: str) -> Any:
         the schema's root type), or None on any parse failure, missing
         terminal event, or missing structured_output.
     """
-    lines = [line for line in stdout.strip().splitlines() if line.strip()]
-    if not lines:
-        return None
-    try:
-        event = json.loads(lines[-1])
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(event, dict) or event.get("event") != "result":
-        return None
-    result = event.get("result")
-    if not isinstance(result, dict):
-        return None
-    return result.get("structured_output")
+    result = _ndjson_result_event(stdout)
+    return result.get("structured_output") if result else None
 
 
-def _ndjson_response_text(stdout: str) -> str | None:
+def _fallback_text(stdout: str) -> str:
     """Recover the terminal event's plain response text from NDJSON.
 
     Used as the fallback input when _parse_ndjson_result finds no
@@ -1622,27 +1724,23 @@ def _ndjson_response_text(stdout: str) -> str | None:
     plain text `--output-format text` would have returned directly, so
     recovering just that keeps the old, narrow fallback shape.
 
+    An NDJSON stream with an empty or missing response yields "", never
+    the stream itself. The old `response or stdout` fallback leaked the
+    whole stream (starting with the "init" event) into raw_markdown
+    whenever agy answered with an empty string.
+
     Args:
-        stdout: The full NDJSON stdout from an agy run.
+        stdout: The full NDJSON stdout from an agy run, or plain text.
 
     Returns:
-        The terminal event's response string, or None if no terminal
-        result event (or no response field) is found.
+        The terminal event's response string ("" when absent), or
+        stdout unchanged when it is not NDJSON with a result event.
     """
-    lines = [line for line in stdout.strip().splitlines() if line.strip()]
-    if not lines:
-        return None
-    try:
-        event = json.loads(lines[-1])
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(event, dict) or event.get("event") != "result":
-        return None
-    result = event.get("result")
-    if not isinstance(result, dict):
-        return None
+    result = _ndjson_result_event(stdout)
+    if result is None:
+        return stdout
     response = result.get("response")
-    return response if isinstance(response, str) else None
+    return response if isinstance(response, str) else ""
 
 
 def _validate_index_keys(data: dict) -> bool:
@@ -1677,7 +1775,7 @@ def _parse_index(raw: str, cwd: str) -> str:
     ignored. Falls back to extracting a JSON object from raw the old
     way (stripping code fences, best-effort) if that path comes back
     empty — e.g. schema enforcement failed, or agy fell back to plain
-    text. That fallback text is narrowed via _ndjson_response_text
+    text. That fallback text is narrowed via _fallback_text
     first when raw is NDJSON, so a schema miss degrades to the old
     plain-text failure surface rather than dumping the full multi-line
     transcript (tool calls, permission list, schema echo) as
@@ -1699,7 +1797,7 @@ def _parse_index(raw: str, cwd: str) -> str:
     if isinstance(structured, dict) and _validate_index_keys(structured):
         structured["git_sha"] = git_sha
         return json.dumps(structured)
-    text = _ndjson_response_text(raw) or raw
+    text = _fallback_text(raw)
     fallback: dict[str, Any] = {
         "git_sha": git_sha,
         "raw_markdown": text,
@@ -2044,13 +2142,14 @@ def gemini_start(
             trust=True.
         add_dirs: Extra directories to grant agy read access to.
         model: Select the agy model (see gemini_models).
-        effort: Select agy's reasoning effort (low/medium/high). Defaults
-            to agy's own default when omitted.
+        effort: Select agy's reasoning effort (low/medium/high/xhigh/
+            max). Defaults to agy's own default when omitted.
         agent: Route the prompt to one of agy's built-in specialized
             agents (see gemini_agents). Defaults to agy's own default
             agent when omitted.
-        sandbox: If True, agy explores under terminal restrictions.
-            Ignored when trust=True.
+        sandbox: If True, agy explores with auto-approved commands
+            inside its OS sandbox (workspace read-only). Ignored when
+            trust=True.
         use_cache: If True (default), a cache hit completes the job
             immediately without spawning agy.
 
@@ -2267,7 +2366,11 @@ def gemini_models() -> str:
     """
     try:
         result = subprocess.run(
-            ["agy", "models"], capture_output=True, text=True, timeout=30
+            ["agy", "models"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
         )
     except FileNotFoundError:
         return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
@@ -2295,7 +2398,11 @@ def gemini_agents() -> str:
     """
     try:
         result = subprocess.run(
-            ["agy", "agents"], capture_output=True, text=True, timeout=30
+            ["agy", "agents"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
         )
     except FileNotFoundError:
         return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
@@ -2328,7 +2435,11 @@ def gemini_auth() -> str:
     """
     try:
         result = subprocess.run(
-            ["agy", "--version"], capture_output=True, text=True, timeout=10
+            ["agy", "--version"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         return f"[Error: `agy` CLI not found. Install: {INSTALL_CMD}]"
@@ -2395,7 +2506,11 @@ def _status_extras() -> str:
 
     try:
         result = subprocess.run(
-            ["agy", "models"], capture_output=True, text=True, timeout=15
+            ["agy", "models"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
         )
         if result.returncode == 0:
             models = result.stdout.strip()
@@ -2407,7 +2522,11 @@ def _status_extras() -> str:
 
     try:
         agents = subprocess.run(
-            ["agy", "agents"], capture_output=True, text=True, timeout=15
+            ["agy", "agents"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
         )
         if agents.returncode == 0:
             agent_names = agents.stdout.strip()
@@ -2458,7 +2577,11 @@ def gemini_status(cwd: str | None = None) -> str:
 
     try:
         version_result = subprocess.run(
-            ["agy", "--version"], capture_output=True, text=True, timeout=10
+            ["agy", "--version"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         return not_installed
@@ -2477,6 +2600,7 @@ def gemini_status(cwd: str | None = None) -> str:
                 "--print-timeout=30s",
             ],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=40,
         )

@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-10-26
+
+### Fixed
+
+- **Sandbox tier works again on agy 1.3+.** Headless print mode now
+  auto-denies every shell command it can't prompt for (allow-rules in
+  `settings.json` did not match either), and one denial ends the run with
+  empty output and exit code 0. All six sandboxed workflow tools
+  (`gemini_index`, `gemini_find_usages`, `gemini_explain_error`,
+  `gemini_summarize`, `gemini_semantic_search`, `gemini_document`) came
+  back as `[No response from Antigravity]` or a raw NDJSON dump. The
+  sandbox tier now passes `--sandbox --dangerously-skip-permissions`:
+  commands are auto-approved, and agy's OS sandbox keeps the workspace
+  read-only. Verified on agy 1.4.7 that workspace writes fail; writes
+  elsewhere in the home directory and network access are not blocked.
+- **Denied or empty runs return a clear error.** `_run_agy` detects the
+  denial (stderr marker in text mode, `denied_actions` in stream-json) and
+  returns a bracketed message pointing at `sandbox=True` / `trust=True`,
+  so it is never cached or appended to a session.
+- **Parsers no longer leak the NDJSON stream.** An empty `response` in the
+  result event used to fall back to the whole stdout, so `raw_markdown`
+  started with the `init` event. The fallback now yields the response text
+  only.
+- **Child processes get `stdin=DEVNULL`.** Every `subprocess.run` call
+  inherited the MCP server's stdin, which is the JSON-RPC pipe from Claude
+  Code.
+
+### Changed
+
+- Cache keys carry a version (`CACHE_KEY_VERSION = 2`), invalidating
+  entries written before this fix, some of which held denied runs.
+- Effort docs list agy 1.4's levels (`low|medium|high|xhigh|max`); the agy
+  surface snapshot is refreshed for that and the new `--print-timeout`
+  description (Castor still passes an explicit 300s).
+
 ## [0.7.0] - 2026-07-31
 
 ### Added
