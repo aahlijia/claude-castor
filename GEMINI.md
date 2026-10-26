@@ -99,13 +99,14 @@ directories without inlining them.
 
 | Tier | Flag | What agy can do |
 |---|---|---|
-| read-only (default) | — | Answers from inlined content; no filesystem actions |
-| sandbox | `sandbox=True` | Explores the filesystem under terminal restrictions; does not blindly auto-approve actions |
+| read-only (default) | — | Answers from inlined content; can read files, but any shell command is auto-denied and the call returns an error |
+| sandbox | `sandbox=True` | Explores and runs read commands (auto-approved) inside agy's OS sandbox; the workspace stays read-only |
 | trust | `trust=True` | Full agent mode (`--dangerously-skip-permissions`); explores, greps, follows imports, and auto-approves all tool actions |
 
-`sandbox=True` is the safe middle ground: agy actively explores (so you get
-agent-quality results) but cannot run unrestricted commands. Prefer it over `trust`
-unless the task genuinely needs agy to write files or run arbitrary commands.
+`sandbox=True` is the middle ground: agy actively explores (so you get
+agent-quality results) and cannot modify the project. It can still write outside
+the workspace and reach the network. Prefer it over `trust` unless the task needs
+agy to write project files.
 
 **Prerequisites for sandbox and trust:**
 - `cwd` is **required** for `trust=True` — pass the absolute project path so agy's
@@ -304,7 +305,7 @@ Implications for how you call the tool:
 | User mentions a specific file | `gemini_prompt` with that file in `files` |
 | User says "explore the project" | `gemini_prompt` with `trust=True` + `cwd`, no files |
 | Need raw output | `gemini_prompt` with `raw=True` |
-| Explore safely (no writes/commands) | `gemini_prompt` with `sandbox=True` + `cwd` |
+| Explore safely (project stays read-only) | `gemini_prompt` with `sandbox=True` + `cwd` |
 | Follow-up on the same codebase | `gemini_prompt` with `session="…"` (+ `cwd`) |
 | Long job — keep working meanwhile | `gemini_start`, then `gemini_poll` |
 | Fan-out across subtrees | several `gemini_start`, then poll each |
