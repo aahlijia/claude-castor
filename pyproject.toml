@@ -1,6 +1,6 @@
 [project]
 name = "claude-castor"
-version = "0.7.0"
+version = "0.7.1"
 description = "An Antigravity MCP for Claude Code — offloads large-context work to Google's free agy CLI."
 readme = "README.md"
 license = "MIT"
