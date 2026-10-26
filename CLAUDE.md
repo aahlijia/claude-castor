@@ -76,7 +76,7 @@ the prompt — see `GEMINI.md` for the prompting guide.
 | `continue_session` | `bool` | Resume the project's default session (`__default__`); requires `cwd` (default: false) |
 | `session` | `str \| None` | Name a project-scoped session to continue; Castor replays its transcript. Requires `cwd`; never cached |
 | `model` | `str \| None` | Select the agy model (see `gemini_models`; defaults to agy's default) |
-| `sandbox` | `bool` | Explore under terminal restrictions — safe middle tier (default: false; ignored when `trust=True`) |
+| `sandbox` | `bool` | Explore with auto-approved commands inside agy's OS sandbox (workspace read-only); middle tier (default: false; ignored when `trust=True`) |
 | `use_cache` | `bool` | Reuse a stored response for the same prompt against an unchanged repo (default: true; side-effect-free calls only) |
 
 ### Workflow tools
@@ -89,6 +89,7 @@ side-effect-free, so results are cached against the repo state in a git repo.
 |---|---|---|---|
 | `gemini_index` | `(cwd, model=None)` | sandbox | Compact repo map (layout, entry points, key symbols) |
 | `gemini_review` | `(cwd, diff=None, model=None)` | read-only | Correctness review of a diff (defaults to `git diff HEAD`) |
+| `gemini_security_review` | `(cwd, diff=None, model=None)` | read-only | Security-focused review of a diff (`security-engineer` agent; complements `gemini_review`) |
 | `gemini_find_usages` | `(cwd, symbol, model=None)` | sandbox | Every use of a symbol, with paths/lines |
 | `gemini_explain_error` | `(cwd, error, model=None)` | sandbox | Ranked root-cause hypotheses for an error |
 | `gemini_summarize` | `(cwd, target, model=None)` | sandbox | Token-lean `{summary, key_points}` of a file/dir |
@@ -181,14 +182,35 @@ run `agy -p "ok"` to complete Google sign-in.
 agy print mode has a 300s timeout per call. For large directories in agent mode
 (`trust=True`), agy explores on its own — prefer that over pre-loading the directory.
 
+**"Antigravity produced no output: it tried to run a shell command…"**
+agy 1.3+ auto-denies shell commands it can't prompt for in headless mode, which
+ends the run with no output. Retry with `sandbox=True` (read commands allowed,
+workspace read-only) or `trust=True` (full access), with `cwd` set to the
+project root.
+
 **Garbled or empty response**
 Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 
 ---
 
+## Development
+
+- No test suite. Before committing, run:
+  ```bash
+  uvx ruff check server.py
+  uvx ruff format --check server.py
+  python3 -m py_compile server.py
+  ```
+- Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
+  the agy flags and subcommands `server.py` depends on. After an intended agy
+  upgrade, update `server.py`, then refresh with `--update-snapshot`.
+- The version string lives only in `pyproject.toml`. Work happens on `develop`.
+
+---
+
 ## Phase 2
 
-See `.docs/development-plan.md` for the full roadmap. Key items:
+See `.dev/development-plan.md` for the full roadmap. Key items:
 
 - Persistent chat sessions with `gemini_reset` tool (agy `--continue`) — **done**
 - Model selection (`model` param + `gemini_models` tool) — **done**
