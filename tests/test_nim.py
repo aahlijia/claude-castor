@@ -754,11 +754,17 @@ def test_agent_loop_runs_tool_then_answers(stub, repo):
 def test_agent_step_cap_forces_an_answer_without_tools(stub, repo):
     stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
     stub.queue.append((200, {}, _completion("best effort")))
-    out = _tool(server.nim_agent)("t", str(repo), max_steps=2)
+    out = _tool(server.nim_agent)("find it", str(repo), max_steps=2)
     assert out.startswith("best effort")
     last = stub.posts()[1][3]
     assert "tools" not in last
-    assert last["messages"][-1]["content"] == server.NIM_AGENT_FINAL_NUDGE
+    # Models keep calling tools while the history holds tool calls, so the
+    # final request flattens the transcript into one plain user message.
+    assert [m["role"] for m in last["messages"]] == ["system", "user"]
+    final = last["messages"][-1]["content"]
+    assert final.startswith("find it")
+    assert 'list_dir({"path": "src"})' in final and "a.py" in final
+    assert final.endswith(server.NIM_AGENT_FINAL_NUDGE)
 
 
 def test_agent_ignoring_the_cap_gives_a_clear_error(stub, repo):
@@ -953,4 +959,6 @@ def test_agent_tells_the_model_its_budget_and_warns_before_the_last_step(
     assert posts[1]["messages"][-1]["content"] == (
         server.NIM_AGENT_LAST_TOOL_NUDGE
     )
-    assert posts[2]["messages"][-1]["content"] == server.NIM_AGENT_FINAL_NUDGE
+    assert posts[2]["messages"][-1]["content"].endswith(
+        server.NIM_AGENT_FINAL_NUDGE
+    )
