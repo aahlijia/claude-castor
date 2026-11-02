@@ -7,6 +7,7 @@ HTTP server that replays scripted responses and records every request.
 import importlib
 import json
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -117,7 +118,11 @@ def stub(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "NIM_BACKOFF_BASE", 0.01)
     monkeypatch.setattr(server, "NIM_BACKOFF_JITTER", 0.0)
 
+    real_run = server.subprocess.run
+
     def no_agy(*args, **kwargs):
+        if args and args[0][:1] == ["git"]:  # the agent's file map
+            return real_run(*args, **kwargs)
         raise AssertionError(f"agy/subprocess must not run: {args}")
 
     monkeypatch.setattr(server.subprocess, "run", no_agy)
@@ -718,6 +723,43 @@ def test_agent_grep_searches_a_named_log_but_skips_logs_in_a_walk(repo):
     hit = server._agent_grep(repo, "FAILED", "run.log", None)
     assert hit == "run.log:2:FAILED test_x"
     assert server._agent_grep(repo, "FAILED", ".", None) == "[no matches]"
+
+
+def test_agent_grep_context_shows_lines_after_each_match(repo):
+    out = server._agent_run_tool(
+        repo, "grep", {"pattern": "TARGET", "path": "src", "context": 1}
+    )
+    assert out == "src/a.py:2:TARGET = 1\nsrc/a.py-3-three"
+
+
+def test_agent_grep_reports_the_total_when_capped(repo):
+    (repo / "many.txt").write_text("hit\n" * 70)
+    out = server._agent_grep(repo, "hit", "many.txt", None)
+    assert out.count("many.txt:") == server.NIM_AGENT_MAX_GREP_HITS
+    assert out.endswith(
+        f"[showing {server.NIM_AGENT_MAX_GREP_HITS} of 70 matching lines; "
+        "narrow the search]"
+    )
+
+
+def test_agent_file_map_lists_tracked_files_with_line_counts(tmp_path):
+    root = tmp_path / "g"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("one\ntwo\nthree\n")
+    (root / ".env").write_text("SECRET=1\n")
+    (root / "run.log").write_text("noise\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    out = server._agent_file_map(root.resolve())
+    assert "src/a.py (3 lines)" in out
+    assert ".env" not in out and "run.log" not in out
+    assert server._agent_file_map(tmp_path) == ""  # not a git repo
+
+
+def test_agent_system_prompt_offers_batching_and_the_file_map(stub, repo):
+    stub.queue.append((200, {}, _completion("done")))
+    _tool(server.nim_agent)("t", str(repo))
+    system = stub.posts()[0][3]["messages"][0]["content"]
+    assert f"up to {server.NIM_AGENT_CALLS_PER_STEP} tool calls" in system
 
 
 def test_agent_tool_edge_cases(repo):
