@@ -3948,9 +3948,16 @@ NIM_AGENT_TOOLS = [
     },
 ]
 
+# path:12, path:12-20 or a list such as path:12, 40-45.
+_CITATION_LINES = r":(\d+(?:-\d+)?(?:,\s*\d+(?:-\d+)?)*)"
 _CITATION_RE = re.compile(
     r"(?<![\w.-])(/?(?:[\w.-]+/)*[\w.-]+\.[A-Za-z][A-Za-z0-9]*)"
-    r":(\d+)(?:-(\d+))?"
+    + _CITATION_LINES
+)
+# Extensionless names (Makefile:10) count only when the file exists, so
+# prose like "step:3" is left alone.
+_BARE_CITATION_RE = re.compile(
+    r"(?<![\w./-])((?:[\w.-]+/)*[A-Za-z][\w-]*)" + _CITATION_LINES
 )
 
 
@@ -4387,6 +4394,14 @@ def _nim_agent_loop(
     return ok, text, stats
 
 
+def _citation_lines_exist(lines: str, total: int | None) -> bool:
+    """True when every line or range in "12, 40-45" is within `total`."""
+    if total is None:
+        return False
+    spans = re.findall(r"(\d+)(?:-(\d+))?", lines)
+    return all(1 <= int(a) <= int(b or a) <= total for a, b in spans)
+
+
 def _agent_verify_citations(answer: str, root: Path) -> tuple[str, int, int]:
     """Mark every path:line citation that doesn't exist as [unverified].
 
@@ -4408,17 +4423,19 @@ def _agent_verify_citations(answer: str, root: Path) -> tuple[str, int, int]:
             )
         return counts[raw]
 
-    def mark(match: re.Match) -> str:
-        raw, first, last = match.group(1), int(match.group(2)), match.group(3)
-        total = line_count(raw)
+    def mark(match: re.Match, bare: bool = False) -> str:
+        total = line_count(match.group(1))
+        if bare and total is None:
+            return match.group(0)
         tally[1] += 1
-        end = int(last) if last else first
-        if total is not None and 1 <= first <= end <= total:
+        if _citation_lines_exist(match.group(2), total):
             tally[0] += 1
             return match.group(0)
         return match.group(0) + " [unverified]"
 
-    return _CITATION_RE.sub(mark, answer), tally[0], tally[1]
+    answer = _CITATION_RE.sub(mark, answer)
+    answer = _BARE_CITATION_RE.sub(lambda m: mark(m, bare=True), answer)
+    return answer, tally[0], tally[1]
 
 
 def _nim_agent_model() -> str:
