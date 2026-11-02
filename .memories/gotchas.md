@@ -34,7 +34,10 @@
   stdin is Claude Code's JSON-RPC pipe.
 - **Each Claude Code session spawns its own castor server process**
   (`uv run --directory <repo> server.py`). Restart the session to pick up
-  `server.py` edits; no reinstall needed.
+  `server.py` edits; no reinstall needed. It runs whatever branch this repo
+  has checked out, so switching branches here changes the tools every other
+  project sees (NQC's overnight run uses the NIM roles). Keep `develop` checked
+  out unless a session is testing a branch on purpose.
 - **Heavy live testing hits the Antigravity individual quota**
   ("Individual quota reached"); keep probes small.
 - **`nim_models` lists models the account cannot call.** Kimi K2.6 and Nemotron 3
