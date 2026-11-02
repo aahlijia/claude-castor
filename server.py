@@ -4608,13 +4608,18 @@ def nim_agent_start(
         "max_steps": max_steps,
         "max_tokens": max_tokens,
     }
+    return _start_agent_job("NIM agent", kwargs)
+
+
+def _start_agent_job(label: str, kwargs: dict[str, Any]) -> str:
+    """Queue a _dispatch_nim_agent run and return the poll message."""
     job_id = uuid.uuid4().hex[:8]
     with _jobs_lock:
         _evict_jobs()
         _jobs[job_id] = _Job(status="running", started_at=time.time())
     _job_pool.submit(_run_job, job_id, kwargs, _dispatch_nim_agent)
     return (
-        f"Started background NIM agent job {job_id}. Poll it with "
+        f"Started background {label} job {job_id}. Poll it with "
         f'gemini_poll("{job_id}") — do other work first, then check back.'
     )
 
@@ -4762,10 +4767,42 @@ def nim_scout(
     Returns:
         Up to 15 bullets of "path:start-end - why", or a bracketed error.
     """
-    task = NIM_SCOUT_PROMPT.format(
+    task = _scout_task(question)
+    return _dispatch_nim_agent(task, cwd, model, max_steps or NIM_SCOUT_STEPS)
+
+
+@mcp.tool()
+def nim_scout_start(
+    question: str,
+    cwd: str,
+    model: str | None = None,
+    max_steps: int | None = None,
+) -> str:
+    """Start nim_scout in the background; collect it with gemini_poll.
+
+    Args:
+        question: See nim_scout.
+        cwd: See nim_scout.
+        model: See nim_scout.
+        max_steps: See nim_scout.
+
+    Returns:
+        A message with the job id to pass to gemini_poll.
+    """
+    kwargs = {
+        "task": _scout_task(question),
+        "cwd": cwd,
+        "model": model,
+        "max_steps": max_steps or NIM_SCOUT_STEPS,
+    }
+    return _start_agent_job("NIM scout", kwargs)
+
+
+def _scout_task(question: str) -> str:
+    """The scout role's task text for one question."""
+    return NIM_SCOUT_PROMPT.format(
         question=question.strip(), limit=NIM_SCOUT_MAX_ITEMS
     )
-    return _dispatch_nim_agent(task, cwd, model, max_steps or NIM_SCOUT_STEPS)
 
 
 @mcp.tool()
@@ -4800,12 +4837,63 @@ def nim_first_pass_review(
         Findings ranked Critical, Important, Minor with path:line
         citations (checked), or "No issues found.", or a bracketed error.
     """
+    task, error = _review_task(cwd, diff_file, rev_range, focus)
+    if error or task is None:
+        return error or "[Error: no diff.]"
+    return _dispatch_nim_agent(task, cwd, model, max_steps or NIM_REVIEW_STEPS)
+
+
+@mcp.tool()
+def nim_first_pass_review_start(
+    cwd: str,
+    diff_file: str | None = None,
+    rev_range: str | None = None,
+    focus: str | None = None,
+    model: str | None = None,
+    max_steps: int | None = None,
+) -> str:
+    """Start nim_first_pass_review in the background; poll with gemini_poll.
+
+    A review takes a few minutes, so start it, do other work, then
+    collect it. The diff is read now, so later edits don't change what is
+    reviewed, and a missing or oversized diff is reported at once.
+
+    Args:
+        cwd: See nim_first_pass_review.
+        diff_file: See nim_first_pass_review.
+        rev_range: See nim_first_pass_review.
+        focus: See nim_first_pass_review.
+        model: See nim_first_pass_review.
+        max_steps: See nim_first_pass_review.
+
+    Returns:
+        A message with the job id to pass to gemini_poll, or a bracketed
+        error.
+    """
+    task, error = _review_task(cwd, diff_file, rev_range, focus)
+    if error or task is None:
+        return error or "[Error: no diff.]"
+    kwargs = {
+        "task": task,
+        "cwd": cwd,
+        "model": model,
+        "max_steps": max_steps or NIM_REVIEW_STEPS,
+    }
+    return _start_agent_job("NIM first-pass review", kwargs)
+
+
+def _review_task(
+    cwd: str,
+    diff_file: str | None,
+    rev_range: str | None,
+    focus: str | None,
+) -> tuple[str | None, str | None]:
+    """The review role's task text: (task, None) or (None, error)."""
     diff, error = _review_diff_text(cwd, diff_file, rev_range)
     if error or diff is None:
-        return error or "[Error: no diff.]"
+        return None, error
     rules = f"\nProject rules to check:\n{focus.strip()}\n" if focus else ""
-    task = NIM_REVIEW_PROMPT.format(focus=rules, diff=diff)
-    return _dispatch_nim_agent(task, cwd, model, max_steps or NIM_REVIEW_STEPS)
+    return NIM_REVIEW_PROMPT.format(focus=rules, diff=diff), None
 
 
 @mcp.tool()
@@ -4833,23 +4921,70 @@ def nim_triage_log(
         A verdict line and "log:LINE - what failed - likely cause" items,
         or a bracketed error.
     """
+    task, root, error = _triage_task(cwd, log_path, question)
+    if error or task is None:
+        return error or "[Error: no log.]"
+    return _dispatch_nim_agent(
+        task, root, model, max_steps or NIM_TRIAGE_STEPS
+    )
+
+
+@mcp.tool()
+def nim_triage_log_start(
+    cwd: str,
+    log_path: str,
+    question: str | None = None,
+    model: str | None = None,
+    max_steps: int | None = None,
+) -> str:
+    """Start nim_triage_log in the background; collect it with gemini_poll.
+
+    Args:
+        cwd: See nim_triage_log.
+        log_path: See nim_triage_log.
+        question: See nim_triage_log.
+        model: See nim_triage_log.
+        max_steps: See nim_triage_log.
+
+    Returns:
+        A message with the job id to pass to gemini_poll, or a bracketed
+        error.
+    """
+    task, root, error = _triage_task(cwd, log_path, question)
+    if error or task is None:
+        return error or "[Error: no log.]"
+    kwargs = {
+        "task": task,
+        "cwd": root,
+        "model": model,
+        "max_steps": max_steps or NIM_TRIAGE_STEPS,
+    }
+    return _start_agent_job("NIM log triage", kwargs)
+
+
+def _triage_task(
+    cwd: str, log_path: str, question: str | None
+) -> tuple[str | None, str, str | None]:
+    """The triage role's task text: (task, resolved root, error)."""
     root = Path(cwd).expanduser()
     if not root.is_dir():
-        return f"[Error: cwd {cwd!r} is not a directory.]"
+        return None, cwd, f"[Error: cwd {cwd!r} is not a directory.]"
     root = root.resolve()
     target, error = _agent_resolve(root, log_path)
     if error or target is None or not target.is_file():
         return (
-            f"[Error: log_path must be a readable file inside cwd "
-            f"({error or 'not a file'}).]"
+            None,
+            str(root),
+            (
+                f"[Error: log_path must be a readable file inside cwd "
+                f"({error or 'not a file'}).]"
+            ),
         )
     extra = f"\nAlso determine: {question.strip()}\n" if question else ""
     task = NIM_TRIAGE_PROMPT.format(
         log=target.relative_to(root), question=extra
     )
-    return _dispatch_nim_agent(
-        task, str(root), model, max_steps or NIM_TRIAGE_STEPS
-    )
+    return task, str(root), None
 
 
 if __name__ == "__main__":
