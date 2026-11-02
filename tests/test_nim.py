@@ -1,0 +1,551 @@
+"""Tests for the NVIDIA NIM backend, run against a local stub server.
+
+No network and no real API key: CASTOR_NIM_BASE_URL points at a loopback
+HTTP server that replays scripted responses and records every request.
+"""
+
+import importlib
+import json
+import re
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+server = importlib.import_module("server")
+
+KEY = "nvapi-test-secret-key"
+
+
+def _tool(tool):
+    """Unwrap a @mcp.tool() object (plain function or FunctionTool)."""
+    return getattr(tool, "fn", tool)
+
+
+def _completion(text, finish="stop"):
+    return {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": finish,
+            }
+        ]
+    }
+
+
+class Stub:
+    """Scripted OpenAI-compatible endpoint on a loopback port."""
+
+    def __init__(self):
+        self.queue = []  # (status, headers, body) consumed per POST
+        self.requests = []  # (method, path, headers, parsed body)
+        self.models = ["meta/llama-3.3-70b-instruct", "nvidia/nemotron-x"]
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _reply(self, status, headers, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                stub.requests.append(("GET", self.path, dict(self.headers), None))
+                data = [{"id": m} for m in stub.models]
+                self._reply(200, {}, {"data": data})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                stub.requests.append(("POST", self.path, dict(self.headers), body))
+                if stub.queue:
+                    status, headers, payload = stub.queue.pop(0)
+                else:
+                    status, headers, payload = (
+                        200,
+                        {},
+                        _completion("stub answer"),
+                    )
+                self._reply(status, headers, payload)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
+
+    def posts(self):
+        return [r for r in self.requests if r[0] == "POST"]
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def stub(tmp_path, monkeypatch):
+    s = Stub()
+    monkeypatch.setenv("CASTOR_NIM_BASE_URL", s.url)
+    monkeypatch.setenv("NVIDIA_API_KEY", KEY)
+    monkeypatch.delenv("NVIDIA_NIM_API_KEY", raising=False)
+    monkeypatch.delenv("CASTOR_NIM_MODEL", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    # Fast, deterministic backoff.
+    monkeypatch.setattr(server, "NIM_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(server, "NIM_BACKOFF_JITTER", 0.0)
+
+    def no_agy(*args, **kwargs):
+        raise AssertionError(f"agy/subprocess must not run: {args}")
+
+    monkeypatch.setattr(server.subprocess, "run", no_agy)
+    server._nim_reset_state()
+    yield s
+    server._nim_reset_state()
+    s.close()
+
+
+# --- classification -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "kind", "retryable"),
+    [
+        (429, "rate_limit", True),
+        (500, "upstream", True),
+        (503, "upstream", True),
+        (529, "upstream", True),
+        (401, "auth", False),
+        (402, "billing", False),
+        (403, "permission", False),
+        (404, "not_found", False),
+        (400, "invalid", False),
+        (422, "invalid", False),
+        (413, "context", False),
+        (418, "other", False),
+    ],
+)
+def test_classify_status(status, kind, retryable):
+    failure = server._classify_nim_status(status, "boom")
+    assert (failure.kind, failure.retryable) == (kind, retryable)
+
+
+def test_classify_context_window_on_400():
+    failure = server._classify_nim_status(
+        400, "This model's maximum context length is 8192 tokens"
+    )
+    assert failure.kind == "context"
+    assert not failure.retryable
+
+
+def test_parse_retry_after():
+    assert server._parse_retry_after("7") == 7.0
+    assert server._parse_retry_after("0") == 0.0
+    assert server._parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None
+    assert server._parse_retry_after(None) is None
+    assert server._parse_retry_after("-3") is None
+
+
+def test_error_detail_shapes():
+    assert server._nim_error_detail('{"detail": "bad"}') == "bad"
+    assert server._nim_error_detail('{"error": {"message": "nope"}}') == "nope"
+    assert server._nim_error_detail("plain text") == "plain text"
+    assert "loc" in server._nim_error_detail('{"detail": [{"loc": ["x"]}]}')
+
+
+# --- limiter --------------------------------------------------------------
+
+
+def test_sliding_window_limiter():
+    limiter = server._SlidingWindowLimiter(2, 0.2)
+    assert limiter.reserve() == 0.0
+    assert limiter.reserve() == 0.0
+    wait = limiter.reserve()
+    assert 0 < wait <= 0.2
+    time.sleep(0.25)
+    assert limiter.reserve() == 0.0
+
+
+def test_admit_fails_fast_when_wait_too_long(monkeypatch):
+    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
+    server._nim_reset_state()
+    server._nim_set_cooldown(30)
+    err = server._nim_admit()
+    assert err and err.startswith("[NVIDIA NIM is rate-limited")
+    server._nim_reset_state()
+
+
+# --- chat -----------------------------------------------------------------
+
+
+def test_prompt_success_sends_expected_request(stub):
+    out = _tool(server.nim_prompt)("hello", use_cache=False)
+    assert out == "stub answer"
+    (_, path, headers, body) = stub.posts()[0]
+    assert path == "/v1/chat/completions"
+    assert headers["Authorization"] == f"Bearer {KEY}"
+    assert body["model"] == server.NIM_DEFAULT_MODEL
+    assert body["stream"] is False
+    assert body["messages"][0] == {
+        "role": "system",
+        "content": server.SYSTEM_INSTRUCTION,
+    }
+    assert body["messages"][1]["role"] == "user"
+    assert "hello" in body["messages"][1]["content"]
+
+
+def test_raw_skips_system_message(stub):
+    _tool(server.nim_prompt)("hi", raw=True, use_cache=False)
+    messages = stub.posts()[0][3]["messages"]
+    assert [m["role"] for m in messages] == ["user"]
+
+
+def test_model_resolution_order(stub, monkeypatch):
+    _tool(server.nim_prompt)("a", use_cache=False)
+    monkeypatch.setenv("CASTOR_NIM_MODEL", "env/model")
+    _tool(server.nim_prompt)("b", use_cache=False)
+    _tool(server.nim_prompt)("c", model="arg/model", use_cache=False)
+    models = [r[3]["model"] for r in stub.posts()]
+    assert models == [server.NIM_DEFAULT_MODEL, "env/model", "arg/model"]
+
+
+def test_files_are_inlined(stub, tmp_path):
+    src = tmp_path / "a.py"
+    src.write_text("print('inlined-marker')\n")
+    _tool(server.nim_prompt)("explain", files=[str(src)], use_cache=False)
+    user = stub.posts()[0][3]["messages"][-1]["content"]
+    assert "inlined-marker" in user and f"[FILE: {src}]" in user
+
+
+def test_missing_key(stub, monkeypatch):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    out = _tool(server.nim_prompt)("hi")
+    assert out.startswith("[NVIDIA NIM is not configured")
+    assert not stub.requests
+
+
+def test_alternate_key_env_var(stub, monkeypatch):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_NIM_API_KEY", "nvapi-alt")
+    _tool(server.nim_prompt)("hi", use_cache=False)
+    assert stub.posts()[0][2]["Authorization"] == "Bearer nvapi-alt"
+
+
+def test_cache_hit_skips_second_request(stub):
+    first = _tool(server.nim_prompt)("same question")
+    second = _tool(server.nim_prompt)("same question")
+    assert first == second == "stub answer"
+    assert len(stub.posts()) == 1
+
+
+def test_cache_key_varies_with_model(stub):
+    _tool(server.nim_prompt)("q", model="m/one")
+    _tool(server.nim_prompt)("q", model="m/two")
+    assert len(stub.posts()) == 2
+
+
+def test_bracket_prefixed_answer_is_a_success(stub):
+    stub.queue.append((200, {}, _completion("[1] first item, [2] second")))
+    out = _tool(server.nim_prompt)("list things")
+    assert out.startswith("[1]")
+    # Cached, because it was a real answer despite the leading bracket.
+    _tool(server.nim_prompt)("list things")
+    assert len(stub.posts()) == 1
+
+
+def test_think_blocks_stripped(stub):
+    stub.queue.append(
+        (200, {}, _completion("<think>secret chain\nof thought</think>\nfinal"))
+    )
+    assert _tool(server.nim_prompt)("q", use_cache=False) == "final"
+
+
+def test_truncation_note(stub):
+    stub.queue.append((200, {}, _completion("partial", finish="length")))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("partial") and "truncated at max_tokens" in out
+
+
+def test_empty_content_is_error(stub):
+    stub.queue.append((200, {}, _completion("", finish="length")))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("[NVIDIA NIM returned no content")
+
+
+def test_input_budget_enforced(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_MAX_INPUT_CHARS", "100")
+    out = _tool(server.nim_prompt)("x" * 500, use_cache=False)
+    assert "input budget" in out
+    assert not stub.requests
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.5])
+def test_bad_temperature(stub, temperature):
+    out = _tool(server.nim_prompt)("q", temperature=temperature)
+    assert out.startswith("[Error: temperature")
+    assert not stub.requests
+
+
+# --- failures and retries -------------------------------------------------
+
+
+def test_429_then_success_retries(stub):
+    stub.queue.append((429, {"Retry-After": "0"}, {"detail": "slow down"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out == "stub answer"
+    assert len(stub.posts()) == 2
+    assert server._nim_stats["rate_limited"] == 1
+    assert server._nim_stats["ok"] == 1
+
+
+def test_persistent_429_gives_up_after_max_attempts(stub):
+    for _ in range(10):
+        stub.queue.append((429, {"Retry-After": "0"}, {"detail": "no"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("[NVIDIA NIM error — rate limited")
+    assert len(stub.posts()) == server.NIM_MAX_ATTEMPTS
+
+
+def test_500_retried_then_success(stub):
+    stub.queue.append((503, {}, {"detail": "overloaded"}))
+    stub.queue.append((502, {}, {"detail": "bad gateway"}))
+    assert _tool(server.nim_prompt)("q", use_cache=False) == "stub answer"
+    assert len(stub.posts()) == 3
+
+
+@pytest.mark.parametrize(
+    ("status", "needle"),
+    [
+        (401, "API key rejected"),
+        (402, "credits or quota exhausted"),
+        (403, "access denied"),
+        (404, "nim_models"),
+        (400, "invalid request"),
+    ],
+)
+def test_fatal_status_not_retried(stub, status, needle):
+    stub.queue.append((status, {}, {"detail": "nope"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("[NVIDIA NIM error") and needle in out
+    assert len(stub.posts()) == 1
+
+
+def test_error_responses_are_not_cached_or_sessioned(stub, tmp_path):
+    stub.queue.append((401, {}, {"detail": "nope"}))
+    _tool(server.nim_prompt)("q", cwd=str(tmp_path), session="s1")
+    assert not server._session_path(str(tmp_path), "s1").exists()
+    stub.queue.append((401, {}, {"detail": "nope"}))
+    _tool(server.nim_prompt)("q")
+    assert _tool(server.nim_prompt)("q") == "stub answer"  # not a cached error
+
+
+def test_api_key_is_redacted_from_errors(stub):
+    stub.queue.append((400, {}, {"detail": f"bad token {KEY} rejected"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert KEY not in out and "***" in out
+
+
+def test_429_sets_cooldown_that_fails_fast(stub, monkeypatch):
+    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
+    for _ in range(10):
+        stub.queue.append((429, {"Retry-After": "120"}, {"detail": "no"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert "rate-limited" in out
+    before = len(stub.posts())
+    again = _tool(server.nim_prompt)("q2", use_cache=False)
+    assert "rate-limited" in again
+    assert len(stub.posts()) == before  # cooldown blocked the second call
+
+
+def test_network_error_is_reported(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(server, "NIM_MAX_ATTEMPTS", 2)
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("[NVIDIA NIM error — could not reach")
+
+
+def test_non_https_base_url_refused(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_BASE_URL", "http://example.com/v1")
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert "must use https" in out
+    assert not stub.requests
+
+
+# --- sessions -------------------------------------------------------------
+
+
+def test_session_requires_cwd(stub):
+    out = _tool(server.nim_prompt)("q", session="s")
+    assert out.startswith("[Error: cwd is required")
+
+
+def test_session_replays_history(stub, tmp_path):
+    cwd = str(tmp_path)
+    _tool(server.nim_prompt)("first question", cwd=cwd, session="s")
+    _tool(server.nim_prompt)("second question", cwd=cwd, session="s")
+    second_user = stub.posts()[1][3]["messages"][-1]["content"]
+    assert "first question" in second_user and "stub answer" in second_user
+    assert "second question" in second_user
+
+
+def test_continue_session_uses_default(stub, tmp_path):
+    cwd = str(tmp_path)
+    _tool(server.nim_prompt)("one", cwd=cwd, continue_session=True)
+    assert server._session_path(cwd, server.DEFAULT_SESSION).exists()
+
+
+def test_session_compaction_uses_nim_not_agy(stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "SESSION_BUDGET_CHARS", 200)
+    cwd = str(tmp_path)
+    for i in range(6):
+        stub.queue.append((200, {}, _completion(f"answer {i} " + "x" * 120)))
+    for i in range(5):
+        _tool(server.nim_prompt)(f"question {i}", cwd=cwd, session="long")
+    saved = server._load_session(cwd, "long")
+    assert saved["summary"]  # older turns were folded in
+    assert len(saved["turns"]) <= server.SESSION_KEEP_VERBATIM
+
+
+# --- workflow tools -------------------------------------------------------
+
+
+def test_review_uses_supplied_diff(stub, tmp_path):
+    out = _tool(server.nim_review)(str(tmp_path), diff="-a\n+b\n")
+    assert out == "stub answer"
+    user = stub.posts()[0][3]["messages"][-1]["content"]
+    assert server.REVIEW_PROMPT in user and "+b" in user
+
+
+def test_security_review_uses_security_prompt(stub, tmp_path):
+    _tool(server.nim_security_review)(str(tmp_path), diff="+x\n")
+    user = stub.posts()[0][3]["messages"][-1]["content"]
+    assert server.SECURITY_REVIEW_PROMPT in user
+
+
+def test_review_empty_diff(stub, tmp_path):
+    out = _tool(server.nim_review)(str(tmp_path), diff="  \n")
+    assert out.startswith("[No diff to review")
+    assert not stub.requests
+
+
+def test_explain_error_inlines_files(stub, tmp_path):
+    src = tmp_path / "boom.py"
+    src.write_text("raise ValueError('boom-marker')\n")
+    _tool(server.nim_explain_error)("ValueError: boom", files=[str(src)])
+    user = stub.posts()[0][3]["messages"][-1]["content"]
+    assert "ValueError: boom" in user and "boom-marker" in user
+
+
+def test_summarize_parses_json(stub, tmp_path):
+    (tmp_path / "m.py").write_text("x = 1\n")
+    stub.queue.append(
+        (
+            200,
+            {},
+            _completion(json.dumps({"summary": "S", "key_points": ["k"]})),
+        )
+    )
+    out = json.loads(_tool(server.nim_summarize)(str(tmp_path), "m.py"))
+    assert out == {"summary": "S", "key_points": ["k"]}
+    user = stub.posts()[0][3]["messages"][-1]["content"]
+    assert "x = 1" in user
+
+
+def test_summarize_falls_back_on_prose(stub, tmp_path):
+    (tmp_path / "m.py").write_text("x = 1\n")
+    stub.queue.append((200, {}, _completion("just prose, no json")))
+    out = json.loads(_tool(server.nim_summarize)(str(tmp_path), "m.py"))
+    assert out["summary"] == "just prose, no json"
+
+
+def test_summarize_rejects_escape_from_cwd(stub, tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (tmp_path / "secret.txt").write_text("nope")
+    out = _tool(server.nim_summarize)(str(proj), "../secret.txt")
+    assert out.startswith("[Error: target must be inside cwd")
+    assert not stub.requests
+
+
+def test_summarize_missing_target(stub, tmp_path):
+    out = _tool(server.nim_summarize)(str(tmp_path), "nope.py")
+    assert out.startswith("[Error: target not found")
+
+
+# --- models, status, background -------------------------------------------
+
+
+def test_models_lists_and_filters(stub):
+    out = _tool(server.nim_models)()
+    assert "meta/llama-3.3-70b-instruct" in out and "(2 of 2)" in out
+    out = _tool(server.nim_models)("nemotron")
+    assert "nvidia/nemotron-x" in out and "llama" not in out
+    assert _tool(server.nim_models)("zzz").startswith("[No NIM models match")
+
+
+def test_status_ready(stub):
+    out = _tool(server.nim_status)()
+    assert out.startswith("READY — NVIDIA NIM")
+    assert KEY not in out
+    assert "default_model: meta/llama-3.3-70b-instruct" in out
+    assert "models_listed: 2" in out
+    assert "cooldown: none" in out
+
+
+def test_status_not_configured(stub, monkeypatch):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    assert _tool(server.nim_status)().startswith("NOT CONFIGURED")
+
+
+def test_status_bad_key(stub):
+    stub.queue.append((401, {}, {"detail": "bad key"}))
+    out = _tool(server.nim_status)()
+    assert out.startswith("NOT READY") and "API key rejected" in out
+
+
+def test_status_skip_verify_spends_no_completion(stub):
+    out = _tool(server.nim_status)(verify=False)
+    assert "(key not verified)" in out
+    assert not stub.posts()
+
+
+def test_nim_start_and_poll(stub):
+    started = _tool(server.nim_start)("background q", use_cache=False)
+    job_id = re.search(r"job (\w+)\.", started).group(1)
+    for _ in range(100):
+        result = _tool(server.gemini_poll)(job_id)
+        if not result.startswith("[Job"):
+            break
+        time.sleep(0.05)
+    assert result == "stub answer"
+
+
+def test_all_nim_tools_registered():
+    import asyncio
+
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert {
+        "nim_prompt",
+        "nim_start",
+        "nim_review",
+        "nim_security_review",
+        "nim_explain_error",
+        "nim_summarize",
+        "nim_models",
+        "nim_status",
+    } <= names

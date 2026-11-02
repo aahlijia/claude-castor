@@ -20,7 +20,9 @@ research — to Google's free [Antigravity CLI](https://antigravity.google)
 (`agy`), the terminal coding agent powered by Gemini models. Claude
 orchestrates and reasons; Antigravity handles the heavy lifting.
 
-No API key required. Uses Google sign-in (free individual tier).
+No API key required. Uses Google sign-in (free individual tier). Optionally
+add [NVIDIA NIM](#nvidia-nim-optional-second-backend)'s free hosted models as a
+second offload target (needs a free NVIDIA API key).
 
 If Claude Castor saves you tokens or time, consider starring the repo — it
 helps other Claude Code users find it.
@@ -133,6 +135,7 @@ over via the system keyring — no extra steps needed.
 | Command | Description |
 |---|---|
 | `/castor:status` | Check Antigravity CLI installation and sign-in |
+| `/castor:nim-status` | Check the optional NVIDIA NIM backend (key, model, limits) |
 | `/castor:agents` | List agy's built-in specialized agents |
 | `/castor:auth` | Sign in to the Antigravity CLI |
 | `/castor:explore` | Full codebase exploration in agent mode |
@@ -175,6 +178,7 @@ over via the system keyring — no extra steps needed.
 | `gemini_auth` | Get sign-in instructions when not authenticated |
 | `gemini_status` | Check CLI installation and sign-in; lists available models and agents when READY |
 | `gemini_setup` | Get step-by-step setup instructions |
+| `nim_prompt` / `nim_start` / `nim_review` / `nim_security_review` / `nim_explain_error` / `nim_summarize` / `nim_models` / `nim_status` | Optional NVIDIA NIM backend — see [below](#nvidia-nim-optional-second-backend) |
 
 ### `gemini_prompt` parameters
 
@@ -303,6 +307,88 @@ job immediately. Jobs live in memory only — a server restart forgets them.
 
 ---
 
+## NVIDIA NIM (optional second backend)
+
+Castor can also offload to [NVIDIA NIM](https://build.nvidia.com)'s hosted
+models, which have a free tier for developers. It is a second target next to
+agy — useful for an independent second opinion, for spreading load when agy's
+free quota is tight, or for fanning one question out to both and comparing.
+
+**It is not an agent.** agy explores the workspace on its own; NIM is a plain
+chat endpoint with no filesystem access. Castor reads whatever the model needs
+(`files`, `directory`, a diff) and inlines it into one request. So NIM suits
+review, summarize and explain over content you supply; for open-ended
+exploration of a codebase, stay on `gemini_prompt` with `cwd`.
+
+**Privacy:** everything inlined is sent to NVIDIA's hosted API, under NVIDIA's
+free-tier data terms. Don't send secrets or code you haven't cleared for a
+third party.
+
+### Setup
+
+1. Create a free API key at <https://build.nvidia.com/settings/api-keys>.
+2. Register it with the MCP server's environment (the key is read from the
+   environment only — it is never a tool argument and is never logged):
+
+   ```bash
+   claude mcp add -s user claude-castor -e NVIDIA_API_KEY=nvapi-... \
+     -- /absolute/path/to/uv run --directory /absolute/path/to/claude-castor server.py
+   ```
+
+   (If already registered, `claude mcp remove claude-castor -s user` first.
+   `install.py` does not forward your key, so re-run this command to add it.
+   Claude Code stores the value in `~/.claude.json`.)
+3. Restart Claude Code and run `/castor:nim-status` (or the `nim_status`
+   tool). It sends one tiny completion to prove the key and model work.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `nim_prompt` | General prompt; `files` / `directory` are inlined; supports `session`, `model`, `temperature`, `max_tokens`, caching |
+| `nim_start` | Same, in the background — collect with `gemini_poll` / `gemini_jobs` |
+| `nim_review` | Correctness review of a diff (defaults to `git diff HEAD`) |
+| `nim_security_review` | Security-focused review of a diff |
+| `nim_explain_error` | Ranked root causes for an error; pass the relevant source via `files` |
+| `nim_summarize` | `{summary, key_points}` of a file or directory under `cwd` |
+| `nim_models` | List served models (optional `query` filter) |
+| `nim_status` | Key, default model, limits, rate-limit state (`verify=False` skips the live check) |
+
+Caching, sessions and background jobs work as they do for agy. Sessions are
+shared across backends, so a session name continues whichever tool you call
+next, and compaction of long NIM sessions uses NIM (agy isn't needed).
+
+### Configuration
+
+All optional, set as environment variables on the MCP server:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required) |
+| `CASTOR_NIM_MODEL` | `meta/llama-3.3-70b-instruct` | Model used when a call names none; see `nim_models` |
+| `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
+| `CASTOR_NIM_RPM` | `40` | Client-side requests per minute |
+| `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |
+| `CASTOR_NIM_MAX_INPUT_CHARS` | `300000` | Prompt size budget (~75k tokens); larger prompts are rejected up front |
+| `CASTOR_NIM_MAX_TOKENS` | `4096` | Completion cap per request |
+| `CASTOR_NIM_TIMEOUT` | `180` | Seconds to wait for a response |
+
+NVIDIA sets the real free-tier limits and they change; the defaults above are
+conservative guesses, so tune them to what your account shows.
+
+### Resilience
+
+Retryable failures (429, 5xx, network errors, one timeout) are retried with
+exponential backoff and jitter, honoring `Retry-After`. A 429 also sets a shared
+cooldown so concurrent background jobs back off together, and if the wait
+would exceed 30 seconds Castor returns a "try again in Ns" error rather than
+blocking Claude. Auth, billing, permission, not-found and context-window errors
+are never retried and come back with a specific fix. Replies that never
+arrive or come back empty return a clear bracketed error, and `<think>` blocks
+from reasoning models are stripped.
+
+---
+
 ## Caching
 
 Identical prompts against an unchanged codebase return a stored response instead
@@ -339,6 +425,15 @@ sign-in command, then run `agy -p "ok"` to complete Google sign-in
 agent mode (`trust=True`) over pre-loading a full directory
 
 **Empty response** — Try `raw=True` to see unfiltered output
+
+**NVIDIA NIM: not configured / key rejected** — Run `/castor:nim-status`. Set
+`NVIDIA_API_KEY` in the MCP server's environment (see
+[NVIDIA NIM](#nvidia-nim-optional-second-backend)); a 401 means the key is
+wrong or revoked
+
+**NVIDIA NIM: rate-limited** — The free tier is capped by NVIDIA. Castor retries
+with backoff and then reports how long to wait; lower `CASTOR_NIM_RPM` or retry
+later, or use the agy tools meanwhile
 
 ---
 

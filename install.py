@@ -108,7 +108,9 @@ def main() -> None:
         "  /castor:index     — map the codebase for reuse as context\n"
         "  /castor:review    — free second-opinion review of your changes\n"
         "  /castor:usages    — trace where a symbol is used\n"
-        "  /castor:explain   — diagnose an error against the codebase"
+        "  /castor:explain   — diagnose an error against the codebase\n"
+        "\nOptional: add NVIDIA NIM's free hosted models as a second backend —\n"
+        "see the 'NVIDIA NIM' section of README.md, then /castor:nim-status."
     )
 
 

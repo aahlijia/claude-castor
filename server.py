@@ -3,16 +3,21 @@ import hashlib
 import json
 import logging
 import os
+import random
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastmcp import FastMCP
 
 # Parse --log-file from sys.argv
@@ -1171,13 +1176,15 @@ def _session_prefix(cwd: str, name: str) -> str:
     return _render_session(_load_session(cwd, name))
 
 
-def _compact_session(session: dict) -> dict:
+def _compact_session(session: dict, summarizer: Any = None) -> dict:
     """Summarize older turns when the replay exceeds the char budget.
 
     Folds everything but the most recent SESSION_KEEP_VERBATIM turns into
-    the rolling `summary` prefix via _summarize_text. If summarization
-    fails (bracketed agy response), the session is left untouched so a
-    transient error never corrupts the transcript.
+    the rolling `summary` prefix via `summarizer` (default
+    _summarize_text, which uses agy; NVIDIA NIM sessions pass their own
+    so they never need agy installed). If summarization fails (bracketed
+    response), the session is left untouched so a transient error never
+    corrupts the transcript.
     """
     if len(_render_session(session)) <= SESSION_BUDGET_CHARS:
         return session
@@ -1186,7 +1193,7 @@ def _compact_session(session: dict) -> dict:
     if not old:
         return session
     text = (session.get("summary") or "") + "\n" + _render_turns(old)
-    summary = _summarize_text(text)
+    summary = (summarizer or _summarize_text)(text)
     if summary.startswith("["):
         return session
     session["summary"] = summary
@@ -1194,7 +1201,13 @@ def _compact_session(session: dict) -> dict:
     return session
 
 
-def _append_turn(cwd: str, name: str, prompt: str, response: str) -> None:
+def _append_turn(
+    cwd: str,
+    name: str,
+    prompt: str,
+    response: str,
+    summarizer: Any = None,
+) -> None:
     """Append a successful exchange to a session, compacting if needed."""
     now = time.time()
     session = _load_session(cwd, name)
@@ -1210,7 +1223,7 @@ def _append_turn(cwd: str, name: str, prompt: str, response: str) -> None:
         {"prompt": prompt, "response": response, "at": now}
     )
     session["updated_at"] = now
-    session = _compact_session(session)
+    session = _compact_session(session, summarizer)
     _save_session(cwd, name, session)
 
 
@@ -1506,15 +1519,19 @@ def _evict_jobs() -> None:
         del _jobs[jid]
 
 
-def _run_job(job_id: str, kwargs: dict[str, Any]) -> None:
+def _run_job(job_id: str, kwargs: dict[str, Any], runner: Any = None) -> None:
     """Worker body: run the prompt, then record the outcome on the job.
+
+    `runner` is the dispatch function to call (default _dispatch for agy;
+    nim_start passes _dispatch_nim), so every backend shares one job
+    table, one pool, and one gemini_poll.
 
     Background jobs are session-free by construction (gemini_start takes no
     session param), so concurrent workers never race on a transcript file.
     A bracketed response (agy error/status) is recorded as an "error".
     """
     try:
-        response = _dispatch(**kwargs)
+        response = (runner or _dispatch)(**kwargs)
     except Exception as exc:  # worker must never crash silently
         response = f"[Job crashed: {exc}]"
 
@@ -2559,6 +2576,16 @@ def _format_last_index(state: dict) -> str:
     return f"\nlast_index: {ts_str}{sha_str}"
 
 
+def _nim_status_line() -> str:
+    """One-line NVIDIA NIM summary for gemini_status (no network call)."""
+    if _nim_api_key() is None:
+        return "\nnvidia_nim: not configured (optional; see nim_status)"
+    return (
+        f"\nnvidia_nim: key set, default model {_nim_default_model()} "
+        "(run nim_status to verify)"
+    )
+
+
 @mcp.tool()
 def gemini_status(cwd: str | None = None) -> str:
     """Check that the agy CLI is installed and signed in.
@@ -2622,9 +2649,1018 @@ def gemini_status(cwd: str | None = None) -> str:
 
     suffix = _status_extras()
     suffix += f"\ncache_size_mb: {_cache_size_mb():.1f}"
+    suffix += _nim_status_line()
     if cwd is not None:
         suffix += _format_last_index(_load_project_state(cwd))
     return f"READY — agy {version}{suffix}"
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA NIM backend (nim_* tools)
+#
+# A second, non-agentic backend alongside agy. agy explores the workspace on
+# its own; NIM is a plain OpenAI-compatible chat-completions endpoint with no
+# filesystem access, so Castor inlines whatever the model needs (files, a
+# directory, a diff) and sends it as a single request. Caching, sessions and
+# the background-job pool are shared with the agy path.
+#
+# Configuration is environment-only (set at registration with
+# `claude mcp add -e NVIDIA_API_KEY=...`). The API key is read from the
+# environment, never accepted as a tool argument, and never logged.
+# ---------------------------------------------------------------------------
+
+NIM_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+# Pinned fallback only; override with CASTOR_NIM_MODEL or the `model`
+# argument. nim_models lists what the endpoint currently serves.
+NIM_DEFAULT_MODEL = "meta/llama-3.3-70b-instruct"
+NIM_KEY_ENV_VARS = ("NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY")
+NIM_KEYS_URL = "https://build.nvidia.com/settings/api-keys"
+
+# Tunables. Free-tier limits are set by NVIDIA and change, so each default
+# is a conservative guess that the CASTOR_NIM_* env var overrides.
+NIM_DEFAULT_RPM = 40  # requests per 60s window, enforced client-side
+NIM_DEFAULT_CONCURRENCY = 4  # simultaneous in-flight requests
+NIM_DEFAULT_MAX_INPUT_CHARS = 300_000  # ~75k tokens of prompt
+NIM_DEFAULT_MAX_TOKENS = 4096  # completion cap per request
+NIM_DEFAULT_TEMPERATURE = 0.2
+NIM_REQUEST_TIMEOUT = 180.0  # seconds; non-streaming, so whole generation
+NIM_CONNECT_TIMEOUT = 15.0
+NIM_RATE_WINDOW = 60.0
+NIM_MAX_ATTEMPTS = 4  # per request, for retryable failures
+NIM_MAX_TIMEOUTS = 2  # a timed-out request is retried at most once
+NIM_BACKOFF_BASE = 2.0
+NIM_BACKOFF_MAX = 30.0
+NIM_BACKOFF_JITTER = 1.0
+# Longest Castor blocks Claude waiting on its own limiter or a cooldown
+# before returning a "try again in Ns" error instead.
+NIM_MAX_WAIT = 30.0
+NIM_MAX_COOLDOWN = 600.0
+NIM_MAX_LISTED_MODELS = 200
+NIM_CACHE_BACKEND = "nvidia_nim"
+
+_NIM_CONTEXT_MARKERS = (
+    "context length",
+    "context_length",
+    "context window",
+    "maximum context",
+    "too many tokens",
+    "prompt is too long",
+)
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+NIM_SUMMARIZE_PROMPT = """\
+Summarize `{target}`, whose content is inlined below. Return ONLY a JSON
+object with exactly these keys:
+
+  "summary"     — one short paragraph on what {target} is and does
+  "key_points"  — list of terse, information-dense bullets. For a
+                  directory, make each bullet a per-area roll-up prefixed
+                  with the area's path.
+
+Every bullet must carry information. Do NOT wrap the output in a code
+fence. Return only the JSON object, nothing else.\
+"""
+
+
+def _nim_env(name: str, default: float) -> float:
+    """Read a positive numeric env override, else return the default."""
+    try:
+        value = float(os.environ.get(name, "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _nim_api_key() -> str | None:
+    """Return the NVIDIA API key from the environment, or None."""
+    for var in NIM_KEY_ENV_VARS:
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _nim_base_url() -> str:
+    """Return the NIM API base URL (CASTOR_NIM_BASE_URL overrides)."""
+    override = os.environ.get("CASTOR_NIM_BASE_URL", "").strip()
+    return (override or NIM_DEFAULT_BASE_URL).rstrip("/")
+
+
+def _nim_default_model() -> str:
+    """Return the model used when a call names none."""
+    return os.environ.get("CASTOR_NIM_MODEL", "").strip() or NIM_DEFAULT_MODEL
+
+
+def _nim_url_error(url: str) -> str | None:
+    """Refuse a base URL that would send the API key in clear text.
+
+    https is required, except for a localhost base URL (a local NIM
+    container or a test stub).
+    """
+    parsed = urlparse(url)
+    local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
+    if parsed.scheme == "https" or (parsed.scheme == "http" and local):
+        return None
+    return (
+        "[Error: CASTOR_NIM_BASE_URL must use https (http is allowed only "
+        "for localhost) so the API key is never sent in clear text.]"
+    )
+
+
+def _nim_missing_key_error() -> str:
+    """Bracketed error telling the user how to configure the key."""
+    return (
+        "[NVIDIA NIM is not configured: set NVIDIA_API_KEY in the MCP "
+        "server's environment, e.g. re-register with `claude mcp add -s "
+        "user -e NVIDIA_API_KEY=nvapi-... claude-castor ...`. Create a key "
+        f"at {NIM_KEYS_URL}. Run `nim_status` to verify.]"
+    )
+
+
+def _nim_redact(text: str, key: str | None) -> str:
+    """Scrub the API key from text before it is logged or returned."""
+    return text.replace(key, "***") if key else text
+
+
+class _SlidingWindowLimiter:
+    """Thread-safe strict sliding-window rate limiter (non-blocking).
+
+    At most `limit` reservations succeed in any `window`-second span.
+    reserve() never sleeps: it either takes a slot or reports how long
+    until one frees up, so the caller decides whether waiting is worth it.
+    """
+
+    def __init__(self, limit: int, window: float) -> None:
+        self._limit = max(1, limit)
+        self._window = window
+        self._times: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def reserve(self) -> float:
+        """Take a slot (returns 0.0) or return seconds until one frees."""
+        now = time.monotonic()
+        with self._lock:
+            cutoff = now - self._window
+            while self._times and self._times[0] <= cutoff:
+                self._times.popleft()
+            if len(self._times) < self._limit:
+                self._times.append(now)
+                return 0.0
+            return self._times[0] + self._window - now
+
+
+_nim_lock = threading.Lock()
+_nim_limiter: _SlidingWindowLimiter | None = None
+_nim_slots: threading.BoundedSemaphore | None = None
+_nim_cooldown_until = 0.0  # monotonic deadline set by a 429
+_nim_stats = {"requests": 0, "ok": 0, "rate_limited": 0, "errors": 0}
+
+
+def _nim_reset_state() -> None:
+    """Drop limiter, cooldown and counters (used by tests)."""
+    global _nim_limiter, _nim_slots, _nim_cooldown_until
+    with _nim_lock:
+        _nim_limiter = None
+        _nim_slots = None
+        _nim_cooldown_until = 0.0
+        for name in _nim_stats:
+            _nim_stats[name] = 0
+
+
+def _nim_gate() -> tuple[_SlidingWindowLimiter, threading.BoundedSemaphore]:
+    """Return the shared limiter and concurrency semaphore (lazy init)."""
+    global _nim_limiter, _nim_slots
+    with _nim_lock:
+        if _nim_limiter is None or _nim_slots is None:
+            rpm = int(_nim_env("CASTOR_NIM_RPM", NIM_DEFAULT_RPM))
+            slots = int(
+                _nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY)
+            )
+            _nim_limiter = _SlidingWindowLimiter(rpm, NIM_RATE_WINDOW)
+            _nim_slots = threading.BoundedSemaphore(slots)
+        return _nim_limiter, _nim_slots
+
+
+def _nim_count(stat: str) -> None:
+    """Increment a session counter."""
+    with _nim_lock:
+        _nim_stats[stat] += 1
+
+
+def _nim_set_cooldown(seconds: float) -> None:
+    """Hold every NIM call back for `seconds` (after a 429)."""
+    global _nim_cooldown_until
+    until = time.monotonic() + min(seconds, NIM_MAX_COOLDOWN)
+    with _nim_lock:
+        _nim_cooldown_until = max(_nim_cooldown_until, until)
+
+
+def _nim_cooldown_remaining() -> float:
+    """Seconds left on the rate-limit cooldown (0.0 when clear)."""
+    with _nim_lock:
+        return max(0.0, _nim_cooldown_until - time.monotonic())
+
+
+def _nim_admit() -> str | None:
+    """Wait for the cooldown and a rate-limit slot, within NIM_MAX_WAIT.
+
+    Returns None once admitted, or a bracketed error when the wait would
+    exceed NIM_MAX_WAIT — failing fast beats blocking Claude for minutes.
+    """
+    limiter, _ = _nim_gate()
+    deadline = time.monotonic() + NIM_MAX_WAIT
+    while True:
+        wait = _nim_cooldown_remaining() or limiter.reserve()
+        if wait <= 0:
+            return None
+        if time.monotonic() + wait > deadline:
+            return (
+                "[NVIDIA NIM is rate-limited — try again in "
+                f"~{int(wait) + 1}s. Client limit is "
+                f"{int(_nim_env('CASTOR_NIM_RPM', NIM_DEFAULT_RPM))} "
+                "requests/min (CASTOR_NIM_RPM).]"
+            )
+        time.sleep(min(wait, 1.0))
+
+
+@dataclass
+class _NimFailure:
+    """A classified NIM failure.
+
+    Attributes:
+        kind: auth, permission, billing, not_found, context, invalid,
+            rate_limit, upstream, timeout, network or other.
+        retryable: Whether retrying the same request can succeed.
+        hint: Short human explanation (shown inside the error brackets).
+        detail: The server's own message, redacted and truncated.
+        retry_after: Seconds from a numeric Retry-After header, or None.
+    """
+
+    kind: str
+    retryable: bool
+    hint: str
+    detail: str = ""
+    retry_after: float | None = None
+
+
+def _nim_error_detail(body: str) -> str:
+    """Pull a short message out of an error response body."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body.strip()[:300]
+    if isinstance(data, dict):
+        err = data.get("error")
+        for value in (
+            data.get("detail"),
+            data.get("message"),
+            err.get("message") if isinstance(err, dict) else err,
+        ):
+            if value:
+                text = value if isinstance(value, str) else json.dumps(value)
+                return text.strip()[:300]
+    return body.strip()[:300]
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a numeric Retry-After header (HTTP-date form is ignored)."""
+    try:
+        seconds = float((value or "").strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _classify_nim_status(
+    status: int, detail: str, retry_after: float | None = None
+) -> _NimFailure:
+    """Classify a non-200 NIM response into a _NimFailure."""
+    if status == 429:
+        return _NimFailure(
+            "rate_limit",
+            True,
+            "rate limited by NVIDIA (429)",
+            detail,
+            retry_after,
+        )
+    if status >= 500:
+        return _NimFailure(
+            "upstream",
+            True,
+            f"NVIDIA service error ({status})",
+            detail,
+            retry_after,
+        )
+    if status == 413 or (
+        status in (400, 422)
+        and any(m in detail.lower() for m in _NIM_CONTEXT_MARKERS)
+    ):
+        return _NimFailure(
+            "context",
+            False,
+            "prompt exceeds the model's context window — inline less "
+            "content or pick a larger-context model",
+            detail,
+        )
+    fixed = {
+        400: ("invalid", "invalid request (400)"),
+        422: ("invalid", "invalid request (422)"),
+        401: (
+            "auth",
+            f"API key rejected (401) — check NVIDIA_API_KEY ({NIM_KEYS_URL})",
+        ),
+        402: ("billing", "credits or quota exhausted (402)"),
+        403: (
+            "permission",
+            "access denied (403) — the key may not be entitled to this model",
+        ),
+        404: (
+            "not_found",
+            "model or endpoint not found (404) — run nim_models for valid "
+            "model ids",
+        ),
+    }
+    kind, hint = fixed.get(status, ("other", f"unexpected status {status}"))
+    return _NimFailure(kind, False, hint, detail)
+
+
+def _format_nim_failure(failure: _NimFailure) -> str:
+    """Render a failure as a bracketed error string."""
+    text = f"[NVIDIA NIM error — {failure.hint}]"
+    if failure.detail:
+        text += f"\n{failure.detail}"
+    return text
+
+
+def _nim_backoff(attempt: int, retry_after: float | None) -> float:
+    """Exponential backoff with jitter; honors a Retry-After floor."""
+    base = min(NIM_BACKOFF_MAX, NIM_BACKOFF_BASE * 2 ** (attempt - 1))
+    delay = base + random.uniform(0, NIM_BACKOFF_JITTER)
+    return max(delay, retry_after) if retry_after else delay
+
+
+def _nim_send_once(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    payload: dict | None,
+    key: str | None,
+) -> tuple[Any, _NimFailure | None]:
+    """Send one HTTP request. Returns (parsed JSON, None) or (None, failure).
+
+    Redirects are not followed, so the Authorization header can never be
+    forwarded to another host.
+    """
+    timeout = httpx.Timeout(
+        _nim_env("CASTOR_NIM_TIMEOUT", NIM_REQUEST_TIMEOUT),
+        connect=NIM_CONNECT_TIMEOUT,
+    )
+    try:
+        response = httpx.request(
+            method, url, headers=headers, json=payload, timeout=timeout
+        )
+    except httpx.TimeoutException:
+        return None, _NimFailure(
+            "timeout", True, f"request timed out after {timeout.read:.0f}s"
+        )
+    except httpx.HTTPError as exc:
+        return None, _NimFailure(
+            "network",
+            True,
+            f"could not reach NVIDIA NIM ({type(exc).__name__})",
+        )
+    if response.status_code == 200:
+        try:
+            return response.json(), None
+        except ValueError:
+            return None, _NimFailure(
+                "upstream", True, "response was not valid JSON"
+            )
+    detail = _nim_redact(_nim_error_detail(response.text), key)
+    retry_after = _parse_retry_after(response.headers.get("retry-after"))
+    return None, _classify_nim_status(
+        response.status_code, detail, retry_after
+    )
+
+
+def _nim_pause_before_retry(failure: _NimFailure, attempt: int) -> None:
+    """Back off before the next attempt.
+
+    A 429 sets the shared cooldown (so concurrent background jobs back off
+    too) and lets _nim_admit do the waiting; anything else just sleeps,
+    capped at NIM_BACKOFF_MAX.
+    """
+    delay = _nim_backoff(attempt, failure.retry_after)
+    if failure.kind == "rate_limit":
+        _nim_set_cooldown(delay)
+    else:
+        time.sleep(min(delay, NIM_BACKOFF_MAX))
+
+
+def _nim_request(
+    method: str, path: str, key: str | None, payload: dict | None = None
+) -> tuple[Any, str | None]:
+    """Admit, send and retry one NIM call.
+
+    Retryable failures (429, 5xx, network, a first timeout) back off and
+    retry up to NIM_MAX_ATTEMPTS; everything else fails immediately.
+
+    Returns:
+        (parsed JSON, None) on success, or (None, bracketed error).
+    """
+    base = _nim_base_url()
+    url_error = _nim_url_error(base)
+    if url_error:
+        return None, url_error
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    _, slots = _nim_gate()
+    timeouts = 0
+    for attempt in range(1, NIM_MAX_ATTEMPTS + 1):
+        wait_error = _nim_admit()
+        if wait_error:
+            return None, wait_error
+        if not slots.acquire(timeout=NIM_MAX_WAIT):
+            return None, "[NVIDIA NIM is busy — too many requests in flight.]"
+        try:
+            _nim_count("requests")
+            data, failure = _nim_send_once(
+                method, f"{base}{path}", headers, payload, key
+            )
+        finally:
+            slots.release()
+        if failure is None:
+            _nim_count("ok")
+            return data, None
+        _nim_count(
+            "rate_limited" if failure.kind == "rate_limit" else "errors"
+        )
+        timeouts += failure.kind == "timeout"
+        logger.warning(
+            "nim: attempt %d/%d failed kind=%s hint=%s",
+            attempt,
+            NIM_MAX_ATTEMPTS,
+            failure.kind,
+            failure.hint,
+        )
+        if (
+            not failure.retryable
+            or attempt == NIM_MAX_ATTEMPTS
+            or timeouts >= NIM_MAX_TIMEOUTS
+        ):
+            return None, _format_nim_failure(failure)
+        _nim_pause_before_retry(failure, attempt)
+    return None, "[NVIDIA NIM request failed.]"  # pragma: no cover
+
+
+def _nim_extract_text(data: Any, model: str) -> tuple[bool, str]:
+    """Pull the assistant text out of a chat-completions response.
+
+    Strips closed <think>…</think> blocks some reasoning models emit.
+    Returns (ok, text); on failure text is a bracketed error.
+    """
+    choices = data.get("choices") if isinstance(data, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    if not isinstance(choice, dict):
+        return False, "[NVIDIA NIM returned no choices.]"
+    message = choice.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):  # content-part arrays
+        content = "".join(
+            part.get("text", "") for part in content if isinstance(part, dict)
+        )
+    text = (
+        _THINK_RE.sub("", content).strip() if isinstance(content, str) else ""
+    )
+    finish = choice.get("finish_reason")
+    if not text:
+        return False, (
+            f"[NVIDIA NIM returned no content (model={model}, "
+            f"finish_reason={finish}). If finish_reason is `length`, raise "
+            "max_tokens — reasoning models can spend the whole budget "
+            "thinking.]"
+        )
+    if finish == "length":
+        text += (
+            "\n\n[Note: response truncated at max_tokens — raise "
+            "max_tokens for the full answer.]"
+        )
+    return True, text
+
+
+def _run_nim(
+    system: str | None,
+    user: str,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> tuple[bool, str]:
+    """Run one chat completion against NVIDIA NIM.
+
+    Returns:
+        (ok, text). ok is False when text is a bracketed error. Tracking
+        success explicitly (rather than sniffing for a leading "[") keeps
+        a legitimate answer that starts with a bracket from being treated
+        as a failure.
+    """
+    key = _nim_api_key()
+    if key is None:
+        return False, _nim_missing_key_error()
+    if not 0 <= temperature <= 2:
+        return False, "[Error: temperature must be between 0 and 2.]"
+    if max_tokens <= 0:
+        return False, "[Error: max_tokens must be a positive integer.]"
+    size = len(user) + len(system or "")
+    limit = int(
+        _nim_env("CASTOR_NIM_MAX_INPUT_CHARS", NIM_DEFAULT_MAX_INPUT_CHARS)
+    )
+    if size > limit:
+        return False, (
+            f"[Error: prompt is {size:,} chars, over the {limit:,}-char "
+            "NVIDIA NIM input budget (CASTOR_NIM_MAX_INPUT_CHARS). Inline "
+            "less content, or use gemini_prompt with cwd so agy explores "
+            "the code itself.]"
+        )
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    logger.info(
+        "nim: chat model=%s prompt_len=%d temperature=%s max_tokens=%d",
+        model,
+        size,
+        temperature,
+        max_tokens,
+    )
+    data, error = _nim_request(
+        "POST",
+        "/chat/completions",
+        key,
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        },
+    )
+    if error:
+        return False, error
+    return _nim_extract_text(data, model)
+
+
+def _summarize_text_nim(text: str) -> str:
+    """Session-compaction summarizer backed by NIM (no agy needed)."""
+    ok, out = _run_nim(
+        SUMMARIZE_TEXT_PROMPT,
+        text,
+        _nim_default_model(),
+        NIM_DEFAULT_TEMPERATURE,
+        1024,
+    )
+    return out if ok else f"[{out}]"
+
+
+def _nim_cache_key(
+    system: str | None,
+    user: str,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Hash everything that affects a NIM response into a cache key."""
+    payload = json.dumps(
+        {
+            "version": CACHE_KEY_VERSION,
+            "backend": NIM_CACHE_BACKEND,
+            "base_url": _nim_base_url(),
+            "system": system or "",
+            "prompt": user,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _dispatch_nim(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    cwd: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+    use_cache: bool = True,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Assemble, cache-check, run, and store a single NIM prompt.
+
+    The NIM counterpart of _dispatch: it reuses _assemble_prompt, the
+    response cache and the session store, but sends the system
+    instruction as a real system message and has no trust/sandbox tiers
+    (NIM cannot touch the filesystem). Session calls are stateful and
+    never cached.
+
+    Returns:
+        The model's response, a cached response, or a bracketed error.
+    """
+    if session and not cwd:
+        return (
+            "[Error: cwd is required when using a session (sessions are "
+            "project-scoped). Pass the absolute project path.]"
+        )
+    history = _session_prefix(cwd, session) if session and cwd else None
+    user = _assemble_prompt(prompt, True, files, directory, history)
+    system = None if raw else SYSTEM_INSTRUCTION
+    chosen = model or _nim_default_model()
+    temp = NIM_DEFAULT_TEMPERATURE if temperature is None else temperature
+    cap = max_tokens or int(
+        _nim_env("CASTOR_NIM_MAX_TOKENS", NIM_DEFAULT_MAX_TOKENS)
+    )
+    cache_key = None
+    if use_cache and not session:
+        cache_key = _nim_cache_key(system, user, chosen, temp, cap)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info("nim: cache hit for key=%s", cache_key)
+            return cached
+    ok, response = _run_nim(system, user, chosen, temp, cap)
+    if not ok:
+        logger.warning("nim: returned error response: %s", response)
+        return response
+    if session and cwd:
+        _append_turn(
+            cwd, session, prompt, response, summarizer=_summarize_text_nim
+        )
+    if cache_key is not None:
+        _cache_put(cache_key, response, chosen)
+    return response
+
+
+@mcp.tool()
+def nim_prompt(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    cwd: str | None = None,
+    continue_session: bool = False,
+    session: str | None = None,
+    model: str | None = None,
+    use_cache: bool = True,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Send a prompt to NVIDIA NIM (free hosted models) and return the reply.
+
+    A second offload target next to gemini_prompt. Unlike agy, NIM is a
+    plain chat endpoint: it cannot explore the filesystem, run commands, or
+    follow imports. Anything it needs must be passed in `prompt`, `files`
+    or `directory`, which Castor inlines. Use it for second opinions,
+    review/summarize/explain over content you supply, or to spread load
+    when agy's free quota is tight. For open-ended exploration of a
+    codebase, prefer gemini_prompt with cwd.
+
+    Privacy: everything inlined is sent to NVIDIA's hosted API. Free-tier
+    data-use terms are NVIDIA's; do not send secrets or code the user has
+    not cleared for a third party.
+
+    Requires NVIDIA_API_KEY in the MCP server's environment — run
+    nim_status to check. The call blocks until the model answers (up to
+    CASTOR_NIM_TIMEOUT, default 180s); use nim_start for long prompts.
+
+    Args:
+        prompt: The fully-formed prompt Claude has constructed.
+        files: Absolute paths to files to inline into the prompt.
+        directory: A directory whose contents should be inlined.
+        raw: If True, skip the structured-response system instruction.
+        cwd: Absolute project path. Required when using a session.
+        continue_session: Resume the project's default session
+            ("__default__"). Ignored when `session` is set. Requires cwd.
+        session: Name a project-scoped conversation to continue. Castor
+            replays its transcript and appends this turn on success.
+            Requires cwd. Session calls are never cached. Sessions are
+            shared with gemini_prompt, so the same name continues across
+            backends.
+        model: NIM model id, e.g. "meta/llama-3.3-70b-instruct". Call
+            nim_models for what is available. Defaults to
+            CASTOR_NIM_MODEL, then a built-in default.
+        use_cache: If True (default), reuse a stored response for an
+            identical prompt/model. Session calls are never cached.
+        temperature: Sampling temperature 0 to 2 (default 0.2).
+        max_tokens: Completion cap (default 4096, CASTOR_NIM_MAX_TOKENS).
+
+    Returns:
+        The model's response, or a bracketed error/status string.
+    """
+    resolved = session or (DEFAULT_SESSION if continue_session else None)
+    return _dispatch_nim(
+        prompt,
+        files=files,
+        directory=directory,
+        raw=raw,
+        cwd=cwd,
+        model=model,
+        session=resolved,
+        use_cache=use_cache,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+@mcp.tool()
+def nim_start(
+    prompt: str,
+    files: list[str] | None = None,
+    directory: str | None = None,
+    raw: bool = False,
+    model: str | None = None,
+    use_cache: bool = True,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Start a NVIDIA NIM prompt in the background and return a job id.
+
+    The NIM counterpart of gemini_start: same job table, same worker pool,
+    and the same gemini_poll / gemini_jobs to collect results. Use it for
+    long prompts or to fan the same question out to NIM and agy at once
+    (start both, then compare). Background jobs are session-free. The
+    client-side rate limiter and concurrency cap apply across all NIM
+    jobs, so a large fan-out queues rather than flooding the endpoint.
+
+    Args:
+        prompt: The fully-formed prompt Claude has constructed.
+        files: Absolute paths to files to inline into the prompt.
+        directory: A directory whose contents should be inlined.
+        raw: If True, skip the structured-response system instruction.
+        model: NIM model id (see nim_models).
+        use_cache: If True (default), a cache hit completes the job
+            immediately without calling NIM.
+        temperature: Sampling temperature 0 to 2 (default 0.2).
+        max_tokens: Completion cap (default 4096).
+
+    Returns:
+        A message with the job id to pass to gemini_poll.
+    """
+    kwargs: dict[str, Any] = {
+        "prompt": prompt,
+        "files": files,
+        "directory": directory,
+        "raw": raw,
+        "model": model,
+        "use_cache": use_cache,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    job_id = uuid.uuid4().hex[:8]
+    with _jobs_lock:
+        _evict_jobs()
+        _jobs[job_id] = _Job(status="running", started_at=time.time())
+    _job_pool.submit(_run_job, job_id, kwargs, _dispatch_nim)
+    return (
+        f"Started background NIM job {job_id}. Poll it with "
+        f'gemini_poll("{job_id}") — do other work first, then check back.'
+    )
+
+
+def _review_diff_nim(
+    cwd: str, diff: str | None, prompt: str, model: str | None
+) -> str:
+    """Shared body of nim_review and nim_security_review."""
+    if diff is None:
+        diff = _git_diff(cwd)
+        if diff.startswith("["):
+            return diff
+    if not diff.strip():
+        return (
+            "[No diff to review — the working tree is clean or the "
+            "provided diff is empty.]"
+        )
+    return _dispatch_nim(f"{prompt}\n\n[DIFF]\n{diff}", model=model)
+
+
+@mcp.tool()
+def nim_review(
+    cwd: str, diff: str | None = None, model: str | None = None
+) -> str:
+    """Get a free second-opinion correctness review of a diff from NIM.
+
+    The diff is inlined and sent to NVIDIA's hosted API (see the privacy
+    note on nim_prompt). When diff is omitted, the uncommitted changes in
+    cwd (`git diff HEAD`) are reviewed. Run it alongside gemini_review for
+    two independent models, or on its own when agy is rate-limited.
+    Complements, does not replace, Claude's own /code-review. Large diffs
+    over the NIM input budget are rejected with a clear error.
+
+    Args:
+        cwd: Absolute path to the git repository.
+        diff: A unified diff to review. When None, uncommitted changes in
+            cwd are captured automatically.
+        model: NIM model id (see nim_models).
+
+    Returns:
+        Review findings, or a bracketed error/status string.
+    """
+    return _review_diff_nim(cwd, diff, REVIEW_PROMPT, model)
+
+
+@mcp.tool()
+def nim_security_review(
+    cwd: str, diff: str | None = None, model: str | None = None
+) -> str:
+    """Get a free security-focused review of a diff from NIM.
+
+    Complements nim_review (correctness-focused, skips security); run both
+    for a full pass. Same inputs, privacy note and limits as nim_review.
+
+    Args:
+        cwd: Absolute path to the git repository.
+        diff: A unified diff to review. When None, uncommitted changes in
+            cwd are captured automatically.
+        model: NIM model id (see nim_models).
+
+    Returns:
+        Security findings, or a bracketed error/status string.
+    """
+    return _review_diff_nim(cwd, diff, SECURITY_REVIEW_PROMPT, model)
+
+
+@mcp.tool()
+def nim_explain_error(
+    error: str,
+    files: list[str] | None = None,
+    model: str | None = None,
+) -> str:
+    """Get ranked root-cause hypotheses for an error from NIM.
+
+    NIM cannot read the repository, so pass the source files the stack
+    trace points at via `files` (absolute paths, inlined). Without them
+    the answer rests on the error text alone.
+
+    Args:
+        error: The error message or stack trace to diagnose.
+        files: Absolute paths to relevant source files to inline.
+        model: NIM model id (see nim_models).
+
+    Returns:
+        Ranked root-cause hypotheses, or a bracketed error string.
+    """
+    prompt = (
+        "Diagnose this error. Return the most probable root causes, "
+        "ranked, each with the specific file(s) and line(s) to check and "
+        "why. Use only the supplied files and error text; say so when "
+        f"they are not enough to be sure.\n\n[ERROR]\n{error}"
+    )
+    return _dispatch_nim(prompt, files=files, model=model)
+
+
+@mcp.tool()
+def nim_summarize(cwd: str, target: str, model: str | None = None) -> str:
+    """Summarize a file or directory with NIM into compact JSON.
+
+    Castor reads `target` (a file or directory under cwd) and inlines it,
+    subject to the usual per-file and total inline budgets and the NIM
+    input limit. Use gemini_summarize instead when the target is too big
+    to inline.
+
+    Args:
+        cwd: Absolute path to the project root.
+        target: A file or directory path under cwd (absolute, or relative
+            to cwd).
+        model: NIM model id (see nim_models).
+
+    Returns:
+        A JSON string with keys: summary, key_points. On parse failure,
+        {"summary": <raw>, "key_points": []}. On error, a bracketed
+        error string.
+    """
+    root = Path(cwd).resolve()
+    path = Path(target)
+    path = (path if path.is_absolute() else root / path).resolve()
+    if path != root and root not in path.parents:
+        return f"[Error: target must be inside cwd ({root}).]"
+    if not path.exists():
+        return f"[Error: target not found: {path}]"
+    content = (
+        _inline_directory(str(path))
+        if path.is_dir()
+        else _inline_files([str(path)])
+    )
+    prompt = (
+        f"{NIM_SUMMARIZE_PROMPT.format(target=target)}\n\n[CONTENT]\n{content}"
+    )
+    raw = _dispatch_nim(prompt, raw=True, model=model)
+    if raw.startswith("["):  # a summary is a JSON object, never "[..."
+        return raw
+    return _parse_summary(raw)
+
+
+@mcp.tool()
+def nim_models(query: str | None = None) -> str:
+    """List the models NVIDIA NIM currently serves.
+
+    The ids to pass as `model` to the nim_* tools. The catalog also holds
+    non-chat models (embeddings, rerankers, vision); use `query` to narrow
+    it, e.g. "llama", "nemotron", "deepseek".
+
+    Args:
+        query: Optional case-insensitive substring filter on model ids.
+
+    Returns:
+        One model id per line with a count header, or a bracketed error.
+    """
+    data, error = _nim_request("GET", "/models", _nim_api_key())
+    if error:
+        return error
+    entries = data.get("data") if isinstance(data, dict) else None
+    ids = sorted(
+        {
+            e["id"]
+            for e in entries or []
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+    )
+    if not ids:
+        return "[NVIDIA NIM reported no models.]"
+    total = len(ids)
+    if query:
+        ids = [i for i in ids if query.lower() in i.lower()]
+        if not ids:
+            return f'[No NIM models match "{query}" ({total} total).]'
+    header = f"NVIDIA NIM models ({len(ids)} of {total}):"
+    shown = ids[:NIM_MAX_LISTED_MODELS]
+    extra = len(ids) - len(shown)
+    more = f"\n…and {extra} more — narrow with `query`." if extra else ""
+    return header + "\n" + "\n".join(shown) + more
+
+
+@mcp.tool()
+def nim_status(verify: bool = True) -> str:
+    """Check NVIDIA NIM configuration, key validity and rate-limit state.
+
+    Run before first use or when troubleshooting. With verify=True
+    (default) it sends one tiny completion to prove the key and default
+    model work — this spends one free-tier request; pass verify=False to
+    skip it. The API key itself is never printed.
+
+    Args:
+        verify: Whether to make a 1-request completion to validate the
+            key and default model.
+
+    Returns:
+        A status report starting with READY, NOT CONFIGURED, or NOT READY.
+    """
+    key = _nim_api_key()
+    if key is None:
+        return (
+            f"NOT CONFIGURED: no NVIDIA API key.\n{_nim_missing_key_error()}"
+        )
+    base = _nim_base_url()
+    url_error = _nim_url_error(base)
+    if url_error:
+        return f"NOT READY: {url_error}"
+    model = _nim_default_model()
+    if verify:
+        ok, text = _run_nim(
+            None, "Reply with exactly the word: OK", model, 0, 8
+        )
+        if not ok:
+            return f"NOT READY: {text}"
+    lines = [f"READY — NVIDIA NIM{'' if verify else ' (key not verified)'}"]
+    lines.append(f"base_url: {base}")
+    lines.append(f"default_model: {model}")
+    listing, list_error = _nim_request("GET", "/models", key)
+    if list_error is None and isinstance(listing, dict):
+        ids = {
+            e.get("id")
+            for e in listing.get("data") or []
+            if isinstance(e, dict)
+        }
+        listed = "listed" if model in ids else "NOT in catalog"
+        lines.append(f"models_listed: {len(ids)} (default model {listed})")
+    rpm = int(_nim_env("CASTOR_NIM_RPM", NIM_DEFAULT_RPM))
+    slots = int(_nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY))
+    max_in = int(
+        _nim_env("CASTOR_NIM_MAX_INPUT_CHARS", NIM_DEFAULT_MAX_INPUT_CHARS)
+    )
+    lines.append(
+        f"limits: {rpm} req/{int(NIM_RATE_WINDOW)}s, concurrency {slots}, "
+        f"max_input {max_in:,} chars"
+    )
+    with _nim_lock:
+        stats = dict(_nim_stats)
+    lines.append(
+        "this_session: "
+        + " ".join(f"{name}={count}" for name, count in stats.items())
+    )
+    cooldown = _nim_cooldown_remaining()
+    lines.append(f"cooldown: {f'{cooldown:.0f}s' if cooldown else 'none'}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
