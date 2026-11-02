@@ -222,6 +222,19 @@ def test_prompt_success_sends_expected_request(stub):
     assert "hello" in body["messages"][1]["content"]
 
 
+def test_plain_call_caps_nemotron_reasoning_at_half_the_cap(stub):
+    _tool(server.nim_prompt)("q", use_cache=False)
+    assert stub.posts()[0][3]["reasoning_budget"] == (
+        server.NIM_DEFAULT_MAX_TOKENS // 2
+    )
+    _tool(server.nim_prompt)("q", use_cache=False, max_tokens=50_000)
+    assert stub.posts()[1][3]["reasoning_budget"] == (
+        server.NIM_PROMPT_THINKING
+    )
+    _tool(server.nim_prompt)("q", use_cache=False, model="vendor/other")
+    assert "reasoning_budget" not in stub.posts()[2][3]
+
+
 def test_raw_skips_system_message(stub):
     _tool(server.nim_prompt)("hi", raw=True, use_cache=False)
     messages = stub.posts()[0][3]["messages"]
