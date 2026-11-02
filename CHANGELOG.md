@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Background role tools:** `nim_scout_start`, `nim_first_pass_review_start`
+  and `nim_triage_log_start` queue a role on the job pool (collect with
+  `gemini_poll`). The diff or log is checked when the job starts, so bad input
+  fails at once.
 - **Agent roles on `nim_agent`:** `nim_scout` (the exact lines a task needs),
   `nim_first_pass_review` (a diff read server-side from a file, a committed
   range or the working tree, refused over about 1,500 lines) and `nim_triage_log`

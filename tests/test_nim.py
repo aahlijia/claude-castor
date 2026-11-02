@@ -578,6 +578,14 @@ def test_all_nim_tools_registered():
         "nim_summarize",
         "nim_models",
         "nim_status",
+        "nim_agent",
+        "nim_agent_start",
+        "nim_scout",
+        "nim_scout_start",
+        "nim_first_pass_review",
+        "nim_first_pass_review_start",
+        "nim_triage_log",
+        "nim_triage_log_start",
     } <= names
 
 
@@ -1100,6 +1108,54 @@ def test_role_end_to_end_through_the_loop(stub, repo):
     out = _tool(server.nim_scout)("where is TARGET?", str(repo))
     assert "src/a.py:1-3 - the setting" in out
     assert "citations verified 1/1" in out
+
+
+def _poll_until_done(job_id):
+    for _ in range(100):
+        out = _tool(server.gemini_poll)(job_id)
+        if not out.startswith("[Job"):
+            return out
+        time.sleep(0.05)
+    return out
+
+
+def _job_id(started):
+    return re.search(r"job (\w+)\.", started).group(1)
+
+
+def test_role_start_tools_queue_the_same_task(captured, repo, tmp_path):
+    diff = tmp_path / "t.diff"
+    diff.write_text("@@ -1 +1 @@\n+TARGET = 2\n")
+    (repo / "run.log").write_text("FAIL x\n")
+    starts = [
+        (server.nim_scout_start, ("q?", str(repo)), server.NIM_SCOUT_STEPS),
+        (
+            server.nim_first_pass_review_start,
+            (str(repo), str(diff)),
+            server.NIM_REVIEW_STEPS,
+        ),
+        (
+            server.nim_triage_log_start,
+            (str(repo), "run.log"),
+            server.NIM_TRIAGE_STEPS,
+        ),
+    ]
+    for tool, args, steps in starts:
+        assert _poll_until_done(_job_id(_tool(tool)(*args))) == "ok"
+        assert captured[-1]["steps"] == steps
+    assert "q?" in captured[0]["task"]
+    assert "+TARGET = 2" in captured[1]["task"]
+    assert "`run.log`" in captured[2]["task"]
+
+
+def test_role_start_tools_report_bad_input_at_once(captured, repo, tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("not a diff\n")
+    review = _tool(server.nim_first_pass_review_start)
+    assert "does not look like a diff" in review(str(repo), str(notes))
+    triage = _tool(server.nim_triage_log_start)
+    assert "inside cwd" in triage(str(repo), "missing.log")
+    assert not captured
 
 
 def test_agent_tells_the_model_its_budget_and_warns_before_the_last_step(

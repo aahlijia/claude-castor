@@ -322,7 +322,9 @@ bulk:
 
 Keep the judgment calls (rulings, design, the final review) for yourself. Each
 agent step is one NIM request, so prefer a handful of focused tasks to one huge
-one, and use `nim_agent_start` to fan out. Every `path:line` is checked; one
+one, and use `nim_agent_start` (or a role's `_start` variant, such as
+`nim_first_pass_review_start`) to fan out or to keep working while a review
+runs. Every `path:line` is checked; one
 tagged `[unverified]` is a hallucination, so discard it.
 
 Rules of thumb:
