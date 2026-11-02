@@ -178,7 +178,7 @@ over via the system keyring — no extra steps needed.
 | `gemini_auth` | Get sign-in instructions when not authenticated |
 | `gemini_status` | Check CLI installation and sign-in; lists available models and agents when READY |
 | `gemini_setup` | Get step-by-step setup instructions |
-| `nim_prompt` / `nim_start` / `nim_review` / `nim_security_review` / `nim_explain_error` / `nim_summarize` / `nim_models` / `nim_status` | Optional NVIDIA NIM backend — see [below](#nvidia-nim-optional-second-backend) |
+| `nim_prompt` / `nim_start` / `nim_review` / `nim_security_review` / `nim_explain_error` / `nim_summarize` / `nim_models` / `nim_status` / `nim_agent` / `nim_agent_start` | Optional NVIDIA NIM backend — see [below](#nvidia-nim-optional-second-backend) |
 
 ### `gemini_prompt` parameters
 
@@ -351,6 +351,7 @@ third party.
 | `nim_security_review` | Security-focused review of a diff |
 | `nim_explain_error` | Ranked root causes for an error; pass the relevant source via `files` |
 | `nim_summarize` | `{summary, key_points}` of a file or directory under `cwd` |
+| `nim_agent` / `nim_agent_start` | Read-only investigation: the model gets `grep`, `read_range` and `list_dir` (run locally, confined to `cwd`, secrets and `.git` off limits) and cited `path:line` are verified; `_start` runs it in the background |
 | `nim_models` | List served models (optional `query` filter) |
 | `nim_status` | Key, default model, limits, rate-limit state (`verify=False` skips the live check) |
 
@@ -367,6 +368,7 @@ All optional, set as environment variables on the MCP server:
 | `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required unless `NVIDIA_API_KEYS` is set) |
 | `NVIDIA_API_KEYS` | — | Several keys, comma-separated. Requests rotate across them; each key has its own rate limit and cooldown, a 429 moves on to the next key, and a rejected key (401/402) is skipped while another remains |
 | `CASTOR_NIM_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Model used when a call names none; see `nim_models` |
+| `CASTOR_NIM_AGENT_MODEL` | `CASTOR_NIM_MODEL` | Model for `nim_agent` loops; pick a fast one (see `nim_models`) |
 | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
 | `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
 | `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |
