@@ -56,3 +56,49 @@
   `gemini_index` takes ~2 minutes even on a tiny repo, so 45s would break it.
 - **Rejected:** lowering to 45s; parallelizing `gemini_status` lookups (models
   and agents take ~1.2s and ~0.6s; the slow step is the live model probe).
+
+### 2026-11-02: NIM default model is nemotron-3-ultra-550b-a55b
+- **Why:** `meta/llama-3.3-70b-instruct` reached end of life 2026-08-26 and
+  returns 410. Ultra answered live on the free tier, scores highest of the
+  usable models on Artificial Analysis (about 47.7 vs DeepSeek V4.1 Flash 45,
+  GLM and MiniMax 42; sources conflict), and handled tool calls in 2 to 3 s.
+- **Rejected:** Kimi K2.6 (strongest open model but 404 for this account),
+  Nemotron 3 Super (404), DeepSeek V4.1 Flash and gpt-oss-20b (timed out or ran
+  100+ s per step), GLM-5.3-Flash (95 to 116 s per step).
+
+### 2026-11-02: Several NIM keys rotate; limiter and cooldown are per key
+- **Why:** the limit is account-wide, so more accounts is the only way past
+  40 req/min. Env `NVIDIA_API_KEYS`; a 429 cools only that key and the retry
+  moves to another at once; a 401/402 retires a key for the session unless it is
+  the last usable one (single-key setups keep their normal error).
+- **Rejected:** model fallback chains for throughput (limit is per account, not
+  per model); a global cooldown (one limited key would stall the rest).
+
+### 2026-11-02: nim_agent is read-only; roles are thin wrappers
+- **Why:** NIM has no filesystem, so Castor runs grep/read_range/list_dir for it,
+  confined to `cwd` with secrets and `.git` denied. The bulk-reading savings come
+  first and carry no write risk. Every `path:line` is checked against the files.
+- **Rejected for now:** write access. The audit in the NQC repo
+  (`docs/drafts/fable-token-usage.md`) puts 56% of cost in implementers, so
+  writes could save more, but rework can erase it and Unity work needs the Editor.
+  Plan: patch-file output only, Editor-free tasks only, after the review pilot.
+- **Rejected:** replacing the agy first-pass review with `nim_first_pass_review`
+  before measuring its hit rate.
+
+### 2026-11-02: Agent reasoning budgets are 1024 per tool step, 6144 for the answer
+- **Why:** Nemotron 3 Ultra's reasoning is unbounded: tool steps sometimes ran
+  4,000 tokens (80 s) and one answer outran the 180 s timeout. Tool steps only
+  pick the next lookup. On the same review request, a 2,048 or 0 budget made the
+  answer claim a false bug that the unbounded run avoided, so the answer keeps
+  6,144. Sent as `reasoning_budget`, only to `nvidia/nemotron*` models.
+- **Rejected:** thinking off everywhere (11 s vs 79 s, but worse reviews);
+  raising timeouts instead (slower, still unbounded).
+
+### 2026-11-02: No self-verification pass for nim_first_pass_review
+- **Why:** asked to verify a review's findings against the code, Nemotron
+  refuted 1 of 5 known-false findings and "confirmed" a deadlock that isn't one
+  (a lock taken twice in sequence). Across 3 reviews after the prompt fixes,
+  roughly half the findings were false and severity ran high. The review stays
+  a lead generator that Claude must verify.
+- **Rejected:** more prompt rules (the concrete-input format and severity rules
+  were only partly followed).

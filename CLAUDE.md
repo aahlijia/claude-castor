@@ -124,6 +124,63 @@ cheap model), keeping the last 3 turns verbatim.
 Drive a session from `gemini_prompt` with `session="<name>"` (or
 `continue_session=True` for the default). `gemini_reset` now requires `cwd`.
 
+### NVIDIA NIM tools (optional second backend)
+
+A non-agentic backend: an OpenAI-compatible chat endpoint
+(`https://integrate.api.nvidia.com/v1`) with no filesystem access, so Castor
+inlines whatever the model needs. Needs `NVIDIA_API_KEY` in the MCP server's
+environment (`claude mcp add -s user claude-castor -e NVIDIA_API_KEY=... -- ...`);
+the key is env-only, never a tool arg, never logged. `NVIDIA_API_KEYS`
+(comma-separated) adds more keys: requests rotate across them, each key has its
+own limiter and 429 cooldown, and a 401/402 retires a key while another
+remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response cache, session store) and
+`_run_nim` returns `(ok, text)` rather than sniffing for a leading `[`.
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `nim_prompt` | `(prompt, files, directory, raw, cwd, continue_session, session, model, use_cache, temperature, max_tokens)` | General prompt; files/directory inlined |
+| `nim_start` | same minus session args | Background job on the shared pool; poll with `gemini_poll` |
+| `nim_review` / `nim_security_review` | `(cwd, diff=None, model=None)` | Diff review (defaults to `git diff HEAD`) |
+| `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
+| `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
+| `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir run by Castor; cited `path:line` are verified |
+| `nim_agent_start` | same | Background `nim_agent`; poll with `gemini_poll` |
+| `nim_scout` | `(question, cwd, model=None, max_steps=None)` | Role: the exact `path:start-end` ranges a task needs |
+| `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
+| `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
+| `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll` |
+| `nim_models` | `(query=None)` | List served model ids |
+| `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
+
+`nim_agent` (`_nim_agent_loop`) is confined to `cwd` (symlinks resolved before
+the containment check; `.env*`, key files and `.git` are off limits), reads at
+most 120 lines per call, caps each tool result, and never lets the model edit or
+run anything. Each step is one NIM request (default 12 steps, max 30;
+`CASTOR_NIM_AGENT_MODEL` overrides the model). `_agent_verify_citations` tags
+any `path:line` that does not exist as `[unverified]`. The last step, or a
+tool step that runs out of tokens, goes to `_agent_answer`: the transcript
+flattened into one user message (Nemotron keeps calling tools otherwise), with
+a 16k token cap (`CASTOR_NIM_AGENT_ANSWER_TOKENS`). Nemotron models get a
+`reasoning_budget` of 1024 per tool step and 6144 for the answer
+(`_nim_thinking_cap`); plain NIM calls (`_run_nim`) cap it at half of
+`max_tokens`, at most 6144. Walks and the file list skip engine assets
+(`NIM_AGENT_SKIP_EXTENSIONS`: Unity `.meta`, `.prefab`, `.fbx` and the like),
+and `list_dir` hides `.meta` files; a path named directly is still readable.
+The system prompt carries a file list from `git ls-files` (with line
+counts; directories past 150 files), grep takes `context` lines and reports
+match totals past its cap, and the model may batch up to 4 calls per step.
+
+Resilience lives in `_nim_request`: a client-side sliding-window limiter
+(`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and concurrency cap, retry
+with exponential backoff + jitter on 429/5xx/network (one timeout retry),
+`Retry-After` honored, a per-key cooldown after a 429 (other keys keep going), and a fail-fast "try again in Ns" error once the
+wait would exceed `NIM_MAX_WAIT` (30s). `_classify_nim_status` decides what is
+retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
+http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
+`CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`. NIM session compaction uses NIM
+(`_summarize_text_nim`), so NIM-only users never need agy. `gemini_status` adds
+a one-line `nvidia_nim:` summary (no network call).
+
 ### `gemini_cache_clear`
 
 Deletes all cached Antigravity responses. `gemini_prompt` reuses a stored
@@ -195,12 +252,15 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 
 ## Development
 
-- No test suite. Before committing, run:
+- Before committing, run:
   ```bash
   uvx ruff check server.py
   uvx ruff format --check server.py
   python3 -m py_compile server.py
+  uv run --with pytest --with httpx --with fastmcp pytest tests
   ```
+  `tests/test_nim.py` exercises the NIM backend against a local stub server (no
+  network, no real key). The agy path has no automated tests.
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands `server.py` depends on. After an intended agy
   upgrade, update `server.py`, then refresh with `--update-snapshot`.
@@ -231,4 +291,9 @@ See `.dev/development-plan.md` for the full roadmap. Key items:
 - Client-side sessions (`session` param + `gemini_sessions` / `_show` /
   `_delete`; Castor-owned transcripts replayed into fresh `agy --print`,
   auto-summarized over budget — replaces the agy `--continue` path) — **done**
+- NVIDIA NIM backend (`nim_*` tools; inline-only, env-configured key, retry/
+  rate-limit/cooldown handling) — **done**
+- Multi-provider routing: more OpenAI-compatible free-tier providers behind the
+  same client, ordered fallback chains with per-candidate cooldowns, and
+  context-aware candidate skipping (NIM is the first provider)
 - Streaming output (token-by-token, vs. the current poll model)

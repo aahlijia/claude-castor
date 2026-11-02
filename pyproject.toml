@@ -7,6 +7,7 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp",
+    "httpx",
 ]
 
 [project.urls]
@@ -16,6 +17,7 @@ Changelog = "https://github.com/aahlijia/claude-castor/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
+    "pytest",
     "ruff>=0.15.12",
 ]
 
