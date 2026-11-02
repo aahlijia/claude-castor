@@ -316,16 +316,23 @@ bulk:
 | Task | Use |
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
-| First-pass review of a diff, with surrounding code | `nim_first_pass_review` (`/castor:first-pass`); pass `rev_range` or `diff_file`, never paste the diff |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
+
+**`nim_first_pass_review` (`/castor:first-pass`) is weak; don't build on it.**
+In a five-review pilot on a Unity project (2026-11-02), 5 of its 25 leads held
+up, all of them repeats of what the Claude review found, 12 were wrong, and it
+caught none of the three known findings (it called one real bug correct). Use
+it at most as an occasional extra on a small diff, never as a step a review or
+pipeline waits on, and never in place of reading the diff yourself.
 
 Keep the judgment calls (rulings, design, the final review) for yourself. Each
 agent step is one NIM request, so prefer a handful of focused tasks to one huge
 one, and use `nim_agent_start` (or a role's `_start` variant, such as
-`nim_first_pass_review_start`) to fan out or to keep working while a review
-runs. Every `path:line` is checked; one
-tagged `[unverified]` is a hallucination, so discard it.
+`nim_triage_log_start`) to fan out or to keep working while it runs. Every
+`path:line` is checked; one tagged `[unverified]` is a hallucination, so
+discard it. The check only proves the line exists: a "citations verified 9/9"
+answer has still pointed at the wrong branch of a function.
 
 Rules of thumb:
 

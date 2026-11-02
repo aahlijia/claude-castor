@@ -10,3 +10,5 @@ Call `nim_first_pass_review` with:
 - `focus`: a few lines of project rules to check, if the project has them ($ARGUMENTS may name them)
 
 Diffs over about 1,500 lines are refused: review those in parts. The result ranks Critical, Important and Minor findings as `path:line - failure - smallest fix`, with citations checked. Treat each as a lead: verify it against the code before reporting or fixing it, and never cite it as evidence. It complements a Claude review, it does not replace one.
+
+Expect a low hit rate. In a five-review pilot on a Unity project, about 1 lead in 5 held up, all repeats of what the Claude review found, and it missed every known real finding. Say so when you report its results, and don't make it a step that other work waits on.
