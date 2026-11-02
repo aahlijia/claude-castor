@@ -161,6 +161,9 @@ tool step that runs out of tokens, goes to `_agent_answer`: the transcript
 flattened into one user message (Nemotron keeps calling tools otherwise), with
 a 16k token cap (`CASTOR_NIM_AGENT_ANSWER_TOKENS`). Nemotron models get a
 `reasoning_budget` of 1024 per tool step and 6144 for the answer.
+The system prompt carries a file list from `git ls-files` (with line
+counts; directories past 150 files), grep takes `context` lines and reports
+match totals past its cap, and the model may batch up to 4 calls per step.
 
 Resilience lives in `_nim_request`: a client-side sliding-window limiter
 (`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and concurrency cap, retry
