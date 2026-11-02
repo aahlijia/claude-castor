@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`nim_agent` / `nim_agent_start`: a read-only agent loop on NIM.** The model
+  gets `grep`, `read_range` and `list_dir`, run by Castor and confined to `cwd`
+  (symlinks resolved first; secrets and `.git` off limits), and investigates over
+  several requests. Every `path:line` in the answer is checked against the files
+  and tagged `[unverified]` when it does not exist. `CASTOR_NIM_AGENT_MODEL`
+  sets its model.
 - **Multiple NIM API keys.** `NVIDIA_API_KEYS` takes a comma-separated list.
   Requests rotate across keys, each key has its own rate limiter and 429
   cooldown, and a rejected key (401/402) is skipped while another remains.

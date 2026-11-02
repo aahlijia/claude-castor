@@ -143,8 +143,17 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_review` / `nim_security_review` | `(cwd, diff=None, model=None)` | Diff review (defaults to `git diff HEAD`) |
 | `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
+| `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir run by Castor; cited `path:line` are verified |
+| `nim_agent_start` | same | Background `nim_agent`; poll with `gemini_poll` |
 | `nim_models` | `(query=None)` | List served model ids |
 | `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
+
+`nim_agent` (`_nim_agent_loop`) is confined to `cwd` (symlinks resolved before
+the containment check; `.env*`, key files and `.git` are off limits), reads at
+most 120 lines per call, caps each tool result, and never lets the model edit or
+run anything. Each step is one NIM request (default 12 steps, max 30;
+`CASTOR_NIM_AGENT_MODEL` overrides the model). `_agent_verify_citations` tags
+any `path:line` that does not exist as `[unverified]`.
 
 Resilience lives in `_nim_request`: a client-side sliding-window limiter
 (`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and concurrency cap, retry

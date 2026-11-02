@@ -645,3 +645,202 @@ def test_status_ready_if_one_key_works(two_keys):
     out = _tool(server.nim_status)()
     assert out.startswith("READY")
     assert "key 1: FAILED" in out and "key 2: OK" in out
+
+
+# --- nim_agent (read-only tool loop) --------------------------------------
+
+
+def _tool_call(name, args, call_id="call_1"):
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(args),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def repo(tmp_path):
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("one\nTARGET = 1\nthree\n")
+    (root / "src" / "blob.bin").write_bytes(b"\x00\x01TARGET")
+    (root / ".env").write_text("TARGET=secret-value\n")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("TARGET")
+    (tmp_path / "outside.txt").write_text("TARGET outside\n")
+    return root.resolve()
+
+
+def test_agent_tools_are_confined_and_skip_secrets(repo):
+    grep = server._agent_run_tool(repo, "grep", {"pattern": "TARGET"})
+    assert "src/a.py:2:TARGET = 1" in grep
+    assert "secret-value" not in grep and "blob.bin" not in grep
+    assert ".git" not in grep
+    read = server._agent_run_tool(
+        repo, "read_range", {"path": "src/a.py", "start": 2, "end": 3}
+    )
+    assert "2: TARGET = 1" in read and "3: three" in read
+    for bad in ("../outside.txt", "/etc/hosts", ".env", ".git/config"):
+        out = server._agent_run_tool(
+            repo, "read_range", {"path": bad, "start": 1, "end": 5}
+        )
+        assert out.startswith("[error"), bad
+    assert "src/" in server._agent_run_tool(repo, "list_dir", {})
+    assert ".env" not in server._agent_run_tool(repo, "list_dir", {})
+
+
+def test_agent_symlink_out_of_project_is_refused(repo, tmp_path):
+    (repo / "link.txt").symlink_to(tmp_path / "outside.txt")
+    out = server._agent_run_tool(
+        repo, "read_range", {"path": "link.txt", "start": 1, "end": 2}
+    )
+    assert out == "[error: path is outside the project]"
+
+
+def test_agent_tool_edge_cases(repo):
+    assert server._agent_run_tool(repo, "grep", {"pattern": "("}).startswith(
+        "[error: bad regex"
+    )
+    assert server._agent_run_tool(repo, "nope", {}).startswith(
+        "[error: unknown"
+    )
+    assert server._agent_run_tool(
+        repo, "read_range", {"path": "src/a.py", "start": "x"}
+    ).startswith("[tool error")
+    big = repo / "big.txt"
+    big.write_text("\n".join(f"line {i}" for i in range(500)))
+    out = server._agent_run_tool(
+        repo, "read_range", {"path": "big.txt", "start": 1, "end": 500}
+    )
+    assert "120: line 119" in out and "121:" not in out
+
+
+def test_agent_loop_runs_tool_then_answers(stub, repo):
+    stub.queue.append((200, {}, _tool_call("grep", {"pattern": "TARGET"})))
+    stub.queue.append(
+        (200, {}, _completion("Defined at src/a.py:2 and src/a.py:99"))
+    )
+    out = _tool(server.nim_agent)("where is TARGET?", str(repo))
+    assert "src/a.py:2 and src/a.py:99 [unverified]" in out
+    assert "citations verified 1/2" in out
+    assert "2 steps, 1 tool calls" in out
+    first, second = (p[3] for p in stub.posts())
+    assert [t["function"]["name"] for t in first["tools"]] == [
+        "grep",
+        "read_range",
+        "list_dir",
+    ]
+    tool_msg = second["messages"][-1]
+    assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "call_1"
+    assert "src/a.py:2:TARGET = 1" in tool_msg["content"]
+
+
+def test_agent_step_cap_forces_an_answer_without_tools(stub, repo):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
+    stub.queue.append((200, {}, _completion("best effort")))
+    out = _tool(server.nim_agent)("t", str(repo), max_steps=2)
+    assert out.startswith("best effort")
+    last = stub.posts()[1][3]
+    assert "tools" not in last
+    assert last["messages"][-1]["content"] == server.NIM_AGENT_FINAL_NUDGE
+
+
+def test_agent_ignoring_the_cap_gives_a_clear_error(stub, repo):
+    for i in range(2):
+        stub.queue.append(
+            (200, {}, _tool_call("list_dir", {"path": "src"}, f"c{i}"))
+        )
+    out = _tool(server.nim_agent)("t", str(repo), max_steps=2)
+    assert "hit its step cap" in out
+
+
+def test_agent_repeated_call_is_not_rerun(repo):
+    seen = set()
+    call = {
+        "id": "c",
+        "function": {"name": "list_dir", "arguments": "{}"},
+    }
+    first = server._agent_step_results(repo, [call], seen)
+    again = server._agent_step_results(repo, [call], seen)
+    assert "src/" in first[0]["content"]
+    assert "already ran" in again[0]["content"]
+
+
+def test_agent_answers_every_call_and_bad_arguments(repo):
+    calls = [
+        {"id": f"c{i}", "function": {"name": "list_dir", "arguments": "{"}}
+        for i in range(6)
+    ]
+    out = server._agent_step_results(repo, calls, set())
+    assert [m["tool_call_id"] for m in out] == [f"c{i}" for i in range(6)]
+    assert "not a JSON object" in out[0]["content"]
+    assert "too many tool calls" in out[5]["content"]
+
+
+def test_agent_validates_inputs(stub, tmp_path, monkeypatch):
+    assert _tool(server.nim_agent)("  ", str(tmp_path)).startswith(
+        "[Error: task"
+    )
+    assert "not a directory" in _tool(server.nim_agent)(
+        "t", str(tmp_path / "x")
+    )
+    monkeypatch.delenv("NVIDIA_API_KEY")
+    assert "not configured" in _tool(server.nim_agent)("t", str(tmp_path))
+    assert not stub.requests
+
+
+def test_agent_http_error_is_returned(stub, repo):
+    stub.queue.append((401, {}, {"detail": "bad key"}))
+    out = _tool(server.nim_agent)("t", str(repo))
+    assert out.startswith("[NVIDIA NIM error") and "rejected" in out
+
+
+def test_agent_model_env_override(stub, repo, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_AGENT_MODEL", "nvidia/nemotron-x")
+    stub.queue.append((200, {}, _completion("done")))
+    _tool(server.nim_agent)("t", str(repo))
+    assert stub.posts()[0][3]["model"] == "nvidia/nemotron-x"
+
+
+def test_agent_start_and_poll(stub, repo):
+    stub.queue.append((200, {}, _completion("bg answer")))
+    started = _tool(server.nim_agent_start)("t", str(repo))
+    job_id = re.search(r"job (\w+)\.", started).group(1)
+    for _ in range(100):
+        out = _tool(server.gemini_poll)(job_id)
+        if "bg answer" in out:
+            break
+        time.sleep(0.05)
+    assert "bg answer" in out
+
+
+def test_agent_tells_the_model_its_budget_and_warns_before_the_last_step(
+    stub, repo
+):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"}, "a")))
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "."}, "b")))
+    stub.queue.append((200, {}, _completion("done")))
+    _tool(server.nim_agent)("t", str(repo), max_steps=3)
+    posts = [p[3] for p in stub.posts()]
+    assert "3 requests in total" in posts[0]["messages"][0]["content"]
+    assert server.NIM_AGENT_LAST_TOOL_NUDGE not in json.dumps(posts[0])
+    assert posts[1]["messages"][-1]["content"] == (
+        server.NIM_AGENT_LAST_TOOL_NUDGE
+    )
+    assert posts[2]["messages"][-1]["content"] == server.NIM_AGENT_FINAL_NUDGE
