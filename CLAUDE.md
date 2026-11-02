@@ -124,6 +124,37 @@ cheap model), keeping the last 3 turns verbatim.
 Drive a session from `gemini_prompt` with `session="<name>"` (or
 `continue_session=True` for the default). `gemini_reset` now requires `cwd`.
 
+### NVIDIA NIM tools (optional second backend)
+
+A non-agentic backend: an OpenAI-compatible chat endpoint
+(`https://integrate.api.nvidia.com/v1`) with no filesystem access, so Castor
+inlines whatever the model needs. Needs `NVIDIA_API_KEY` in the MCP server's
+environment (`claude mcp add -s user claude-castor -e NVIDIA_API_KEY=... -- ...`);
+the key is env-only, never a tool arg, never logged. `_dispatch_nim` mirrors
+`_dispatch` (same `_assemble_prompt`, response cache, session store) and
+`_run_nim` returns `(ok, text)` rather than sniffing for a leading `[`.
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `nim_prompt` | `(prompt, files, directory, raw, cwd, continue_session, session, model, use_cache, temperature, max_tokens)` | General prompt; files/directory inlined |
+| `nim_start` | same minus session args | Background job on the shared pool; poll with `gemini_poll` |
+| `nim_review` / `nim_security_review` | `(cwd, diff=None, model=None)` | Diff review (defaults to `git diff HEAD`) |
+| `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
+| `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
+| `nim_models` | `(query=None)` | List served model ids |
+| `nim_status` | `(verify=True)` | Key/model/limits/cooldown; `verify` spends one request |
+
+Resilience lives in `_nim_request`: a client-side sliding-window limiter
+(`CASTOR_NIM_RPM`, default 40/60s) and concurrency cap, retry with exponential
+backoff + jitter on 429/5xx/network (one timeout retry), `Retry-After` honored,
+a shared cooldown after a 429, and a fail-fast "try again in Ns" error once the
+wait would exceed `NIM_MAX_WAIT` (30s). `_classify_nim_status` decides what is
+retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
+http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
+`CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`. NIM session compaction uses NIM
+(`_summarize_text_nim`), so NIM-only users never need agy. `gemini_status` adds
+a one-line `nvidia_nim:` summary (no network call).
+
 ### `gemini_cache_clear`
 
 Deletes all cached Antigravity responses. `gemini_prompt` reuses a stored
@@ -195,12 +226,15 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 
 ## Development
 
-- No test suite. Before committing, run:
+- Before committing, run:
   ```bash
   uvx ruff check server.py
   uvx ruff format --check server.py
   python3 -m py_compile server.py
+  uv run --with pytest --with httpx --with fastmcp pytest tests
   ```
+  `tests/test_nim.py` exercises the NIM backend against a local stub server (no
+  network, no real key). The agy path has no automated tests.
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands `server.py` depends on. After an intended agy
   upgrade, update `server.py`, then refresh with `--update-snapshot`.
@@ -231,4 +265,9 @@ See `.dev/development-plan.md` for the full roadmap. Key items:
 - Client-side sessions (`session` param + `gemini_sessions` / `_show` /
   `_delete`; Castor-owned transcripts replayed into fresh `agy --print`,
   auto-summarized over budget — replaces the agy `--continue` path) — **done**
+- NVIDIA NIM backend (`nim_*` tools; inline-only, env-configured key, retry/
+  rate-limit/cooldown handling) — **done**
+- Multi-provider routing: more OpenAI-compatible free-tier providers behind the
+  same client, ordered fallback chains with per-candidate cooldowns, and
+  context-aware candidate skipping (NIM is the first provider)
 - Streaming output (token-by-token, vs. the current poll model)

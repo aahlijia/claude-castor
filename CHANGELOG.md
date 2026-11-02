@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **NVIDIA NIM backend (optional).** Offload to NVIDIA's hosted models
+  (free developer tier) alongside agy, with eight new tools: `nim_prompt`,
+  `nim_start`, `nim_review`, `nim_security_review`, `nim_explain_error`,
+  `nim_summarize`, `nim_models`, `nim_status`, plus `/castor:nim-status`.
+  NIM is a plain chat endpoint with no filesystem access, so Castor inlines
+  the content it needs; for open-ended exploration agy remains the right
+  tool. Configured by environment only: `NVIDIA_API_KEY` (never a tool
+  argument, never logged) plus optional `CASTOR_NIM_MODEL`,
+  `CASTOR_NIM_BASE_URL`, `CASTOR_NIM_RPM`, `CASTOR_NIM_CONCURRENCY`,
+  `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS` and
+  `CASTOR_NIM_TIMEOUT`.
+- **Resilient NIM client.** Client-side sliding-window rate limit and
+  concurrency cap; retry with exponential backoff and jitter on 429/5xx/
+  network errors (one retry on timeout), honoring `Retry-After`; a shared
+  cooldown after a 429 so background jobs back off together; fail-fast
+  "try again in Ns" instead of blocking Claude; and failure classification
+  so auth, billing, permission, not-found and context-window errors are
+  never retried and say how to fix them.
+- NIM calls share the response cache, Castor-owned sessions (usable across
+  backends) and the background-job pool: `nim_start` jobs are collected
+  with the existing `gemini_poll` / `gemini_jobs`.
+- `gemini_status` reports whether NIM is configured (no network call).
+- `tests/test_nim.py`: 64 tests against a local stub server (no network, no
+  real key).
+
+### Changed
+
+- New runtime dependency: `httpx` (already a transitive dependency of
+  `fastmcp`).
+- `_compact_session` / `_append_turn` accept a pluggable summarizer and
+  `_run_job` a pluggable runner; agy behavior is unchanged.
+
 ## [0.7.1] - 2026-10-26
 
 ### Fixed
