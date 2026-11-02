@@ -364,10 +364,11 @@ All optional, set as environment variables on the MCP server:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required) |
+| `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required unless `NVIDIA_API_KEYS` is set) |
+| `NVIDIA_API_KEYS` | — | Several keys, comma-separated. Requests rotate across them; each key has its own rate limit and cooldown, a 429 moves on to the next key, and a rejected key (401/402) is skipped while another remains |
 | `CASTOR_NIM_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Model used when a call names none; see `nim_models` |
 | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
-| `CASTOR_NIM_RPM` | `40` | Client-side requests per minute |
+| `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
 | `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |
 | `CASTOR_NIM_MAX_INPUT_CHARS` | `300000` | Prompt size budget (~75k tokens); larger prompts are rejected up front |
 | `CASTOR_NIM_MAX_TOKENS` | `4096` | Completion cap per request |
