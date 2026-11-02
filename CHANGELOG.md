@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fastmcp`).
 - `_compact_session` / `_append_turn` accept a pluggable summarizer and
   `_run_job` a pluggable runner; agy behavior is unchanged.
+- Plain NIM calls (`nim_prompt`, `nim_review`, `nim_summarize` and the rest)
+  cap Nemotron's thinking at half of `max_tokens` (at most 6,144), so it can
+  no longer spend the whole completion cap thinking and return nothing.
+- The agent skips engine assets (Unity `.meta`, `.prefab`, `.fbx`, `.mat`,
+  `.asset` and similar) when it walks a repo or builds its file list, and
+  `list_dir` hides `.meta` files. In a Unity project they had crowded the
+  code out of the file list. A path named directly is still readable.
 
 ## [0.7.1] - 2026-10-26
 

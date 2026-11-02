@@ -3859,6 +3859,38 @@ NIM_AGENT_ANSWER_MAX_TOKENS = 16384
 # or 0 made the review claim false bugs. Sent only to Nemotron models.
 NIM_AGENT_STEP_THINKING = 1024
 NIM_AGENT_ANSWER_THINKING = 6144
+# Engine assets and binaries the agent skips while walking a repo or listing
+# it in the file map (a Unity project tracks a .meta beside every file). A
+# path named directly can still be read or searched.
+NIM_AGENT_SKIP_EXTENSIONS = SKIP_EXTENSIONS | {
+    ".meta",
+    ".fbx",
+    ".obj",
+    ".blend",
+    ".prefab",
+    ".unity",
+    ".asset",
+    ".mat",
+    ".anim",
+    ".controller",
+    ".overridecontroller",
+    ".mask",
+    ".physicmaterial",
+    ".shadergraph",
+    ".terrainlayer",
+    ".lighting",
+    ".psd",
+    ".tga",
+    ".tif",
+    ".exr",
+    ".hdr",
+    ".wav",
+    ".mp3",
+    ".ogg",
+    ".dll",
+    ".so",
+    ".dylib",
+}
 _NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg"}
 _NIM_AGENT_DENIED_NAMES = {
     "id_rsa",
@@ -4026,6 +4058,8 @@ def _agent_list_dir(root: Path, raw: str) -> str:
         rel = entry.relative_to(root)
         if entry.name in SKIP_DIRS or _agent_denied(rel):
             continue
+        if entry.suffix.lower() == ".meta":
+            continue
         names.append(entry.name + ("/" if entry.is_dir() else ""))
     shown = names[:NIM_AGENT_MAX_LISTED]
     more = len(names) - len(shown)
@@ -4053,11 +4087,16 @@ def _agent_read_range(root: Path, raw: str, start: int, end: int) -> str:
     return _agent_clip(f"{raw} lines {start}-{end} of {len(lines)}\n{body}")
 
 
+def _agent_skipped(name: str) -> bool:
+    """True when a walk or the file map should leave `name` out."""
+    return Path(name).suffix.lower() in NIM_AGENT_SKIP_EXTENSIONS
+
+
 def _agent_grep_candidates(target: Path) -> list[Path]:
     """Files under `target` worth searching, in a stable order.
 
     A file named directly is always searched (a .log for triage); a walk
-    skips the noise extensions (logs, lockfiles, images).
+    skips the noise extensions (logs, lockfiles, images, engine assets).
     """
     if target.is_file():
         return [target]
@@ -4067,9 +4106,7 @@ def _agent_grep_candidates(target: Path) -> list[Path]:
             d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")
         )
         files.extend(
-            Path(base) / n
-            for n in sorted(names)
-            if Path(n).suffix not in SKIP_EXTENSIONS
+            Path(base) / n for n in sorted(names) if not _agent_skipped(n)
         )
     return files
 
@@ -4262,9 +4299,7 @@ def _agent_tracked_files(root: Path) -> list[str]:
     return sorted(
         n
         for n in set(names)
-        if n
-        and Path(n).suffix not in SKIP_EXTENSIONS
-        and not _agent_denied(Path(n))
+        if n and not _agent_skipped(n) and not _agent_denied(Path(n))
     )
 
 
