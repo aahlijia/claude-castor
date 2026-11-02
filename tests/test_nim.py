@@ -45,7 +45,10 @@ class Stub:
     def __init__(self):
         self.queue = []  # (status, headers, body) consumed per POST
         self.requests = []  # (method, path, headers, parsed body)
-        self.models = ["meta/llama-3.3-70b-instruct", "nvidia/nemotron-x"]
+        self.models = [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/nemotron-x",
+        ]
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -63,14 +66,18 @@ class Stub:
                 self.wfile.write(data)
 
             def do_GET(self):
-                stub.requests.append(("GET", self.path, dict(self.headers), None))
+                stub.requests.append(
+                    ("GET", self.path, dict(self.headers), None)
+                )
                 data = [{"id": m} for m in stub.models]
                 self._reply(200, {}, {"data": data})
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
-                stub.requests.append(("POST", self.path, dict(self.headers), body))
+                stub.requests.append(
+                    ("POST", self.path, dict(self.headers), body)
+                )
                 if stub.queue:
                     status, headers, payload = stub.queue.pop(0)
                 else:
@@ -270,7 +277,11 @@ def test_bracket_prefixed_answer_is_a_success(stub):
 
 def test_think_blocks_stripped(stub):
     stub.queue.append(
-        (200, {}, _completion("<think>secret chain\nof thought</think>\nfinal"))
+        (
+            200,
+            {},
+            _completion("<think>secret chain\nof thought</think>\nfinal"),
+        )
     )
     assert _tool(server.nim_prompt)("q", use_cache=False) == "final"
 
@@ -492,7 +503,7 @@ def test_summarize_missing_target(stub, tmp_path):
 
 def test_models_lists_and_filters(stub):
     out = _tool(server.nim_models)()
-    assert "meta/llama-3.3-70b-instruct" in out and "(2 of 2)" in out
+    assert "nvidia/nemotron-3-ultra-550b-a55b" in out and "(2 of 2)" in out
     out = _tool(server.nim_models)("nemotron")
     assert "nvidia/nemotron-x" in out and "llama" not in out
     assert _tool(server.nim_models)("zzz").startswith("[No NIM models match")
@@ -502,7 +513,7 @@ def test_status_ready(stub):
     out = _tool(server.nim_status)()
     assert out.startswith("READY — NVIDIA NIM")
     assert KEY not in out
-    assert "default_model: meta/llama-3.3-70b-instruct" in out
+    assert "default_model: nvidia/nemotron-3-ultra-550b-a55b" in out
     assert "models_listed: 2" in out
     assert "cooldown: none" in out
 
