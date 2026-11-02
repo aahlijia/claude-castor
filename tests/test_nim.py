@@ -713,6 +713,13 @@ def test_agent_symlink_out_of_project_is_refused(repo, tmp_path):
     assert out == "[error: path is outside the project]"
 
 
+def test_agent_grep_searches_a_named_log_but_skips_logs_in_a_walk(repo):
+    (repo / "run.log").write_text("ok\nFAILED test_x\n")
+    hit = server._agent_grep(repo, "FAILED", "run.log", None)
+    assert hit == "run.log:2:FAILED test_x"
+    assert server._agent_grep(repo, "FAILED", ".", None) == "[no matches]"
+
+
 def test_agent_tool_edge_cases(repo):
     assert server._agent_run_tool(repo, "grep", {"pattern": "("}).startswith(
         "[error: bad regex"
@@ -765,6 +772,44 @@ def test_agent_step_cap_forces_an_answer_without_tools(stub, repo):
     assert final.startswith("find it")
     assert 'list_dir({"path": "src"})' in final and "a.py" in final
     assert final.endswith(server.NIM_AGENT_FINAL_NUDGE)
+
+
+def test_agent_answer_step_gets_a_larger_token_budget(stub, repo):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
+    stub.queue.append((200, {}, _completion("answer")))
+    _tool(server.nim_agent)("t", str(repo), max_steps=2, max_tokens=1000)
+    tool_step, answer_step = (p[3] for p in stub.posts())
+    assert tool_step["max_tokens"] == 1000
+    assert answer_step["max_tokens"] == server.NIM_AGENT_ANSWER_MAX_TOKENS
+
+
+@pytest.mark.parametrize("partial", ["", "Now I have enough. Critical"])
+def test_agent_out_of_tokens_mid_loop_moves_to_the_answer(stub, repo, partial):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
+    stub.queue.append((200, {}, _completion(partial, finish="length")))
+    stub.queue.append((200, {}, _completion("answer")))
+    out = _tool(server.nim_agent)("t", str(repo), max_steps=8)
+    assert out.startswith("answer")
+    posts = [p[3] for p in stub.posts()]
+    assert len(posts) == 3 and "tools" not in posts[2]
+    assert "[nim_agent: 3 steps, 1 tool calls" in out
+
+
+def test_agent_caps_nemotron_reasoning_per_step(stub, repo):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
+    stub.queue.append((200, {}, _completion("answer")))
+    _tool(server.nim_agent)("t", str(repo), max_steps=2)
+    tool_step, answer_step = (p[3] for p in stub.posts())
+    assert tool_step["reasoning_budget"] == server.NIM_AGENT_STEP_THINKING
+    assert answer_step["reasoning_budget"] == (
+        server.NIM_AGENT_ANSWER_THINKING
+    )
+
+
+def test_agent_sends_no_reasoning_budget_to_other_models(stub, repo):
+    stub.queue.append((200, {}, _completion("answer")))
+    _tool(server.nim_agent)("t", str(repo), model="vendor/other-model")
+    assert "reasoning_budget" not in stub.posts()[0][3]
 
 
 def test_agent_ignoring_the_cap_gives_a_clear_error(stub, repo):

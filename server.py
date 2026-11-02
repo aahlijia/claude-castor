@@ -3829,6 +3829,15 @@ NIM_AGENT_MAX_LISTED = 200
 NIM_AGENT_LINE_CHARS = 200
 NIM_AGENT_MAX_FILE_BYTES = 1_000_000
 NIM_AGENT_GREP_SECONDS = 10.0
+# The answer step reasons over every result gathered so far; at 4096 tokens
+# Nemotron 3 Ultra spent the whole budget thinking and returned nothing.
+NIM_AGENT_ANSWER_MAX_TOKENS = 16384
+# Nemotron's reasoning is otherwise unbounded: a tool step sometimes thought
+# for 4,000 tokens (80 s) and an answer outran the 180 s timeout. Tool steps
+# only pick the next lookup; the answer keeps room, since cutting it to 2,048
+# or 0 made the review claim false bugs. Sent only to Nemotron models.
+NIM_AGENT_STEP_THINKING = 1024
+NIM_AGENT_ANSWER_THINKING = 6144
 _NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg"}
 _NIM_AGENT_DENIED_NAMES = {
     "id_rsa",
@@ -4005,7 +4014,11 @@ def _agent_read_range(root: Path, raw: str, start: int, end: int) -> str:
 
 
 def _agent_grep_candidates(target: Path) -> list[Path]:
-    """Files under `target` worth searching, in a stable order."""
+    """Files under `target` worth searching, in a stable order.
+
+    A file named directly is always searched (a .log for triage); a walk
+    skips the noise extensions (logs, lockfiles, images).
+    """
     if target.is_file():
         return [target]
     files: list[Path] = []
@@ -4013,15 +4026,18 @@ def _agent_grep_candidates(target: Path) -> list[Path]:
         dirs[:] = sorted(
             d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")
         )
-        files.extend(Path(base) / n for n in sorted(names))
+        files.extend(
+            Path(base) / n
+            for n in sorted(names)
+            if Path(n).suffix not in SKIP_EXTENSIONS
+        )
     return files
 
 
 def _agent_grep_readable(root: Path, path: Path, glob: str | None) -> bool:
     """True when the agent may search `path`."""
     return not (
-        path.suffix in SKIP_EXTENSIONS
-        or _agent_denied(path.relative_to(root))
+        _agent_denied(path.relative_to(root))
         or (glob and not fnmatch.fnmatch(path.name, glob))
         or not path.is_file()
         or path.stat().st_size > NIM_AGENT_MAX_FILE_BYTES
@@ -4155,10 +4171,69 @@ def _agent_answer_messages(messages: list[dict]) -> list[dict]:
     return [system, {"role": "user", "content": content}]
 
 
+def _agent_send(
+    model: str, messages: list[dict], max_tokens: int, tools: bool
+) -> tuple[Any, str | None, dict]:
+    """Send one agent request. Returns (data, error, first message)."""
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": NIM_DEFAULT_TEMPERATURE,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if model.startswith("nvidia/nemotron"):
+        payload["reasoning_budget"] = (
+            NIM_AGENT_STEP_THINKING if tools else NIM_AGENT_ANSWER_THINKING
+        )
+    if tools:
+        payload["tools"] = NIM_AGENT_TOOLS
+        payload["tool_choice"] = "auto"
+    data, error = _nim_request("POST", "/chat/completions", payload)
+    choices = data.get("choices") if isinstance(data, dict) else None
+    return data, error, (choices or [{}])[0].get("message") or {}
+
+
+def _agent_answer(
+    messages: list[dict], model: str, max_tokens: int
+) -> tuple[bool, str]:
+    """Ask for the final answer from the flattened transcript, no tools."""
+    budget = max(
+        max_tokens,
+        int(
+            _nim_env(
+                "CASTOR_NIM_AGENT_ANSWER_TOKENS", NIM_AGENT_ANSWER_MAX_TOKENS
+            )
+        ),
+    )
+    data, error, message = _agent_send(
+        model, _agent_answer_messages(messages), budget, tools=False
+    )
+    if error:
+        return False, error
+    ok, text = _nim_extract_text(data, model)
+    if not ok and message.get("tool_calls"):
+        text = (
+            "[NVIDIA NIM agent hit its step cap without an answer: "
+            "raise max_steps or narrow the task.]"
+        )
+    return ok, text
+
+
+def _agent_out_of_tokens(data: Any) -> bool:
+    """True when a tool step ran out of tokens (any partial text is cut)."""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    return (choices or [{}])[0].get("finish_reason") == "length"
+
+
 def _nim_agent_loop(
     task: str, root: Path, model: str, max_steps: int, max_tokens: int
 ) -> tuple[bool, str, dict]:
-    """Drive the tool loop. Returns (ok, answer or error, stats)."""
+    """Drive the tool loop. Returns (ok, answer or error, stats).
+
+    The last step, an over-budget transcript, or a tool step that ran out
+    of tokens all hand over to _agent_answer.
+    """
     messages: list[dict] = [
         {
             "role": "system",
@@ -4172,38 +4247,24 @@ def _nim_agent_loop(
     )
     used = len(NIM_AGENT_SYSTEM) + len(task)
     seen: set[str] = set()
-    for step in range(1, max_steps + 1):
+    for step in range(1, max_steps):
+        if used > budget:
+            break
         stats["steps"] = step
-        final = step == max_steps or used > budget
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": NIM_DEFAULT_TEMPERATURE,
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
-        if final:
-            payload["messages"] = _agent_answer_messages(messages)
-        else:
-            if step == max_steps - 1 and max_steps > 2:
-                messages.append(
-                    {"role": "user", "content": NIM_AGENT_LAST_TOOL_NUDGE}
-                )
-            payload["tools"] = NIM_AGENT_TOOLS
-            payload["tool_choice"] = "auto"
-        data, error = _nim_request("POST", "/chat/completions", payload)
+        if step == max_steps - 1 and max_steps > 2:
+            messages.append(
+                {"role": "user", "content": NIM_AGENT_LAST_TOOL_NUDGE}
+            )
+        data, error, message = _agent_send(
+            model, messages, max_tokens, tools=True
+        )
         if error:
             return False, error, stats
-        choices = data.get("choices") if isinstance(data, dict) else None
-        message = (choices or [{}])[0].get("message") or {}
         calls = message.get("tool_calls") or []
-        if final or not calls:
+        if not calls:
+            if _agent_out_of_tokens(data):
+                break
             ok, text = _nim_extract_text(data, model)
-            if not ok and calls:
-                text = (
-                    "[NVIDIA NIM agent hit its step cap without an answer: "
-                    "raise max_steps or narrow the task.]"
-                )
             return ok, text, stats
         for position, call in enumerate(calls):
             call.setdefault("id", f"call_{step}_{position}")
@@ -4218,7 +4279,9 @@ def _nim_agent_loop(
         stats["tool_calls"] += len(results)
         used += sum(len(r["content"]) for r in results)
         messages.extend(results)
-    return False, "[NVIDIA NIM agent ended without an answer.]", stats
+    stats["steps"] += 1
+    ok, text = _agent_answer(messages, model, max_tokens)
+    return ok, text, stats
 
 
 def _agent_verify_citations(answer: str, root: Path) -> tuple[str, int, int]:

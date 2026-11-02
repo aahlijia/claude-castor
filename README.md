@@ -369,6 +369,7 @@ All optional, set as environment variables on the MCP server:
 | `NVIDIA_API_KEYS` | — | Several keys, comma-separated. Requests rotate across them; each key has its own rate limit and cooldown, a 429 moves on to the next key, and a rejected key (401/402) is skipped while another remains |
 | `CASTOR_NIM_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Model used when a call names none; see `nim_models` |
 | `CASTOR_NIM_AGENT_MODEL` | `CASTOR_NIM_MODEL` | Model for `nim_agent` loops; pick a fast one (see `nim_models`) |
+| `CASTOR_NIM_AGENT_ANSWER_TOKENS` | `16384` | Token cap for the agent's final answer, which reasons over everything it read |
 | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
 | `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
 | `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |
