@@ -37,3 +37,22 @@
   `server.py` edits; no reinstall needed.
 - **Heavy live testing hits the Antigravity individual quota**
   ("Individual quota reached"); keep probes small.
+- **`nim_models` lists models the account cannot call.** Kimi K2.6 and Nemotron 3
+  Super are in the catalog but return 404 "Function … not found for account";
+  Gemma 4 31B and DeepSeek V4.1 Flash timed out. Probe a model with a live call
+  before presenting it as an option.
+- **Reasoning models need a real `max_tokens`.** Nemotron 3 Ultra spends tiny
+  budgets thinking and returns no content (`finish_reason=length`). 8 tokens made
+  `nim_status` say NOT READY on a good key; verify uses 512.
+- **Slash commands are copies, not served from the repo.** The CLI reads
+  `~/.claude/commands/castor/`; after changing `commands/castor/*.md` copy them
+  over (`cp commands/castor/*.md ~/.claude/commands/castor/`).
+- **A re-registered MCP server needs a Claude Code restart**, and `claude mcp add
+  ... -e KEY=... -- /path/to/uv ...` needs a space after `--` (`--/opt/...` fails
+  after the remove already ran, leaving castor unregistered).
+- **The citation check proves a line exists, not that the claim is true.** The
+  scout named a function that does not exist at a real line, and review findings
+  of absence ("no tests", "not documented") were often wrong. Verify before
+  acting. Paths quoted from a log are tagged `[unverified]` (false positive).
+- **NIM probe scripts read keys from `~/.claude.json`** (`mcpServers.claude-castor.env`).
+  Never print them; keys pasted into a chat stay in that transcript.
