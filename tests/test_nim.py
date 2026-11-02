@@ -953,13 +953,13 @@ def test_scout_builds_task_and_default_budget(captured, repo):
 
 def test_review_reads_diff_file_server_side(captured, repo, tmp_path):
     diff = tmp_path / "t.diff"
-    diff.write_text("+TARGET = 2\n")
+    diff.write_text("@@ -1 +1 @@\n+TARGET = 2\n")
     out = _tool(server.nim_first_pass_review)(
         str(repo), diff_file=str(diff), focus="host owns the timer"
     )
     assert out == "ok"
     task = captured[0]["task"]
-    assert "[DIFF]\n+TARGET = 2\n\n[/DIFF]" in task
+    assert "[DIFF]\n@@ -1 +1 @@\n+TARGET = 2\n\n[/DIFF]" in task
     assert "host owns the timer" in task
     assert captured[0]["steps"] == server.NIM_REVIEW_STEPS
 
@@ -1008,6 +1008,21 @@ def test_review_refuses_empty_oversize_and_missing(captured, repo, tmp_path):
     big.write_text("x" * (server.NIM_REVIEW_MAX_DIFF_CHARS + 1))
     assert "first-pass limit" in review(str(repo), diff_file=str(big))
     assert "not a file" in review(str(repo), diff_file=str(tmp_path / "no"))
+    assert not captured
+
+
+def test_review_refuses_a_diff_file_that_is_not_a_diff(
+    captured, repo, tmp_path
+):
+    review = _tool(server.nim_first_pass_review)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("api_key = abc\nhost = example\n")
+    assert "does not look like a diff" in review(
+        str(repo), diff_file=str(notes)
+    )
+    secret = tmp_path / ".env"
+    secret.write_text("@@ -1 +1 @@\n+KEY=1\n")
+    assert "off limits" in review(str(repo), diff_file=str(secret))
     assert not captured
 
 
