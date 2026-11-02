@@ -768,6 +768,26 @@ def test_agent_file_map_lists_tracked_files_with_line_counts(tmp_path):
     assert server._agent_file_map(tmp_path) == ""  # not a git repo
 
 
+def test_agent_skips_engine_assets_unless_named(tmp_path):
+    root = tmp_path / "u"
+    (root / "Assets").mkdir(parents=True)
+    (root / "Assets" / "Mop.cs").write_text("class Mop { int TARGET; }\n")
+    (root / "Assets" / "Mop.cs.meta").write_text("guid: TARGET\n")
+    (root / "Assets" / "Mop.prefab").write_text("m_Name: TARGET\n")
+    (root / "Assets" / "Mop.FBX").write_text("TARGET\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    root = root.resolve()
+    walk = server._agent_grep(root, "TARGET", ".", None)
+    assert walk == "Assets/Mop.cs:1:class Mop { int TARGET; }"
+    named = server._agent_grep(root, "TARGET", "Assets/Mop.prefab", None)
+    assert named == "Assets/Mop.prefab:1:m_Name: TARGET"
+    file_map = server._agent_file_map(root)
+    assert "Mop.cs (1 lines)" in file_map
+    assert ".meta" not in file_map and ".prefab" not in file_map
+    listing = server._agent_run_tool(root, "list_dir", {"path": "Assets"})
+    assert "Mop.cs.meta" not in listing and "Mop.prefab" in listing
+
+
 def test_agent_system_prompt_offers_batching_and_the_file_map(stub, repo):
     stub.queue.append((200, {}, _completion("done")))
     _tool(server.nim_agent)("t", str(repo))
