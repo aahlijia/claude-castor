@@ -156,7 +156,11 @@ the containment check; `.env*`, key files and `.git` are off limits), reads at
 most 120 lines per call, caps each tool result, and never lets the model edit or
 run anything. Each step is one NIM request (default 12 steps, max 30;
 `CASTOR_NIM_AGENT_MODEL` overrides the model). `_agent_verify_citations` tags
-any `path:line` that does not exist as `[unverified]`.
+any `path:line` that does not exist as `[unverified]`. The last step, or a
+tool step that runs out of tokens, goes to `_agent_answer`: the transcript
+flattened into one user message (Nemotron keeps calling tools otherwise), with
+a 16k token cap (`CASTOR_NIM_AGENT_ANSWER_TOKENS`). Nemotron models get a
+`reasoning_budget` of 1024 per tool step and 6144 for the answer.
 
 Resilience lives in `_nim_request`: a client-side sliding-window limiter
 (`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and concurrency cap, retry
