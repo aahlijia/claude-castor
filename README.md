@@ -365,7 +365,7 @@ All optional, set as environment variables on the MCP server:
 | Variable | Default | Purpose |
 |---|---|---|
 | `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required) |
-| `CASTOR_NIM_MODEL` | `meta/llama-3.3-70b-instruct` | Model used when a call names none; see `nim_models` |
+| `CASTOR_NIM_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Model used when a call names none; see `nim_models` |
 | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
 | `CASTOR_NIM_RPM` | `40` | Client-side requests per minute |
 | `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |

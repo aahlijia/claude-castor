@@ -2672,7 +2672,7 @@ def gemini_status(cwd: str | None = None) -> str:
 NIM_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # Pinned fallback only; override with CASTOR_NIM_MODEL or the `model`
 # argument. nim_models lists what the endpoint currently serves.
-NIM_DEFAULT_MODEL = "meta/llama-3.3-70b-instruct"
+NIM_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 NIM_KEY_ENV_VARS = ("NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY")
 NIM_KEYS_URL = "https://build.nvidia.com/settings/api-keys"
 
@@ -2696,6 +2696,8 @@ NIM_BACKOFF_JITTER = 1.0
 NIM_MAX_WAIT = 30.0
 NIM_MAX_COOLDOWN = 600.0
 NIM_MAX_LISTED_MODELS = 200
+# Reasoning models spend tokens thinking first; 8 left them with no content.
+NIM_VERIFY_MAX_TOKENS = 512
 NIM_CACHE_BACKEND = "nvidia_nim"
 
 _NIM_CONTEXT_MARKERS = (
@@ -3347,7 +3349,7 @@ def nim_prompt(
             Requires cwd. Session calls are never cached. Sessions are
             shared with gemini_prompt, so the same name continues across
             backends.
-        model: NIM model id, e.g. "meta/llama-3.3-70b-instruct". Call
+        model: NIM model id, e.g. "nvidia/nemotron-3-ultra-550b-a55b". Call
             nim_models for what is available. Defaults to
             CASTOR_NIM_MODEL, then a built-in default.
         use_cache: If True (default), reuse a stored response for an
@@ -3627,7 +3629,11 @@ def nim_status(verify: bool = True) -> str:
     model = _nim_default_model()
     if verify:
         ok, text = _run_nim(
-            None, "Reply with exactly the word: OK", model, 0, 8
+            None,
+            "Reply with exactly the word: OK",
+            model,
+            0,
+            NIM_VERIFY_MAX_TOKENS,
         )
         if not ok:
             return f"NOT READY: {text}"
