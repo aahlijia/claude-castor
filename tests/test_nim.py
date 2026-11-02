@@ -800,6 +800,26 @@ def test_agent_loop_runs_tool_then_answers(stub, repo):
     assert "src/a.py:2:TARGET = 1" in tool_msg["content"]
 
 
+def test_citations_check_lists_and_extensionless_files(repo):
+    (repo / "Makefile").write_text("all:\n\techo hi\n")
+    answer = (
+        "- src/a.py:1, 3 fine\n"
+        "- src/a.py:2, 99 bad\n"
+        "- Makefile:2 fine\n"
+        "- Makefile:9 bad\n"
+        "- step:3 is prose, not a file"
+    )
+    out, verified, total = server._agent_verify_citations(answer, repo)
+    assert out.splitlines() == [
+        "- src/a.py:1, 3 fine",
+        "- src/a.py:2, 99 [unverified] bad",
+        "- Makefile:2 fine",
+        "- Makefile:9 [unverified] bad",
+        "- step:3 is prose, not a file",
+    ]
+    assert (verified, total) == (2, 4)
+
+
 def test_agent_step_cap_forces_an_answer_without_tools(stub, repo):
     stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
     stub.queue.append((200, {}, _completion("best effort")))
