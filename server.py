@@ -4566,6 +4566,9 @@ NIM_TRIAGE_STEPS = 8
 NIM_SCOUT_MAX_ITEMS = 15
 NIM_REVIEW_MAX_DIFF_CHARS = 120_000  # roughly 1,500 lines of diff
 NIM_REVIEW_MAX_FILE_BYTES = 2_000_000
+# A saved diff must have at least one unified-diff line, so a mistyped
+# diff_file can't send an arbitrary file to NVIDIA.
+_DIFF_LINE_RE = re.compile(r"^(diff --git |--- |\+\+\+ |@@ )", re.MULTILINE)
 
 NIM_SCOUT_PROMPT = """\
 Scout task. Locate the exact code, doc or config lines needed to do the work
@@ -4642,6 +4645,8 @@ def _review_diff_text(
     Precedence: a diff file, a committed range, then uncommitted changes.
     """
     if diff_file:
+        if _agent_denied(Path(diff_file).expanduser().resolve()):
+            return None, f"[Error: {diff_file!r} is off limits (secrets).]"
         diff, error = _read_text_file(diff_file, NIM_REVIEW_MAX_FILE_BYTES)
     else:
         diff, error = _git_diff(cwd, rev_range), None
@@ -4656,6 +4661,11 @@ def _review_diff_text(
             f"[Error: diff is {len(diff):,} chars, over the "
             f"{NIM_REVIEW_MAX_DIFF_CHARS:,}-char first-pass limit. Review "
             "it in parts or give it to Claude directly.]"
+        )
+    if diff_file and not _DIFF_LINE_RE.search(diff):
+        return None, (
+            f"[Error: {diff_file!r} does not look like a diff (no "
+            "'diff --git', '---', '+++' or '@@' line).]"
         )
     return diff, None
 
@@ -4709,7 +4719,8 @@ def nim_first_pass_review(
 
     Args:
         cwd: Absolute project root.
-        diff_file: Absolute path of a saved diff. Takes precedence.
+        diff_file: Absolute path of a saved diff. Takes precedence. It
+            must look like a unified diff; secret paths are refused.
         rev_range: A committed range such as "abc123..HEAD". Without a
             diff_file or range, uncommitted changes (git diff HEAD) are used.
         focus: Project rules to check against, in a few lines (for example
