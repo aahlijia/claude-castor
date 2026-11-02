@@ -4822,6 +4822,10 @@ def nim_first_pass_review(
     lines are used. Its findings are leads to verify, not verdicts. Diffs
     over about 1,500 lines are refused; review those in parts.
 
+    Expect a low hit rate: in a five-review pilot about 1 lead in 5 held
+    up and it missed every known real finding. Use it as an occasional
+    extra, never as a step a review or pipeline waits on.
+
     Args:
         cwd: Absolute project root.
         diff_file: Absolute path of a saved diff. Takes precedence. It
