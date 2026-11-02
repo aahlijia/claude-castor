@@ -997,10 +997,9 @@ def test_review_uses_range_then_working_tree(captured, repo, monkeypatch):
     assert seen == ["abc..HEAD", None]
 
 
-@pytest.mark.parametrize("bad", ["--output=/tmp/x", "a b", "$(x)", ""])
+@pytest.mark.parametrize("bad", ["--output=/tmp/x", "a b", "$(x)"])
 def test_git_diff_rejects_non_revisions(bad, repo):
-    if bad:
-        assert server._git_diff(str(repo), bad).startswith("[Error")
+    assert server._git_diff(str(repo), bad).startswith("[Error")
 
 
 def test_git_diff_passes_range_to_git(monkeypatch, repo):
@@ -1013,8 +1012,10 @@ def test_git_diff_passes_range_to_git(monkeypatch, repo):
     )
     assert server._git_diff(str(repo), "abc123..HEAD") == "d"
     assert server._git_diff(str(repo)) == "d"
+    assert server._git_diff(str(repo), "") == "d"  # empty means HEAD
     assert ran == [
         ["git", "diff", "abc123..HEAD"],
+        ["git", "diff", "HEAD"],
         ["git", "diff", "HEAD"],
     ]
 
