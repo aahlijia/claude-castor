@@ -56,3 +56,8 @@
   acting. Paths quoted from a log are tagged `[unverified]` (false positive).
 - **NIM probe scripts read keys from `~/.claude.json`** (`mcpServers.claude-castor.env`).
   Never print them; keys pasted into a chat stay in that transcript.
+- **Nemotron keeps calling tools while the history holds tool calls.** Omitting
+  `tools` and sending `tool_choice: "none"` both still returned a tool call and
+  no content (3/3 replays), so the agent's last step failed with "hit its step
+  cap". `_agent_answer_messages` now flattens the transcript into system + one
+  user message for the final request (6/6 replays answered).

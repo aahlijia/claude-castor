@@ -3858,7 +3858,9 @@ edit files or use the network.
   plainly.\
 """
 
-NIM_AGENT_FINAL_NUDGE = "Tool budget spent. Answer now from what you found."
+NIM_AGENT_FINAL_NUDGE = (
+    "No tools are available now. Answer from the evidence above."
+)
 NIM_AGENT_LAST_TOOL_NUDGE = (
     "One tool step left. After it you must answer, so make it count."
 )
@@ -4128,6 +4130,31 @@ def _agent_step_results(
     return messages
 
 
+def _agent_answer_messages(messages: list[dict]) -> list[dict]:
+    """Rebuild the transcript as system + one user message for the answer.
+
+    Nemotron keeps emitting tool calls while the history holds them, even
+    with no tools offered or tool_choice "none", so the final request
+    folds every call and result into plain text the model must answer from.
+    """
+    system, task = messages[0], messages[1]["content"]
+    parts: list[str] = []
+    for message in messages[2:]:
+        if message["role"] == "tool":
+            parts.append(message["content"])
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            parts.append(
+                f"> {function.get('name')}({function.get('arguments')})"
+            )
+    evidence = "\n\n".join(parts) or "(none)"
+    content = (
+        f"{task}\n\n[EVIDENCE: results of the tools you already ran]\n"
+        f"{evidence}\n[/EVIDENCE]\n\n{NIM_AGENT_FINAL_NUDGE}"
+    )
+    return [system, {"role": "user", "content": content}]
+
+
 def _nim_agent_loop(
     task: str, root: Path, model: str, max_steps: int, max_tokens: int
 ) -> tuple[bool, str, dict]:
@@ -4156,12 +4183,7 @@ def _nim_agent_loop(
             "stream": False,
         }
         if final:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": NIM_AGENT_FINAL_NUDGE,
-                }
-            )
+            payload["messages"] = _agent_answer_messages(messages)
         else:
             if step == max_steps - 1 and max_steps > 2:
                 messages.append(
