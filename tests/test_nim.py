@@ -191,8 +191,9 @@ def test_sliding_window_limiter():
 def test_admit_fails_fast_when_wait_too_long(monkeypatch):
     monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
     server._nim_reset_state()
-    server._nim_set_cooldown(30)
-    err = server._nim_admit()
+    server._nim_set_cooldown(30, KEY)
+    key, err = server._nim_admit([KEY])
+    assert key is None
     assert err and err.startswith("[NVIDIA NIM is rate-limited")
     server._nim_reset_state()
 
@@ -515,7 +516,7 @@ def test_status_ready(stub):
     assert KEY not in out
     assert "default_model: nvidia/nemotron-3-ultra-550b-a55b" in out
     assert "models_listed: 2" in out
-    assert "cooldown: none" in out
+    assert "key 1: ok" in out and "cooldown none" in out
 
 
 def test_status_not_configured(stub, monkeypatch):
@@ -560,3 +561,87 @@ def test_all_nim_tools_registered():
         "nim_models",
         "nim_status",
     } <= names
+
+
+# --- multiple keys --------------------------------------------------------
+
+KEY2 = "nvapi-test-second-key"
+
+
+def _auth(post):
+    return post[2].get("Authorization")
+
+
+@pytest.fixture
+def two_keys(stub, monkeypatch):
+    monkeypatch.setenv("NVIDIA_API_KEYS", f"{KEY}, {KEY2}")
+    server._nim_reset_state()
+    return stub
+
+
+def test_keys_parsed_deduplicated_in_order(monkeypatch):
+    monkeypatch.setenv("NVIDIA_API_KEYS", "a,b  c\nb")
+    monkeypatch.setenv("NVIDIA_API_KEY", "c")
+    monkeypatch.delenv("NVIDIA_NIM_API_KEY", raising=False)
+    assert server._nim_api_keys() == ["a", "b", "c"]
+    assert server._nim_api_key() == "a"
+
+
+def test_requests_rotate_across_keys(two_keys):
+    for i in range(4):
+        _tool(server.nim_prompt)(f"q{i}", use_cache=False)
+    used = [_auth(p) for p in two_keys.posts()]
+    assert used == [f"Bearer {k}" for k in (KEY, KEY2, KEY, KEY2)]
+
+
+def test_429_fails_over_to_other_key_immediately(two_keys):
+    two_keys.queue.append((429, {"Retry-After": "120"}, {"detail": "slow"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out == "stub answer"
+    first, second = two_keys.posts()
+    assert _auth(first) != _auth(second)
+    # The limited key stays in cooldown, so later calls use the other one.
+    _tool(server.nim_prompt)("q2", use_cache=False)
+    _tool(server.nim_prompt)("q3", use_cache=False)
+    assert {_auth(p) for p in two_keys.posts()[1:]} == {_auth(second)}
+
+
+def test_all_keys_limited_fails_fast(two_keys, monkeypatch):
+    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
+    for _ in range(10):
+        two_keys.queue.append((429, {"Retry-After": "120"}, {"detail": "no"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert "rate-limited" in out and "across 2 keys" in out
+
+
+def test_rejected_key_is_retired_when_another_remains(two_keys):
+    two_keys.queue.append((401, {}, {"detail": "bad key"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out == "stub answer"
+    for i in range(3):
+        _tool(server.nim_prompt)(f"more{i}", use_cache=False)
+    later = {_auth(p) for p in two_keys.posts()[1:]}
+    assert later == {f"Bearer {KEY2}"}
+    assert server._nim_key_state(KEY).dead
+
+
+def test_last_key_is_never_retired(stub):
+    stub.queue.append((401, {}, {"detail": "bad key"}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert "API key rejected" in out
+    assert not server._nim_key_state(KEY).dead
+
+
+def test_status_reports_each_key_without_leaking(two_keys):
+    out = _tool(server.nim_status)()
+    assert out.startswith("READY")
+    assert KEY not in out and KEY2 not in out
+    assert "keys: 2" in out
+    assert "key 1: OK" in out and "key 2: OK" in out
+
+
+def test_status_ready_if_one_key_works(two_keys):
+    two_keys.queue.append((401, {}, {"detail": "bad key"}))
+    out = _tool(server.nim_status)()
+    assert out.startswith("READY")
+    assert "key 1: FAILED" in out and "key 2: OK" in out

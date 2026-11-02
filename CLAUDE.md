@@ -130,8 +130,10 @@ A non-agentic backend: an OpenAI-compatible chat endpoint
 (`https://integrate.api.nvidia.com/v1`) with no filesystem access, so Castor
 inlines whatever the model needs. Needs `NVIDIA_API_KEY` in the MCP server's
 environment (`claude mcp add -s user claude-castor -e NVIDIA_API_KEY=... -- ...`);
-the key is env-only, never a tool arg, never logged. `_dispatch_nim` mirrors
-`_dispatch` (same `_assemble_prompt`, response cache, session store) and
+the key is env-only, never a tool arg, never logged. `NVIDIA_API_KEYS`
+(comma-separated) adds more keys: requests rotate across them, each key has its
+own limiter and 429 cooldown, and a 401/402 retires a key while another
+remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response cache, session store) and
 `_run_nim` returns `(ok, text)` rather than sniffing for a leading `[`.
 
 | Tool | Signature | Purpose |
@@ -142,12 +144,12 @@ the key is env-only, never a tool arg, never logged. `_dispatch_nim` mirrors
 | `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
 | `nim_models` | `(query=None)` | List served model ids |
-| `nim_status` | `(verify=True)` | Key/model/limits/cooldown; `verify` spends one request |
+| `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
 
 Resilience lives in `_nim_request`: a client-side sliding-window limiter
-(`CASTOR_NIM_RPM`, default 40/60s) and concurrency cap, retry with exponential
-backoff + jitter on 429/5xx/network (one timeout retry), `Retry-After` honored,
-a shared cooldown after a 429, and a fail-fast "try again in Ns" error once the
+(`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and concurrency cap, retry
+with exponential backoff + jitter on 429/5xx/network (one timeout retry),
+`Retry-After` honored, a per-key cooldown after a 429 (other keys keep going), and a fail-fast "try again in Ns" error once the
 wait would exceed `NIM_MAX_WAIT` (30s). `_classify_nim_status` decides what is
 retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
 http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,

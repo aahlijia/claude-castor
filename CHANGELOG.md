@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multiple NIM API keys.** `NVIDIA_API_KEYS` takes a comma-separated list.
+  Requests rotate across keys, each key has its own rate limiter and 429
+  cooldown, and a rejected key (401/402) is skipped while another remains.
+  `nim_status` verifies and reports each key without printing it.
 - **NVIDIA NIM backend (optional).** Offload to NVIDIA's hosted models
   (free developer tier) alongside agy, with eight new tools: `nim_prompt`,
   `nim_start`, `nim_review`, `nim_security_review`, `nim_explain_error`,

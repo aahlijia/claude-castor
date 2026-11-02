@@ -2578,10 +2578,12 @@ def _format_last_index(state: dict) -> str:
 
 def _nim_status_line() -> str:
     """One-line NVIDIA NIM summary for gemini_status (no network call)."""
-    if _nim_api_key() is None:
+    count = len(_nim_api_keys())
+    if not count:
         return "\nnvidia_nim: not configured (optional; see nim_status)"
+    noun = "key set" if count == 1 else f"{count} keys set"
     return (
-        f"\nnvidia_nim: key set, default model {_nim_default_model()} "
+        f"\nnvidia_nim: {noun}, default model {_nim_default_model()} "
         "(run nim_status to verify)"
     )
 
@@ -2674,6 +2676,10 @@ NIM_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # argument. nim_models lists what the endpoint currently serves.
 NIM_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 NIM_KEY_ENV_VARS = ("NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY")
+# Comma- or whitespace-separated list. Each key has its own rate limit and
+# cooldown, and requests rotate across them.
+NIM_KEYS_ENV_VAR = "NVIDIA_API_KEYS"
+NIM_KEY_RETIRING_KINDS = ("auth", "billing")
 NIM_KEYS_URL = "https://build.nvidia.com/settings/api-keys"
 
 # Tunables. Free-tier limits are set by NVIDIA and change, so each default
@@ -2733,13 +2739,20 @@ def _nim_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
+def _nim_api_keys() -> list[str]:
+    """Return every configured NVIDIA API key, de-duplicated, in order."""
+    keys: list[str] = []
+    for var in (NIM_KEYS_ENV_VAR, *NIM_KEY_ENV_VARS):
+        for part in re.split(r"[,\s]+", os.environ.get(var, "")):
+            if part and part not in keys:
+                keys.append(part)
+    return keys
+
+
 def _nim_api_key() -> str | None:
-    """Return the NVIDIA API key from the environment, or None."""
-    for var in NIM_KEY_ENV_VARS:
-        value = os.environ.get(var, "").strip()
-        if value:
-            return value
-    return None
+    """Return the first configured NVIDIA API key, or None."""
+    keys = _nim_api_keys()
+    return keys[0] if keys else None
 
 
 def _nim_base_url() -> str:
@@ -2772,7 +2785,8 @@ def _nim_url_error(url: str) -> str | None:
 def _nim_missing_key_error() -> str:
     """Bracketed error telling the user how to configure the key."""
     return (
-        "[NVIDIA NIM is not configured: set NVIDIA_API_KEY in the MCP "
+        "[NVIDIA NIM is not configured: set NVIDIA_API_KEY (or several, "
+        f"comma-separated, in {NIM_KEYS_ENV_VAR}) in the MCP "
         "server's environment, e.g. re-register with `claude mcp add -s "
         "user -e NVIDIA_API_KEY=nvapi-... claude-castor ...`. Create a key "
         f"at {NIM_KEYS_URL}. Run `nim_status` to verify.]"
@@ -2811,78 +2825,163 @@ class _SlidingWindowLimiter:
             return self._times[0] + self._window - now
 
 
+@dataclass
+class _NimKeyState:
+    """Rate-limit and health state for one API key.
+
+    Attributes:
+        limiter: Client-side sliding window for this key.
+        cooldown_until: Monotonic deadline set by a 429 on this key.
+        dead: True once the key was rejected (401/402) while another
+            key was still usable; it is skipped for the session.
+        requests: Requests sent with this key this session.
+        rate_limited: 429s this key has returned this session.
+    """
+
+    limiter: _SlidingWindowLimiter
+    cooldown_until: float = 0.0
+    dead: bool = False
+    requests: int = 0
+    rate_limited: int = 0
+
+
 _nim_lock = threading.Lock()
-_nim_limiter: _SlidingWindowLimiter | None = None
 _nim_slots: threading.BoundedSemaphore | None = None
-_nim_cooldown_until = 0.0  # monotonic deadline set by a 429
+_nim_key_states: dict[str | None, _NimKeyState] = {}
+_nim_rotation = 0  # advances per admitted request so keys alternate
 _nim_stats = {"requests": 0, "ok": 0, "rate_limited": 0, "errors": 0}
 
 
 def _nim_reset_state() -> None:
-    """Drop limiter, cooldown and counters (used by tests)."""
-    global _nim_limiter, _nim_slots, _nim_cooldown_until
+    """Drop limiters, cooldowns and counters (used by tests)."""
+    global _nim_slots, _nim_rotation
     with _nim_lock:
-        _nim_limiter = None
         _nim_slots = None
-        _nim_cooldown_until = 0.0
+        _nim_key_states.clear()
+        _nim_rotation = 0
         for name in _nim_stats:
             _nim_stats[name] = 0
 
 
-def _nim_gate() -> tuple[_SlidingWindowLimiter, threading.BoundedSemaphore]:
-    """Return the shared limiter and concurrency semaphore (lazy init)."""
-    global _nim_limiter, _nim_slots
+def _nim_gate() -> threading.BoundedSemaphore:
+    """Return the shared concurrency semaphore (lazy init)."""
+    global _nim_slots
     with _nim_lock:
-        if _nim_limiter is None or _nim_slots is None:
-            rpm = int(_nim_env("CASTOR_NIM_RPM", NIM_DEFAULT_RPM))
+        if _nim_slots is None:
             slots = int(
                 _nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY)
             )
-            _nim_limiter = _SlidingWindowLimiter(rpm, NIM_RATE_WINDOW)
             _nim_slots = threading.BoundedSemaphore(slots)
-        return _nim_limiter, _nim_slots
+        return _nim_slots
 
 
-def _nim_count(stat: str) -> None:
-    """Increment a session counter."""
+def _nim_key_state(key: str | None) -> _NimKeyState:
+    """Return the state for `key`, creating it on first use."""
+    with _nim_lock:
+        state = _nim_key_states.get(key)
+        if state is None:
+            rpm = int(_nim_env("CASTOR_NIM_RPM", NIM_DEFAULT_RPM))
+            state = _NimKeyState(_SlidingWindowLimiter(rpm, NIM_RATE_WINDOW))
+            _nim_key_states[key] = state
+        return state
+
+
+def _nim_count(stat: str, key: str | None = None) -> None:
+    """Increment a session counter (and the key's own, when given)."""
+    state = _nim_key_state(key)
     with _nim_lock:
         _nim_stats[stat] += 1
+        if stat == "requests":
+            state.requests += 1
+        elif stat == "rate_limited":
+            state.rate_limited += 1
 
 
-def _nim_set_cooldown(seconds: float) -> None:
-    """Hold every NIM call back for `seconds` (after a 429)."""
-    global _nim_cooldown_until
+def _nim_set_cooldown(seconds: float, key: str | None) -> None:
+    """Hold `key` back for `seconds` (after a 429); other keys continue."""
     until = time.monotonic() + min(seconds, NIM_MAX_COOLDOWN)
+    state = _nim_key_state(key)
     with _nim_lock:
-        _nim_cooldown_until = max(_nim_cooldown_until, until)
+        state.cooldown_until = max(state.cooldown_until, until)
 
 
-def _nim_cooldown_remaining() -> float:
-    """Seconds left on the rate-limit cooldown (0.0 when clear)."""
+def _nim_cooldown_remaining(key: str | None) -> float:
+    """Seconds left on `key`'s rate-limit cooldown (0.0 when clear)."""
+    state = _nim_key_state(key)
     with _nim_lock:
-        return max(0.0, _nim_cooldown_until - time.monotonic())
+        return max(0.0, state.cooldown_until - time.monotonic())
 
 
-def _nim_admit() -> str | None:
-    """Wait for the cooldown and a rate-limit slot, within NIM_MAX_WAIT.
+def _nim_pick_key(keys: list[str | None]) -> tuple[str | None, float]:
+    """Reserve a slot on the next usable key, rotating across `keys`.
 
-    Returns None once admitted, or a bracketed error when the wait would
-    exceed NIM_MAX_WAIT — failing fast beats blocking Claude for minutes.
+    Rejected keys are skipped unless every key was rejected. Returns
+    (key, 0.0) when admitted, else (None, seconds until a key frees up).
     """
-    limiter, _ = _nim_gate()
+    global _nim_rotation
+    live = [k for k in keys if not _nim_key_state(k).dead] or keys
+    with _nim_lock:
+        offset = _nim_rotation % len(live)
+    shortest: float | None = None
+    for key in live[offset:] + live[:offset]:
+        state = _nim_key_state(key)
+        wait = _nim_cooldown_remaining(key) or state.limiter.reserve()
+        if wait <= 0:
+            with _nim_lock:
+                _nim_rotation += 1
+            return key, 0.0
+        shortest = wait if shortest is None else min(shortest, wait)
+    return None, shortest or 0.001
+
+
+def _nim_admit(
+    keys: list[str | None] | None = None,
+) -> tuple[str | None, str | None]:
+    """Wait for a usable key and rate-limit slot, within NIM_MAX_WAIT.
+
+    Returns (key, None) once admitted, or (None, bracketed error) when the
+    wait would exceed NIM_MAX_WAIT: failing fast beats blocking Claude for
+    minutes.
+    """
+    keys = keys or _nim_api_keys() or [None]
     deadline = time.monotonic() + NIM_MAX_WAIT
     while True:
-        wait = _nim_cooldown_remaining() or limiter.reserve()
+        key, wait = _nim_pick_key(keys)
         if wait <= 0:
-            return None
+            return key, None
         if time.monotonic() + wait > deadline:
-            return (
-                "[NVIDIA NIM is rate-limited — try again in "
+            across = f" across {len(keys)} keys" if len(keys) > 1 else ""
+            return None, (
+                "[NVIDIA NIM is rate-limited: try again in "
                 f"~{int(wait) + 1}s. Client limit is "
                 f"{int(_nim_env('CASTOR_NIM_RPM', NIM_DEFAULT_RPM))} "
-                "requests/min (CASTOR_NIM_RPM).]"
+                f"requests/min per key{across} (CASTOR_NIM_RPM).]"
             )
         time.sleep(min(wait, 1.0))
+
+
+def _nim_retire_key(
+    failure: "_NimFailure", key: str | None, keys: list[str | None]
+) -> bool:
+    """Skip a rejected key for the session if another one is still usable.
+
+    Only an auth (401) or billing (402) failure retires a key, and never
+    the last usable one, so a single-key setup keeps its normal error.
+    """
+    if key is None or failure.kind not in NIM_KEY_RETIRING_KINDS:
+        return False
+    others = [k for k in keys if k != key and not _nim_key_state(k).dead]
+    if not others:
+        return False
+    with _nim_lock:
+        _nim_key_states[key].dead = True
+    logger.warning(
+        "nim: key %d retired (%s); %d key(s) left",
+        keys.index(key) + 1,
+        failure.kind,
+        len(others),
+    )
+    return True
 
 
 @dataclass
@@ -3045,27 +3144,35 @@ def _nim_send_once(
     )
 
 
-def _nim_pause_before_retry(failure: _NimFailure, attempt: int) -> None:
+def _nim_pause_before_retry(
+    failure: _NimFailure, attempt: int, key: str | None
+) -> None:
     """Back off before the next attempt.
 
-    A 429 sets the shared cooldown (so concurrent background jobs back off
-    too) and lets _nim_admit do the waiting; anything else just sleeps,
-    capped at NIM_BACKOFF_MAX.
+    A 429 sets that key's cooldown (so concurrent background jobs back off
+    too) and lets _nim_admit do the waiting, or move to another key;
+    anything else just sleeps, capped at NIM_BACKOFF_MAX.
     """
     delay = _nim_backoff(attempt, failure.retry_after)
     if failure.kind == "rate_limit":
-        _nim_set_cooldown(delay)
+        _nim_set_cooldown(delay, key)
     else:
         time.sleep(min(delay, NIM_BACKOFF_MAX))
 
 
 def _nim_request(
-    method: str, path: str, key: str | None, payload: dict | None = None
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    keys: list[str] | None = None,
 ) -> tuple[Any, str | None]:
     """Admit, send and retry one NIM call.
 
+    Requests rotate across the configured keys (`keys` pins the choice).
     Retryable failures (429, 5xx, network, a first timeout) back off and
-    retry up to NIM_MAX_ATTEMPTS; everything else fails immediately.
+    retry up to NIM_MAX_ATTEMPTS, a 429 moving on to another key when one
+    is free; a rejected key (401/402) is retired if another remains.
+    Everything else fails immediately.
 
     Returns:
         (parsed JSON, None) on success, or (None, bracketed error).
@@ -3074,19 +3181,20 @@ def _nim_request(
     url_error = _nim_url_error(base)
     if url_error:
         return None, url_error
-    headers = {"Accept": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    _, slots = _nim_gate()
+    pool: list[str | None] = list(keys or _nim_api_keys() or [None])
+    slots = _nim_gate()
     timeouts = 0
     for attempt in range(1, NIM_MAX_ATTEMPTS + 1):
-        wait_error = _nim_admit()
+        key, wait_error = _nim_admit(pool)
         if wait_error:
             return None, wait_error
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
         if not slots.acquire(timeout=NIM_MAX_WAIT):
             return None, "[NVIDIA NIM is busy — too many requests in flight.]"
         try:
-            _nim_count("requests")
+            _nim_count("requests", key)
             data, failure = _nim_send_once(
                 method, f"{base}{path}", headers, payload, key
             )
@@ -3096,8 +3204,10 @@ def _nim_request(
             _nim_count("ok")
             return data, None
         _nim_count(
-            "rate_limited" if failure.kind == "rate_limit" else "errors"
+            "rate_limited" if failure.kind == "rate_limit" else "errors", key
         )
+        if _nim_retire_key(failure, key, pool):
+            continue
         timeouts += failure.kind == "timeout"
         logger.warning(
             "nim: attempt %d/%d failed kind=%s hint=%s",
@@ -3112,7 +3222,7 @@ def _nim_request(
             or timeouts >= NIM_MAX_TIMEOUTS
         ):
             return None, _format_nim_failure(failure)
-        _nim_pause_before_retry(failure, attempt)
+        _nim_pause_before_retry(failure, attempt, key)
     return None, "[NVIDIA NIM request failed.]"  # pragma: no cover
 
 
@@ -3157,8 +3267,11 @@ def _run_nim(
     model: str,
     temperature: float,
     max_tokens: int,
+    keys: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Run one chat completion against NVIDIA NIM.
+
+    `keys` pins the call to specific API keys (default: rotate across all).
 
     Returns:
         (ok, text). ok is False when text is a bracketed error. Tracking
@@ -3166,8 +3279,7 @@ def _run_nim(
         a legitimate answer that starts with a bracket from being treated
         as a failure.
     """
-    key = _nim_api_key()
-    if key is None:
+    if not (keys or _nim_api_keys()):
         return False, _nim_missing_key_error()
     if not 0 <= temperature <= 2:
         return False, "[Error: temperature must be between 0 and 2.]"
@@ -3198,7 +3310,6 @@ def _run_nim(
     data, error = _nim_request(
         "POST",
         "/chat/completions",
-        key,
         {
             "model": model,
             "messages": messages,
@@ -3206,6 +3317,7 @@ def _run_nim(
             "max_tokens": max_tokens,
             "stream": False,
         },
+        keys,
     )
     if error:
         return False, error
@@ -3576,7 +3688,7 @@ def nim_models(query: str | None = None) -> str:
     Returns:
         One model id per line with a count header, or a bracketed error.
     """
-    data, error = _nim_request("GET", "/models", _nim_api_key())
+    data, error = _nim_request("GET", "/models")
     if error:
         return error
     entries = data.get("data") if isinstance(data, dict) else None
@@ -3617,8 +3729,8 @@ def nim_status(verify: bool = True) -> str:
     Returns:
         A status report starting with READY, NOT CONFIGURED, or NOT READY.
     """
-    key = _nim_api_key()
-    if key is None:
+    keys = _nim_api_keys()
+    if not keys:
         return (
             f"NOT CONFIGURED: no NVIDIA API key.\n{_nim_missing_key_error()}"
         )
@@ -3627,20 +3739,29 @@ def nim_status(verify: bool = True) -> str:
     if url_error:
         return f"NOT READY: {url_error}"
     model = _nim_default_model()
+    key_lines: list[str] = []
     if verify:
-        ok, text = _run_nim(
-            None,
-            "Reply with exactly the word: OK",
-            model,
-            0,
-            NIM_VERIFY_MAX_TOKENS,
-        )
-        if not ok:
-            return f"NOT READY: {text}"
+        results = [
+            _run_nim(
+                None,
+                "Reply with exactly the word: OK",
+                model,
+                0,
+                NIM_VERIFY_MAX_TOKENS,
+                [key],
+            )
+            for key in keys
+        ]
+        if not any(ok for ok, _ in results):
+            return f"NOT READY: {results[0][1]}"
+        key_lines = [
+            f"key {i}: {'OK' if ok else 'FAILED ' + text.splitlines()[0]}"
+            for i, (ok, text) in enumerate(results, 1)
+        ]
     lines = [f"READY — NVIDIA NIM{'' if verify else ' (key not verified)'}"]
     lines.append(f"base_url: {base}")
     lines.append(f"default_model: {model}")
-    listing, list_error = _nim_request("GET", "/models", key)
+    listing, list_error = _nim_request("GET", "/models")
     if list_error is None and isinstance(listing, dict):
         ids = {
             e.get("id")
@@ -3655,17 +3776,26 @@ def nim_status(verify: bool = True) -> str:
         _nim_env("CASTOR_NIM_MAX_INPUT_CHARS", NIM_DEFAULT_MAX_INPUT_CHARS)
     )
     lines.append(
-        f"limits: {rpm} req/{int(NIM_RATE_WINDOW)}s, concurrency {slots}, "
-        f"max_input {max_in:,} chars"
+        f"limits: {rpm} req/{int(NIM_RATE_WINDOW)}s per key, "
+        f"concurrency {slots}, max_input {max_in:,} chars"
     )
+    lines.append(f"keys: {len(keys)} (requests rotate across them)")
+    lines.extend(key_lines)
     with _nim_lock:
         stats = dict(_nim_stats)
     lines.append(
         "this_session: "
         + " ".join(f"{name}={count}" for name, count in stats.items())
     )
-    cooldown = _nim_cooldown_remaining()
-    lines.append(f"cooldown: {f'{cooldown:.0f}s' if cooldown else 'none'}")
+    for i, key in enumerate(keys, 1):
+        state = _nim_key_state(key)
+        cooldown = _nim_cooldown_remaining(key)
+        health = "rejected" if state.dead else "ok"
+        lines.append(
+            f"key {i}: {health}, requests={state.requests} "
+            f"rate_limited={state.rate_limited}, "
+            f"cooldown {f'{cooldown:.0f}s' if cooldown else 'none'}"
+        )
     return "\n".join(lines)
 
 
