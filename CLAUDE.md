@@ -145,6 +145,9 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
 | `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir run by Castor; cited `path:line` are verified |
 | `nim_agent_start` | same | Background `nim_agent`; poll with `gemini_poll` |
+| `nim_scout` | `(question, cwd, model=None, max_steps=None)` | Role: the exact `path:start-end` ranges a task needs |
+| `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
+| `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
 | `nim_models` | `(query=None)` | List served model ids |
 | `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
 

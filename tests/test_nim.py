@@ -830,6 +830,116 @@ def test_agent_start_and_poll(stub, repo):
     assert "bg answer" in out
 
 
+# --- agent roles ----------------------------------------------------------
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """Replace the agent dispatcher and record how a role calls it."""
+    calls = []
+
+    def fake(task, cwd, model=None, max_steps=None, max_tokens=None):
+        calls.append(
+            {"task": task, "cwd": cwd, "model": model, "steps": max_steps}
+        )
+        return "ok"
+
+    monkeypatch.setattr(server, "_dispatch_nim_agent", fake)
+    return calls
+
+
+def test_scout_builds_task_and_default_budget(captured, repo):
+    assert _tool(server.nim_scout)("where is TARGET set?", str(repo)) == "ok"
+    call = captured[0]
+    assert "where is TARGET set?" in call["task"]
+    assert "at most 15 bullets" in call["task"]
+    assert call["steps"] == server.NIM_SCOUT_STEPS
+    _tool(server.nim_scout)("q", str(repo), max_steps=3, model="m")
+    assert captured[1]["steps"] == 3 and captured[1]["model"] == "m"
+
+
+def test_review_reads_diff_file_server_side(captured, repo, tmp_path):
+    diff = tmp_path / "t.diff"
+    diff.write_text("+TARGET = 2\n")
+    out = _tool(server.nim_first_pass_review)(
+        str(repo), diff_file=str(diff), focus="host owns the timer"
+    )
+    assert out == "ok"
+    task = captured[0]["task"]
+    assert "[DIFF]\n+TARGET = 2\n\n[/DIFF]" in task
+    assert "host owns the timer" in task
+    assert captured[0]["steps"] == server.NIM_REVIEW_STEPS
+
+
+def test_review_uses_range_then_working_tree(captured, repo, monkeypatch):
+    seen = []
+
+    def fake_git(cwd, rev_range=None):
+        seen.append(rev_range)
+        return "+x\n"
+
+    monkeypatch.setattr(server, "_git_diff", fake_git)
+    _tool(server.nim_first_pass_review)(str(repo), rev_range="abc..HEAD")
+    _tool(server.nim_first_pass_review)(str(repo))
+    assert seen == ["abc..HEAD", None]
+
+
+@pytest.mark.parametrize("bad", ["--output=/tmp/x", "a b", "$(x)", ""])
+def test_git_diff_rejects_non_revisions(bad, repo):
+    if bad:
+        assert server._git_diff(str(repo), bad).startswith("[Error")
+
+
+def test_git_diff_passes_range_to_git(monkeypatch, repo):
+    class Done:
+        returncode, stdout, stderr = 0, "d", ""
+
+    ran = []
+    monkeypatch.setattr(
+        server.subprocess, "run", lambda cmd, **kw: ran.append(cmd) or Done()
+    )
+    assert server._git_diff(str(repo), "abc123..HEAD") == "d"
+    assert server._git_diff(str(repo)) == "d"
+    assert ran == [
+        ["git", "diff", "abc123..HEAD"],
+        ["git", "diff", "HEAD"],
+    ]
+
+
+def test_review_refuses_empty_oversize_and_missing(captured, repo, tmp_path):
+    review = _tool(server.nim_first_pass_review)
+    empty = tmp_path / "e.diff"
+    empty.write_text("  \n")
+    assert "empty" in review(str(repo), diff_file=str(empty))
+    big = tmp_path / "b.diff"
+    big.write_text("x" * (server.NIM_REVIEW_MAX_DIFF_CHARS + 1))
+    assert "first-pass limit" in review(str(repo), diff_file=str(big))
+    assert "not a file" in review(str(repo), diff_file=str(tmp_path / "no"))
+    assert not captured
+
+
+def test_triage_requires_log_inside_cwd(captured, repo, tmp_path):
+    (repo / "run.log").write_text("FAIL x\n")
+    triage = _tool(server.nim_triage_log)
+    assert triage(str(repo), str(repo / "run.log"), question="q?") == "ok"
+    task = captured[0]["task"]
+    assert "`run.log`" in task and "Also determine: q?" in task
+    assert captured[0]["steps"] == server.NIM_TRIAGE_STEPS
+    assert "inside cwd" in triage(str(repo), str(tmp_path / "outside.txt"))
+    assert "inside cwd" in triage(str(repo), ".env")
+    assert "inside cwd" in triage(str(repo), "missing.log")
+    assert "not a directory" in triage(str(tmp_path / "zz"), "run.log")
+    assert len(captured) == 1
+
+
+def test_role_end_to_end_through_the_loop(stub, repo):
+    stub.queue.append((200, {}, _tool_call("grep", {"pattern": "TARGET"})))
+    stub.queue.append((200, {}, _completion("- src/a.py:1-3 - the setting")))
+    out = _tool(server.nim_scout)("where is TARGET?", str(repo))
+    assert "src/a.py:1-3 - the setting" in out
+    assert "citations verified 1/1" in out
+
+
 def test_agent_tells_the_model_its_budget_and_warns_before_the_last_step(
     stub, repo
 ):

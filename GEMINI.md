@@ -307,6 +307,24 @@ the prompt). So pick the backend by the shape of the task:
 | agy is rate-limited or unavailable | `nim_prompt` with the content inlined |
 | Compare two models on one question | `gemini_start` + `nim_start`, then `gemini_poll` both |
 
+**Agent mode (`nim_agent`) changes this.** `nim_agent`, `nim_agent_start` and
+the role tools below give NIM read-only `grep`, `read_range` and `list_dir`,
+run by Castor and confined to `cwd`, so it can explore on its own. Prefer them
+over reading files yourself when the answer is a short list and the reading is
+bulk:
+
+| Task | Use |
+|---|---|
+| Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
+| First-pass review of a diff, with surrounding code | `nim_first_pass_review` (`/castor:first-pass`); pass `rev_range` or `diff_file`, never paste the diff |
+| Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+| Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
+
+Keep the judgment calls (rulings, design, the final review) for yourself. Each
+agent step is one NIM request, so prefer a handful of focused tasks to one huge
+one, and use `nim_agent_start` to fan out. Every `path:line` is checked; one
+tagged `[unverified]` is a hallucination, so discard it.
+
 Rules of thumb:
 
 - **Privacy first.** Inlined content goes to a third party (NVIDIA). Don't send
