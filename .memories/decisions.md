@@ -84,3 +84,21 @@
   Plan: patch-file output only, Editor-free tasks only, after the review pilot.
 - **Rejected:** replacing the agy first-pass review with `nim_first_pass_review`
   before measuring its hit rate.
+
+### 2026-11-02: Agent reasoning budgets are 1024 per tool step, 6144 for the answer
+- **Why:** Nemotron 3 Ultra's reasoning is unbounded: tool steps sometimes ran
+  4,000 tokens (80 s) and one answer outran the 180 s timeout. Tool steps only
+  pick the next lookup. On the same review request, a 2,048 or 0 budget made the
+  answer claim a false bug that the unbounded run avoided, so the answer keeps
+  6,144. Sent as `reasoning_budget`, only to `nvidia/nemotron*` models.
+- **Rejected:** thinking off everywhere (11 s vs 79 s, but worse reviews);
+  raising timeouts instead (slower, still unbounded).
+
+### 2026-11-02: No self-verification pass for nim_first_pass_review
+- **Why:** asked to verify a review's findings against the code, Nemotron
+  refuted 1 of 5 known-false findings and "confirmed" a deadlock that isn't one
+  (a lock taken twice in sequence). Across 3 reviews after the prompt fixes,
+  roughly half the findings were false and severity ran high. The review stays
+  a lead generator that Claude must verify.
+- **Rejected:** more prompt rules (the concrete-input format and severity rules
+  were only partly followed).

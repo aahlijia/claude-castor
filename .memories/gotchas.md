@@ -61,3 +61,11 @@
   no content (3/3 replays), so the agent's last step failed with "hit its step
   cap". `_agent_answer_messages` now flattens the transcript into system + one
   user message for the final request (6/6 replays answered).
+- **Nemotron reasoning has no default bound.** A step can think for 4k+ tokens
+  and return nothing (`finish_reason=length`) or outrun the 180 s timeout. NIM
+  honors `reasoning_budget` (and `nvext.max_thinking_tokens`) exactly;
+  `reasoning_effort` does nothing; `chat_template_kwargs.enable_thinking=False`
+  turns it off.
+- **Nemotron review findings repeat the same false beliefs**: that braces in a
+  value passed to `str.format` raise KeyError, and that taking a lock twice in
+  sequence deadlocks. Expect them and discard them.
