@@ -68,4 +68,9 @@
   turns it off.
 - **Nemotron review findings repeat the same false beliefs**: that braces in a
   value passed to `str.format` raise KeyError, and that taking a lock twice in
-  sequence deadlocks. Expect them and discard them.
+  sequence deadlocks, and that a `..HEAD` rev range is rejected. Expect them
+  and discard them.
+- **The NIM test fixture blocks subprocesses.** `no_agy` in `tests/test_nim.py`
+  stubs `subprocess.run` so agy never runs; only `["git", ...]` passes through
+  to the real one (the agent's file map needs `git ls-files`). A new helper
+  that shells out to anything else fails in tests until the fixture allows it.
