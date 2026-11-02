@@ -5,6 +5,68 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Background role tools:** `nim_scout_start`, `nim_first_pass_review_start`
+  and `nim_triage_log_start` queue a role on the job pool (collect with
+  `gemini_poll`). The diff or log is checked when the job starts, so bad input
+  fails at once.
+- **Agent roles on `nim_agent`:** `nim_scout` (the exact lines a task needs),
+  `nim_first_pass_review` (a diff read server-side from a file, a committed
+  range or the working tree, refused over about 1,500 lines) and `nim_triage_log`
+  (a log boiled down to its failures), plus `/castor:scout`, `/castor:first-pass`
+  and `/castor:triage`. `_git_diff` takes an optional, validated revision range.
+- **`nim_agent` / `nim_agent_start`: a read-only agent loop on NIM.** The model
+  gets `grep`, `read_range` and `list_dir`, run by Castor and confined to `cwd`
+  (symlinks resolved first; secrets and `.git` off limits), and investigates over
+  several requests. Every `path:line` in the answer is checked against the files
+  and tagged `[unverified]` when it does not exist. `CASTOR_NIM_AGENT_MODEL`
+  sets its model.
+- **Multiple NIM API keys.** `NVIDIA_API_KEYS` takes a comma-separated list.
+  Requests rotate across keys, each key has its own rate limiter and 429
+  cooldown, and a rejected key (401/402) is skipped while another remains.
+  `nim_status` verifies and reports each key without printing it.
+- **NVIDIA NIM backend (optional).** Offload to NVIDIA's hosted models
+  (free developer tier) alongside agy, with eight new tools: `nim_prompt`,
+  `nim_start`, `nim_review`, `nim_security_review`, `nim_explain_error`,
+  `nim_summarize`, `nim_models`, `nim_status`, plus `/castor:nim-status`.
+  NIM is a plain chat endpoint with no filesystem access, so Castor inlines
+  the content it needs; for open-ended exploration agy remains the right
+  tool. Configured by environment only: `NVIDIA_API_KEY` (never a tool
+  argument, never logged) plus optional `CASTOR_NIM_MODEL`,
+  `CASTOR_NIM_BASE_URL`, `CASTOR_NIM_RPM`, `CASTOR_NIM_CONCURRENCY`,
+  `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS` and
+  `CASTOR_NIM_TIMEOUT`.
+- **Resilient NIM client.** Client-side sliding-window rate limit and
+  concurrency cap; retry with exponential backoff and jitter on 429/5xx/
+  network errors (one retry on timeout), honoring `Retry-After`; a shared
+  cooldown after a 429 so background jobs back off together; fail-fast
+  "try again in Ns" instead of blocking Claude; and failure classification
+  so auth, billing, permission, not-found and context-window errors are
+  never retried and say how to fix them.
+- NIM calls share the response cache, Castor-owned sessions (usable across
+  backends) and the background-job pool: `nim_start` jobs are collected
+  with the existing `gemini_poll` / `gemini_jobs`.
+- `gemini_status` reports whether NIM is configured (no network call).
+- `tests/test_nim.py`: 64 tests against a local stub server (no network, no
+  real key).
+
+### Changed
+
+- New runtime dependency: `httpx` (already a transitive dependency of
+  `fastmcp`).
+- `_compact_session` / `_append_turn` accept a pluggable summarizer and
+  `_run_job` a pluggable runner; agy behavior is unchanged.
+- Plain NIM calls (`nim_prompt`, `nim_review`, `nim_summarize` and the rest)
+  cap Nemotron's thinking at half of `max_tokens` (at most 6,144), so it can
+  no longer spend the whole completion cap thinking and return nothing.
+- The agent skips engine assets (Unity `.meta`, `.prefab`, `.fbx`, `.mat`,
+  `.asset` and similar) when it walks a repo or builds its file list, and
+  `list_dir` hides `.meta` files. In a Unity project they had crowded the
+  code out of the file list. A path named directly is still readable.
+
 ## [0.7.1] - 2026-10-26
 
 ### Fixed

@@ -289,6 +289,59 @@ Implications for how you call the tool:
 
 ---
 
+## NVIDIA NIM (optional second backend)
+
+If `gemini_status` shows `nvidia_nim: key set`, the `nim_*` tools can offload to
+NVIDIA's hosted models as well. Load their schemas with `ToolSearch` first.
+
+**NIM is not an agent.** It cannot read the repo, run commands, or follow
+imports — it only sees what you inline (`files`, `directory`, a diff, or text in
+the prompt). So pick the backend by the shape of the task:
+
+| Task | Use |
+|---|---|
+| Explore, index, trace usages, search by intent | agy (`gemini_*` with `cwd`) |
+| Review / security-review a diff | either; both for two independent opinions |
+| Explain an error where you can name the source files | `nim_explain_error` with `files` |
+| Summarize a file or directory that fits the inline budget | `nim_summarize` |
+| agy is rate-limited or unavailable | `nim_prompt` with the content inlined |
+| Compare two models on one question | `gemini_start` + `nim_start`, then `gemini_poll` both |
+
+**Agent mode (`nim_agent`) changes this.** `nim_agent`, `nim_agent_start` and
+the role tools below give NIM read-only `grep`, `read_range` and `list_dir`,
+run by Castor and confined to `cwd`, so it can explore on its own. Prefer them
+over reading files yourself when the answer is a short list and the reading is
+bulk:
+
+| Task | Use |
+|---|---|
+| Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
+| First-pass review of a diff, with surrounding code | `nim_first_pass_review` (`/castor:first-pass`); pass `rev_range` or `diff_file`, never paste the diff |
+| Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+| Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
+
+Keep the judgment calls (rulings, design, the final review) for yourself. Each
+agent step is one NIM request, so prefer a handful of focused tasks to one huge
+one, and use `nim_agent_start` (or a role's `_start` variant, such as
+`nim_first_pass_review_start`) to fan out or to keep working while a review
+runs. Every `path:line` is checked; one
+tagged `[unverified]` is a hallucination, so discard it.
+
+Rules of thumb:
+
+- **Privacy first.** Inlined content goes to a third party (NVIDIA). Don't send
+  secrets or anything the user hasn't cleared. Prefer agy when unsure.
+- **Respect the budget.** Prompts over `CASTOR_NIM_MAX_INPUT_CHARS` (default
+  300,000 chars) are rejected before any request; inline less or use agy.
+- Responses are research context, like agy's — verify specific claims.
+- Run `nim_models` (with a `query`) before passing `model`; ids change. Omit
+  `model` to use the configured default.
+- A "try again in Ns" or rate-limited error means NIM's free tier is saturated:
+  fall back to agy or wait; don't retry in a loop.
+- Sessions are shared across backends (same `session` name, needs `cwd`).
+
+---
+
 ## Quick Reference
 
 | Situation | What to do |
@@ -312,6 +365,9 @@ Implications for how you call the tool:
 | Check on background jobs | `gemini_jobs` |
 | Clear the default session | `gemini_reset` with `cwd` |
 | Force a fresh run (skip cache) | `gemini_prompt` with `use_cache=False` |
+| Second opinion on a diff from another model | `nim_review` / `nim_security_review` with `cwd` |
+| Offload inline-able work to NVIDIA NIM | `nim_prompt` with `files` |
+| Check NIM setup | `nim_status` |
 | Clear all cached responses | `gemini_cache_clear` |
 | Pick a specific model | `gemini_prompt` with `model=...` |
 | See available models | `gemini_models` |
