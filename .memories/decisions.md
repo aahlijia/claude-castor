@@ -102,3 +102,18 @@
   a lead generator that Claude must verify.
 - **Rejected:** more prompt rules (the concrete-input format and severity rules
   were only partly followed).
+
+### 2026-11-02: nim_first_pass_review is an occasional extra, not a pipeline step
+- **Why:** the NQC pilot ran it on 5 reviewed diffs (game logic, networked
+  code, harness checks, one mostly clean diff) with an NQC focus block. 25
+  leads: 5 confirmed, all repeats of Claude findings (Minor or Important); 12
+  refuted; 8 n/a. It caught 0 of 3 known findings: it called C449's test that
+  can't pass fine, called bagsync.sh's fail-open check correct (the opposite of
+  the bug), and missed a shared-stair-flight Critical while raising a false
+  one. The focus block didn't stop false Criticals. NQC removed the first pass
+  from its overnight workflow and kept NIM for log triage and summaries.
+  Nemotron 3 Ultra is the strongest model these keys can call, so retry only
+  with a stronger model.
+- **Rejected:** finishing the planned 15 reviews (each refuted lead costs
+  reviewer tokens, and 5 reviews already showed nothing unique); more prompt
+  rules (tried in castor before, partly followed).

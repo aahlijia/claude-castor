@@ -57,6 +57,8 @@
   scout named a function that does not exist at a real line, and review findings
   of absence ("no tests", "not documented") were often wrong. Verify before
   acting. Paths quoted from a log are tagged `[unverified]` (false positive).
+  A passing count is no proof either: a review reported "citations verified
+  9/9" while one cited range was the wrong branch of the function.
 - **NIM probe scripts read keys from `~/.claude.json`** (`mcpServers.claude-castor.env`).
   Never print them; keys pasted into a chat stay in that transcript.
 - **Nemotron keeps calling tools while the history holds tool calls.** Omitting
