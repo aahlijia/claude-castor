@@ -178,7 +178,7 @@ over via the system keyring — no extra steps needed.
 | `gemini_auth` | Get sign-in instructions when not authenticated |
 | `gemini_status` | Check CLI installation and sign-in; lists available models and agents when READY |
 | `gemini_setup` | Get step-by-step setup instructions |
-| `nim_prompt` / `nim_start` / `nim_review` / `nim_security_review` / `nim_explain_error` / `nim_summarize` / `nim_models` / `nim_status` / `nim_agent` / `nim_agent_start` | Optional NVIDIA NIM backend — see [below](#nvidia-nim-optional-second-backend) |
+| `nim_prompt` / `nim_start` / `nim_review` / `nim_security_review` / `nim_explain_error` / `nim_summarize` / `nim_models` / `nim_status` / `nim_agent` / `nim_agent_start` / `nim_scout` / `nim_first_pass_review` / `nim_triage_log` | Optional NVIDIA NIM backend — see [below](#nvidia-nim-optional-second-backend) |
 
 ### `gemini_prompt` parameters
 

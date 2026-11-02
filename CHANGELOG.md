@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent roles on `nim_agent`:** `nim_scout` (the exact lines a task needs),
+  `nim_first_pass_review` (a diff read server-side from a file, a committed
+  range or the working tree, refused over about 1,500 lines) and `nim_triage_log`
+  (a log boiled down to its failures), plus `/castor:scout`, `/castor:first-pass`
+  and `/castor:triage`. `_git_diff` takes an optional, validated revision range.
 - **`nim_agent` / `nim_agent_start`: a read-only agent loop on NIM.** The model
   gets `grep`, `read_range` and `list_dir`, run by Castor and confined to `cwd`
   (symlinks resolved first; secrets and `.git` off limits), and investigates over
