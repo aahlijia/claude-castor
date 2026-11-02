@@ -2714,6 +2714,10 @@ NIM_MAX_COOLDOWN = 600.0
 NIM_MAX_LISTED_MODELS = 200
 # Reasoning models spend tokens thinking first; 8 left them with no content.
 NIM_VERIFY_MAX_TOKENS = 512
+# Most of a completion cap a plain NIM call lets Nemotron spend thinking.
+# Thinking counts against max_tokens, so unbounded it can use the whole cap
+# and return no content; half leaves room for the answer.
+NIM_PROMPT_THINKING = 6144
 NIM_CACHE_BACKEND = "nvidia_nim"
 
 _NIM_CONTEXT_MARKERS = (
@@ -3271,6 +3275,18 @@ def _nim_extract_text(data: Any, model: str) -> tuple[bool, str]:
     return True, text
 
 
+def _nim_thinking_cap(model: str, budget: int) -> dict[str, int]:
+    """Payload fields that cap reasoning, for models known to honor them.
+
+    NIM's Nemotron models take `reasoning_budget` (tokens) and otherwise
+    think without bound; other models get nothing extra.
+    """
+    if model.startswith("nvidia/nemotron"):
+        return {"reasoning_budget": budget}
+
+    return {}
+
+
 def _run_nim(
     system: str | None,
     user: str,
@@ -3310,6 +3326,7 @@ def _run_nim(
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
+    thinking = min(NIM_PROMPT_THINKING, max_tokens // 2)
     logger.info(
         "nim: chat model=%s prompt_len=%d temperature=%s max_tokens=%d",
         model,
@@ -3326,6 +3343,7 @@ def _run_nim(
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
+            **_nim_thinking_cap(model, thinking),
         },
         keys,
     )
@@ -4281,17 +4299,15 @@ def _agent_send(
     model: str, messages: list[dict], max_tokens: int, tools: bool
 ) -> tuple[Any, str | None, dict]:
     """Send one agent request. Returns (data, error, first message)."""
+    thinking = NIM_AGENT_STEP_THINKING if tools else NIM_AGENT_ANSWER_THINKING
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": NIM_DEFAULT_TEMPERATURE,
         "max_tokens": max_tokens,
         "stream": False,
+        **_nim_thinking_cap(model, thinking),
     }
-    if model.startswith("nvidia/nemotron"):
-        payload["reasoning_budget"] = (
-            NIM_AGENT_STEP_THINKING if tools else NIM_AGENT_ANSWER_THINKING
-        )
     if tools:
         payload["tools"] = NIM_AGENT_TOOLS
         payload["tool_choice"] = "auto"
