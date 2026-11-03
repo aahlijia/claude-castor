@@ -74,8 +74,10 @@ DEFAULT_WINDOW = 10
 # Stamped on every result row. Bump it whenever score() or score_plain()
 # changes, so a saved file scored the old way is flagged and re-scored.
 # 1: keyword-gated location matching. 2: plain roles scored by keyword.
-# 3: edit role scored by patch against reference diff.
-SCORING_VERSION = 3
+# 3: edit role scored by patch against reference diff. 4: an edit run
+# without a patch counts as refused only on a Castor refusal (see
+# edit_refused); any other failure is an error row.
+SCORING_VERSION = 4
 ROLE_STEPS = {
     "review": "NIM_REVIEW_STEPS",
     "scout": "NIM_SCOUT_STEPS",
@@ -83,6 +85,28 @@ ROLE_STEPS = {
 }
 # Plain tool calls: no agent loop, scored by keywords over the whole answer.
 PLAIN_ROLES = ("explain", "summarize")
+# What counts as nim_edit refusing a case: a "[nim_edit: REFUSED" answer,
+# or one of its own input checks (server._edit_input_error and
+# _edit_args_error). Anything else without a patch (a timeout, a 429, a
+# stall, a transport error, an empty answer, a missing key, a dekko map
+# failure) is an error row, so a refuse case cannot pass on a failed run.
+EDIT_REFUSED = "[nim_edit: REFUSED"
+EDIT_INPUT_REFUSALS = (
+    "[Error: task is empty.]",
+    "[Error: files is empty;",
+    "[Error: invalid files entry:",
+    "[Error: invalid must_cover symbol:",
+)
+EDIT_CWD_REFUSAL = ("[Error: cwd ", " is not a directory.]")
+# Score keys a row loses when it turns out to be an error.
+EDIT_SCORE_KEYS = (
+    "correct",
+    "clean_error",
+    "wrong_applies",
+    "out_of_scope",
+    "repair",
+    "check_passed",
+)
 
 
 def load_server(path: Path) -> ModuleType:
@@ -305,6 +329,30 @@ def _run_agent_case(case: dict, config: dict, server: ModuleType) -> dict:
     return result
 
 
+def edit_refused(text: str) -> bool:
+    """True when nim_edit's result text is one of Castor's own refusals."""
+    head, tail = EDIT_CWD_REFUSAL
+    return (
+        text.startswith(EDIT_REFUSED)
+        or text.startswith(EDIT_INPUT_REFUSALS)
+        or (text.startswith(head) and text.endswith(tail))
+    )
+
+
+def edit_failure(text: str) -> str:
+    """The error-row message for a nim_edit run that neither patched nor
+    refused."""
+    first = text.strip().splitlines()[0] if text.strip() else "empty answer"
+    return f"nim_edit failed: {first[:300]}"
+
+
+def _as_error_row(row: dict, text: str) -> None:
+    """Turn a scored edit row into an error row in place."""
+    for key in EDIT_SCORE_KEYS:
+        row.pop(key, None)
+    row["error"] = edit_failure(text)
+
+
 def score_edit(case: dict, outcome: dict) -> dict:
     """Bucket one edit run: correct, clean_error or wrong_applies.
 
@@ -460,6 +508,10 @@ def _run_edit_case(
         getattr(server, ROLE_STEPS["edit"], None),
     )
     seconds = round(time.monotonic() - started, 1)
+    if stats.get("outcome") != "patch" and not edit_refused(text):
+        row = _edit_error(case, config, edit_failure(text))
+        row.update(scoring=SCORING_VERSION, seconds=seconds, answer=text)
+        return row
     facts = _edit_facts(case, work, expected, reference, stats)
     result = score_edit(case, facts)
     result.update(
@@ -714,15 +766,28 @@ def rescore(path: Path, cases: list[dict]) -> None:
         case = by_name.get(r.get("case"))
         if case and "answer" in r:
             if case["role"] == "edit":
-                if "facts" in r:
-                    r.update(score_edit(case, r["facts"]), role="edit")
-                    r["scoring"] = SCORING_VERSION
+                _rescore_edit(r, case)
                 continue
             scorer = score_plain if case["role"] in PLAIN_ROLES else score
             r.update(scorer(case, r["answer"]), role=case["role"])
             r["scoring"] = SCORING_VERSION
     path.write_text(json.dumps(results, indent=1))
     report(results, sorted({r["config"] for r in results}))
+
+
+def _rescore_edit(row: dict, case: dict) -> None:
+    """Score a saved edit row again; a failed run becomes an error row.
+
+    Rows from scorer 3 and older set facts["refused"] for any run without
+    a patch, so a refusal is re-read from the answer text.
+    """
+    if "facts" not in row:
+        return
+    if row["facts"]["refused"] and not edit_refused(row["answer"]):
+        _as_error_row(row, row["answer"])
+    else:
+        row.update(score_edit(case, row["facts"]), role="edit")
+    row["scoring"] = SCORING_VERSION
 
 
 def stale_rows(results: list[dict]) -> int:
