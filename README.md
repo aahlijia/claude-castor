@@ -302,7 +302,7 @@ results — run them in the background instead:
 `gemini_start` takes the same arguments as `gemini_prompt` except the session
 ones: background jobs are **fresh-only** by construction (concurrent jobs would
 race on the shared session), so for stateful multi-turn work use the synchronous
-`gemini_prompt`. Concurrency is capped (4 workers), and a cache hit completes a
+`gemini_prompt`. Concurrency is capped (4 workers, or 4 per NVIDIA key up to 8), and a cache hit completes a
 job immediately. Jobs live in memory only — a server restart forgets them.
 
 ---
@@ -376,7 +376,7 @@ All optional, set as environment variables on the MCP server:
 | `CASTOR_NIM_TRACES` | `1` | `0` turns off the local usage log and agent traces under `~/.cache/claude-castor/` (kept 30 days) |
 | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
 | `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
-| `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |
+| `CASTOR_NIM_CONCURRENCY` | `4` per key, at most `12` | Simultaneous in-flight requests; background jobs wait up to 300 s for a slot, foreground calls 30 s |
 | `CASTOR_NIM_MAX_INPUT_CHARS` | `300000` | Prompt size budget (~75k tokens); larger prompts are rejected up front |
 | `CASTOR_NIM_MAX_TOKENS` | `4096` | Completion cap per request |
 | `CASTOR_NIM_TIMEOUT` | `180` | Seconds to wait for a response |

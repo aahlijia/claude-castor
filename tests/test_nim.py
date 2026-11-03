@@ -1618,3 +1618,30 @@ def test_requests_reuse_one_http_client(stub):
     assert first.follow_redirects is False
     server._nim_reset_state()
     assert first.is_closed and server._nim_client() is not first
+
+
+@pytest.mark.parametrize(("count", "size"), [(1, 4), (3, 12), (5, 12)])
+def test_gate_scales_with_keys_unless_overridden(monkeypatch, count, size):
+    keys = ",".join(f"nvapi-k{i}" for i in range(count))
+    monkeypatch.setenv("NVIDIA_API_KEYS", keys)
+    monkeypatch.delenv("CASTOR_NIM_CONCURRENCY", raising=False)
+    assert server._nim_gate_size() == size
+    assert server._job_pool_size() == min(size, server.JOB_POOL_MAX)
+    monkeypatch.setenv("CASTOR_NIM_CONCURRENCY", "2")
+    assert server._nim_gate_size() == 2
+
+
+def test_background_job_waits_for_a_slot_a_foreground_call_does_not(
+    stub, monkeypatch
+):
+    monkeypatch.setenv("CASTOR_NIM_CONCURRENCY", "1")
+    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
+    monkeypatch.setattr(server, "NIM_JOB_MAX_WAIT", 5.0)
+    server._nim_reset_state()
+    gate = server._nim_gate()
+    gate.acquire()
+    out = _tool(server.nim_prompt)("fg", use_cache=False)
+    assert out.startswith("[NVIDIA NIM is busy")
+    threading.Timer(0.3, gate.release).start()
+    job = _job_id(_tool(server.nim_start)("bg", use_cache=False))
+    assert _poll_until_done(job) == "stub answer"

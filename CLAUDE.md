@@ -101,9 +101,10 @@ side-effect-free, so results are cached against the repo state in a git repo.
 `gemini_start` runs a prompt off-thread (same args as `gemini_prompt` minus the
 session ones — background jobs are fresh-only) and returns a job id;
 `gemini_poll(job_id)` returns `running` / the response / an error; `gemini_jobs`
-lists them. Use for long explorations and fan-out. Concurrency is capped at 4
-workers; jobs are in-memory (lost on restart) and bounded to 50 (oldest finished
-evicted, never a running job).
+lists them. Use for long explorations and fan-out. Workers match the NIM gate
+(4 per key, at most 8); jobs are in-memory (lost on restart) and bounded to 50
+(oldest finished evicted, never a running job). A job waits up to
+`NIM_JOB_MAX_WAIT` (300 s) for a NIM slot or key, a foreground call 30 s.
 
 ### Sessions
 
@@ -185,10 +186,12 @@ counts; directories past 150 files), grep takes `context` lines and reports
 match totals past its cap, and the model may batch up to 4 calls per step.
 
 Resilience lives in `_nim_request`: a client-side sliding-window limiter
-(`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and concurrency cap, retry
+(`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and a concurrency gate
+(`_nim_gate_size`: 4 per key, at most 12, or `CASTOR_NIM_CONCURRENCY`), retry
 with exponential backoff + jitter on 429/5xx/network (one timeout retry),
 `Retry-After` honored, a per-key cooldown after a 429 (other keys keep going), and a fail-fast "try again in Ns" error once the
-wait would exceed `NIM_MAX_WAIT` (30s). `_classify_nim_status` decides what is
+wait would exceed `NIM_MAX_WAIT` (30s; `NIM_JOB_MAX_WAIT`, 300 s, on a job
+worker). Requests share one `httpx.Client` (`_nim_client`). `_classify_nim_status` decides what is
 retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
 http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
 `CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`. NIM session compaction uses NIM
