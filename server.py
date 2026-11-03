@@ -5177,36 +5177,6 @@ def _grep_only_hits(
     return hits
 
 
-def _dekko_fetch_sites(
-    root: Path, symbol: str
-) -> tuple[list[tuple[str, int, str]] | None, str]:
-    """One `query callers --sites` call: ((path, line, who) rows, error).
-
-    Rows are deny-filtered and include module-level sites; rows is None
-    (with the error text) when dekko failed or its output is unreadable.
-    """
-    ok, raw = _dekko_run(
-        root,
-        ["query", "callers", symbol, "--sites", "--json", *_DEKKO_BUDGET_ARGS],
-    )
-    if not ok:
-        return None, _dekko_scrub(raw)
-    try:
-        return _dekko_call_sites(json.loads(raw)), ""
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return None, "[dekko error: unreadable callers output]"
-
-
-def _dekko_caller_sites(
-    root: Path, symbol: str
-) -> list[tuple[str, int]] | None:
-    """(path, line) call sites of `symbol`; None if dekko failed."""
-    found, _ = _dekko_fetch_sites(root, symbol)
-    if found is None:
-        return None
-    return [(path, line) for path, line, _ in found]
-
-
 def _dekko_callers(
     root: Path, symbol: str
 ) -> tuple[list[tuple[str, int]] | None, str]:
@@ -5215,9 +5185,16 @@ def _dekko_callers(
     The text merges dekko's call-graph sites with grep hits the graph
     missed, so a dynamic call is not silently absent.
     """
-    found, error = _dekko_fetch_sites(root, symbol)
-    if found is None:
-        return None, error
+    ok, raw = _dekko_run(
+        root,
+        ["query", "callers", symbol, "--sites", "--json", *_DEKKO_BUDGET_ARGS],
+    )
+    if not ok:
+        return None, _dekko_scrub(raw)
+    try:
+        found = _dekko_call_sites(json.loads(raw))
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None, "[dekko error: unreadable callers output]"
     sites = [(path, line) for path, line, _ in found]
     known = set(sites)
     definition = _dekko_definition(root, symbol)
@@ -6544,64 +6521,16 @@ def _merge_spans(
     return merged
 
 
-def _file_lines(root: Path, path: str) -> list[str] | None:
-    """The lines of a project file, None if it cannot be read."""
-    target, error = _agent_resolve(root, path)
-    if error or target is None or not target.is_file():
-        return None
-    try:
-        return target.read_text(encoding="utf-8", errors="replace").split("\n")
-    except OSError:
-        return None
-
-
-def _dekko_use_rows(root: Path, name: str) -> tuple[list[str], int]:
-    """(rows shown, sites not shown) for `name` from dekko's call graph.
-
-    Renders sites only until the per-symbol cap is met, reading each
-    file once; an unreadable site is skipped. Rows are empty when dekko
-    failed or has no readable site.
-    """
-    sites = _dekko_caller_sites(root, name) or []
-    cache: dict[str, list[str] | None] = {}
-    rows: list[str] = []
-    used = 0
-    for path, line in sites:
-        if len(rows) >= NIM_REVIEW_USES_PER_SYMBOL:
-            break
-        used += 1
-        if path not in cache:
-            cache[path] = _file_lines(root, path)
-        lines = cache[path]
-        if lines is None or not 1 <= line <= len(lines):
-            continue
-        text = lines[line - 1].rstrip("\r")[:NIM_AGENT_LINE_CHARS]
-        rows.append(f"{path}:{line}:{text}")
-    return rows, len(sites) - used
-
-
-def _grep_use_rows(root: Path, name: str) -> tuple[list[str], int]:
-    """(rows shown, rows not shown) for `name` from grep."""
-    hits = _agent_grep(root, rf"\b{re.escape(name)}\b", ".", None)
-    rows = [] if hits.startswith("[") else hits.splitlines()
-    shown = rows[:NIM_REVIEW_USES_PER_SYMBOL]
-    return shown, len(rows) - len(shown)
-
-
 def _review_uses(root: Path, diff: str) -> str:
-    """Where each function the diff touches is used across the project.
-
-    Call sites come from dekko's call graph when it is on and has a map,
-    else (or when it has none for a name) from grep.
-    """
-    use_dekko = _dekko_enabled() and _dekko_ensure_map(root)
+    """Where each function the diff touches is used across the project."""
     sections: list[str] = []
     for name in _diff_symbols(diff):
-        shown, more = (use_dekko and _dekko_use_rows(root, name)) or ([], 0)
-        if not shown:
-            shown, more = _grep_use_rows(root, name)
-        if not shown:
+        hits = _agent_grep(root, rf"\b{re.escape(name)}\b", ".", None)
+        if hits.startswith("["):
             continue
+        rows = hits.splitlines()
+        shown = rows[:NIM_REVIEW_USES_PER_SYMBOL]
+        more = len(rows) - len(shown)
         tail = f"\n  ({more} more)" if more > 0 else ""
         sections.append(
             f"uses of {name}:\n" + "\n".join(f"  {r}" for r in shown) + tail
