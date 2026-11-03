@@ -47,7 +47,7 @@ class Stub:
         self.queue = []  # (status, headers, body) consumed per POST
         self.requests = []  # (method, path, headers, parsed body)
         self.models = [
-            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/nemotron-3.5-super-vl-120b-a12b",
             "nvidia/nemotron-x",
         ]
         stub = self
@@ -247,7 +247,11 @@ def test_model_resolution_order(stub, monkeypatch):
     _tool(server.nim_prompt)("b", use_cache=False)
     _tool(server.nim_prompt)("c", model="arg/model", use_cache=False)
     models = [r[3]["model"] for r in stub.posts()]
-    assert models == [server.NIM_DEFAULT_MODEL, "env/model", "arg/model"]
+    assert models == [
+        "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "env/model",
+        "arg/model",
+    ]
 
 
 def test_files_are_inlined(stub, tmp_path):
@@ -522,7 +526,7 @@ def test_summarize_missing_target(stub, tmp_path):
 
 def test_models_lists_and_filters(stub):
     out = _tool(server.nim_models)()
-    assert "nvidia/nemotron-3-ultra-550b-a55b" in out and "(2 of 2)" in out
+    assert server.NIM_DEFAULT_MODEL in out and "(2 of 2)" in out
     out = _tool(server.nim_models)("nemotron")
     assert "nvidia/nemotron-x" in out and "llama" not in out
     assert _tool(server.nim_models)("zzz").startswith("[No NIM models match")
@@ -532,7 +536,7 @@ def test_status_ready(stub):
     out = _tool(server.nim_status)()
     assert out.startswith("READY — NVIDIA NIM")
     assert KEY not in out
-    assert "default_model: nvidia/nemotron-3-ultra-550b-a55b" in out
+    assert "default_model: nvidia/nemotron-3.5-super-vl-120b-a12b" in out
     assert "models_listed: 2" in out
     assert "key 1: ok" in out and "cooldown none" in out
 

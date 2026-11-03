@@ -336,6 +336,18 @@ quote that isn't at the cited line `[quote is at line N]` or
 `[quote not in file]`, so treat those leads as wrong or mislocated. A
 matched quote proves the location, not the claim.
 
+**Models.** Every `nim_*` tool defaults to Nemotron 3.5 Super
+(`nvidia/nemotron-3.5-super-vl-120b-a12b`); `CASTOR_NIM_MODEL` and
+`CASTOR_NIM_AGENT_MODEL` override it. The other model worth passing is
+Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b`):
+
+| Tool | Default | Pass Ultra when |
+|---|---|---|
+| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | Super is crawling (under ~40 tokens/s in `nim_usage`); Ultra's speed holds steadier under load |
+| `nim_explain_error` | 3.5 Super | as above; Super found every known cause in the eval, Ultra missed one secondary point |
+| `nim_summarize` | 3.5 Super | as above; Ultra dropped must-have key points on 2 of 3 docs |
+| `nim_agent`, `nim_scout`, `nim_first_pass_review`, `nim_triage_log` | 3.5 Super | never: Ultra scored the same, spends every step it is given, and is about 2.5x slower |
+
 Rules of thumb:
 
 - **Privacy first.** Inlined content goes to a third party (NVIDIA). Don't send
