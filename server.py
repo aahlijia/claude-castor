@@ -2874,7 +2874,7 @@ _nim_stats = {"requests": 0, "ok": 0, "rate_limited": 0, "errors": 0}
 
 
 def _nim_reset_state() -> None:
-    """Drop limiters, cooldowns and counters (used by tests)."""
+    """Drop limiters, cooldowns, counters and caches (used by tests)."""
     global _nim_slots, _nim_rotation
     with _nim_lock:
         _nim_slots = None
@@ -2882,6 +2882,8 @@ def _nim_reset_state() -> None:
         _nim_rotation = 0
         for name in _nim_stats:
             _nim_stats[name] = 0
+    with _agent_index_lock:
+        _agent_index_cache.clear()
 
 
 def _nim_gate() -> threading.BoundedSemaphore:
@@ -4051,6 +4053,13 @@ NIM_AGENT_SKIP_EXTENSIONS = SKIP_EXTENSIONS | {
     ".so",
     ".dylib",
 }
+# Build trees the agent's walk and list_dir leave out when the git index
+# can't decide (no repo). Agent-only, so the agy inline path is unchanged.
+NIM_AGENT_SKIP_DIRS = SKIP_DIRS | {"Library", "Temp", "obj"}
+# One git index read serves every grep in an agent run or review context.
+NIM_AGENT_INDEX_TTL = 60.0
+_agent_index_lock = threading.Lock()
+_agent_index_cache: dict[Path, tuple[float, list[str] | None]] = {}
 _NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg"}
 _NIM_AGENT_DENIED_NAMES = {
     "id_rsa",
@@ -4216,7 +4225,7 @@ def _agent_list_dir(root: Path, raw: str) -> str:
     names = []
     for entry in sorted(target.iterdir(), key=lambda e: e.name):
         rel = entry.relative_to(root)
-        if entry.name in SKIP_DIRS or _agent_denied(rel):
+        if entry.name in NIM_AGENT_SKIP_DIRS or _agent_denied(rel):
             continue
         if entry.suffix.lower() == ".meta":
             continue
@@ -4252,21 +4261,40 @@ def _agent_skipped(name: str) -> bool:
     return Path(name).suffix.lower() in NIM_AGENT_SKIP_EXTENSIONS
 
 
-def _agent_grep_candidates(target: Path) -> list[Path]:
+def _agent_grep_candidates(root: Path, target: Path) -> list[Path]:
     """Files under `target` worth searching, in a stable order.
 
-    A file named directly is always searched (a .log for triage); a walk
-    skips the noise extensions (logs, lockfiles, images, engine assets).
+    A file named directly is always searched (a .log for triage). A
+    directory is searched through the git index, so ignored build trees
+    are never walked; outside git it falls back to a filtered walk. Both
+    skip the noise extensions (logs, lockfiles, images, engine assets).
     """
     if target.is_file():
         return [target]
+    files = _agent_candidates(root)
+    if target == root:
+        return files
+    return [p for p in files if p.is_relative_to(target)]
+
+
+def _agent_candidates(root: Path) -> list[Path]:
+    """Absolute paths of the searchable project files, sorted.
+
+    The git index (tracked plus untracked, not ignored) when `root` is in
+    a repo, else a walk that prunes NIM_AGENT_SKIP_DIRS and dot dirs.
+    """
+    names = _agent_index(root)
+    if names is not None:
+        return [root / n for n in names]
     files: list[Path] = []
-    for base, dirs, names in os.walk(target):
+    for base, dirs, entries in os.walk(root):
         dirs[:] = sorted(
-            d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")
+            d
+            for d in dirs
+            if d not in NIM_AGENT_SKIP_DIRS and not d.startswith(".")
         )
         files.extend(
-            Path(base) / n for n in sorted(names) if not _agent_skipped(n)
+            Path(base) / n for n in sorted(entries) if not _agent_skipped(n)
         )
     return files
 
@@ -4328,7 +4356,7 @@ def _agent_grep(
     deadline = time.monotonic() + NIM_AGENT_GREP_SECONDS
     out: list[str] = []
     shown = total = 0
-    for path in _agent_grep_candidates(target):
+    for path in _agent_grep_candidates(root, target):
         if time.monotonic() > deadline:
             out.append("[search timed out; narrow the path or pattern]")
             break
@@ -4436,6 +4464,34 @@ def _agent_answer_messages(messages: list[dict]) -> list[dict]:
 
 def _agent_tracked_files(root: Path) -> list[str]:
     """Files git knows about under `root` (tracked or not ignored)."""
+    return _agent_index(root) or []
+
+
+def _agent_index(root: Path) -> list[str] | None:
+    """_git_listed_files filtered for the agent, cached per root.
+
+    Entries live NIM_AGENT_INDEX_TTL seconds, so the greps of one run or
+    one review context share a single `git ls-files`. None outside git.
+    """
+    now = time.monotonic()
+    with _agent_index_lock:
+        hit = _agent_index_cache.get(root)
+    if hit is not None and now - hit[0] < NIM_AGENT_INDEX_TTL:
+        return hit[1]
+    names = _git_listed_files(root)
+    if names is not None:
+        names = sorted(
+            n
+            for n in set(names)
+            if n and not _agent_skipped(n) and not _agent_denied(Path(n))
+        )
+    with _agent_index_lock:
+        _agent_index_cache[root] = (now, names)
+    return names
+
+
+def _git_listed_files(root: Path) -> list[str] | None:
+    """Raw `git ls-files` names under `root`, or None when git fails."""
     try:
         result = subprocess.run(
             [
@@ -4452,15 +4508,10 @@ def _agent_tracked_files(root: Path) -> list[str]:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return None
     if result.returncode != 0:
-        return []
-    names = result.stdout.decode("utf-8", errors="replace").split("\0")
-    return sorted(
-        n
-        for n in set(names)
-        if n and not _agent_skipped(n) and not _agent_denied(Path(n))
-    )
+        return None
+    return result.stdout.decode("utf-8", errors="replace").split("\0")
 
 
 def _agent_file_map(root: Path) -> str:
