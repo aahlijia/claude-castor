@@ -2435,6 +2435,50 @@ def test_parse_edit_blocks_reports_missing_marker():
     assert errors == ["block 1: missing >>>NEW"]
 
 
+def test_parse_edit_blocks_accepts_an_omitted_old_marker():
+    answer = (
+        "<<<EDIT CLAUDE.md\n  --config label=model`\n  second\n>>>NEW\n"
+        "  --config label=model[,dekko=on|off]`\n>>>END\n"
+    )
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == []
+    assert blocks == [
+        server.EditBlock(
+            1,
+            "CLAUDE.md",
+            "  --config label=model`\n  second",
+            "  --config label=model[,dekko=on|off]`",
+        )
+    ]
+
+
+def test_parse_edit_blocks_ignores_text_before_an_old_marker():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py\nnote\n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+    )
+    assert errors == [] and blocks[0].old == "x"
+
+
+def test_parse_edit_blocks_accepts_trailing_whitespace_on_markers():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py \t\n<<<OLD  \nx \n>>>NEW\t\ny\n>>>END \n"
+    )
+    assert errors == []
+    assert blocks == [server.EditBlock(1, "a.py", "x ", "y")]
+
+
+def test_parse_edit_blocks_leading_space_is_not_a_marker():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py\n<<<OLD\nx\n >>>NEW\ny\n>>>END\n"
+    )
+    assert blocks == [] and errors == ["block 1: missing >>>NEW"]
+
+
+def test_parse_edit_blocks_needs_old_or_new_marker():
+    blocks, errors = server._parse_edit_blocks("<<<EDIT a.py\nx\n>>>END\n")
+    assert blocks == [] and errors == ["block 1: missing >>>NEW"]
+
+
 def test_marker_text_inside_a_line_is_code():
     answer = "<<<EDIT a.py\n<<<OLD\ns = '>>>END'\n>>>NEW\ns = ''\n>>>END\n"
     blocks, errors = server._parse_edit_blocks(answer)
