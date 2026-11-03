@@ -1605,3 +1605,16 @@ def test_wrong_directory_with_a_unique_basename_is_verified_and_tagged(
         "- Tools/run.sh:3 - `fail here`", root
     )
     assert (matched, checked) == (1, 1)
+
+
+# --- transport -----------------------------------------------------------------
+
+
+def test_requests_reuse_one_http_client(stub):
+    _tool(server.nim_prompt)("a", use_cache=False)
+    first = server._nim_client()
+    _tool(server.nim_prompt)("b", use_cache=False)
+    assert server._nim_client() is first and len(stub.posts()) == 2
+    assert first.follow_redirects is False
+    server._nim_reset_state()
+    assert first.is_closed and server._nim_client() is not first
