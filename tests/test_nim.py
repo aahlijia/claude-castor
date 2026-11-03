@@ -1350,3 +1350,57 @@ def test_agent_default_model_follows_a_changed_main_model(
     stub.queue.append((200, {}, _completion("b")))
     _tool(server.nim_agent)("t", str(repo))
     assert stub.posts()[1][3]["model"] == "local/self-hosted"
+
+
+# --- grep candidates from the git index -------------------------------------
+
+
+def _git_repo(root):
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+
+
+def test_grep_walks_the_git_index_not_ignored_trees(tmp_path):
+    root = tmp_path / "gi"
+    (root / "src").mkdir(parents=True)
+    (root / "Library" / "deep").mkdir(parents=True)
+    (root / "src" / "a.cs").write_text("TARGET tracked\n")
+    (root / ".gitignore").write_text("Library/\nbuild-out/\n")
+    _git_repo(root)
+    (root / "src" / "new.cs").write_text("TARGET untracked\n")
+    (root / "Library" / "deep" / "x.cs").write_text("TARGET ignored\n")
+    (root / "Library" / "run.txt").write_text("TARGET named\n")
+    root = root.resolve()
+    server._nim_reset_state()
+    out = server._agent_grep(root, "TARGET", ".", None)
+    assert "src/a.cs:1" in out and "src/new.cs:1" in out
+    assert "ignored" not in out
+    named = server._agent_grep(root, "TARGET", "Library/run.txt", None)
+    assert named == "Library/run.txt:1:TARGET named"
+    sub = server._agent_grep(root, "TARGET", "src", None)
+    assert sub.count("\n") == 1 and "Library" not in sub
+
+
+def test_grep_index_is_cached_until_reset(tmp_path):
+    root = tmp_path / "gc"
+    root.mkdir()
+    (root / "a.txt").write_text("hit\n")
+    _git_repo(root)
+    root = root.resolve()
+    server._nim_reset_state()
+    first = server._agent_candidates(root)
+    (root / "b.txt").write_text("hit\n")
+    assert server._agent_candidates(root) == first
+    server._nim_reset_state()
+    assert server._agent_candidates(root) == [root / "a.txt", root / "b.txt"]
+
+
+def test_grep_outside_git_falls_back_to_a_pruned_walk(tmp_path):
+    root = tmp_path / "plain"
+    (root / "Library").mkdir(parents=True)
+    (root / "Library" / "x.cs").write_text("TARGET\n")
+    (root / "a.cs").write_text("TARGET\n")
+    root = root.resolve()
+    server._nim_reset_state()
+    assert server._agent_index(root) is None
+    assert server._agent_grep(root, "TARGET", ".", None) == "a.cs:1:TARGET"
