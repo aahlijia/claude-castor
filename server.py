@@ -6949,12 +6949,18 @@ def _edit_marker_at(line: str) -> str | None:
     """The marker a line is, or None.
 
     A marker is the whole line, give or take trailing spaces and tabs; a
-    line with leading whitespace is never a marker.
+    line with leading whitespace is never a marker. Either arrow counts
+    (`<<<NEW` is `>>>NEW`): models mix them up.
     """
     line = line.rstrip(" \t\r")
-    if line in _EDIT_MARKERS:
-        return line
-    if line.startswith(EDIT_MARKER + " "):
+    if line[:3] not in ("<<<", ">>>"):
+        return None
+
+    for marker in _EDIT_MARKERS:
+        word = marker[3:]
+        if line[3:] == word:
+            return marker
+    if line[3:].startswith(EDIT_MARKER[3:] + " "):
         return EDIT_MARKER
 
     return None
