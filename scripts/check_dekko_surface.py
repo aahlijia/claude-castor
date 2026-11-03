@@ -101,6 +101,7 @@ def _run(args: list[str], what: str, quiet: bool = False) -> str:
     try:
         result = subprocess.run(
             [str(_dekko_bin()), *args],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=120,
