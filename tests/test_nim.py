@@ -133,6 +133,7 @@ def stub(tmp_path, monkeypatch):
     monkeypatch.delenv("NVIDIA_NIM_API_KEY", raising=False)
     monkeypatch.delenv("CASTOR_NIM_MODEL", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
     # Fast, deterministic backoff.
     monkeypatch.setattr(server, "NIM_BACKOFF_BASE", 0.01)
     monkeypatch.setattr(server, "NIM_BACKOFF_JITTER", 0.0)
@@ -149,6 +150,29 @@ def stub(tmp_path, monkeypatch):
     yield s
     server._nim_reset_state()
     s.close()
+
+
+@pytest.fixture
+def fake_dekko(tmp_path, monkeypatch):
+    """Pretend dekko is installed; `_dekko_run` pops queued results."""
+
+    class Fake:
+        queue: list = []
+        calls: list = []
+
+    fake = Fake()
+    fake.queue = []
+    fake.calls = []
+
+    def run(root, args, timeout=10.0):
+        fake.calls.append(args)
+        return fake.queue.pop(0) if fake.queue else (True, "")
+
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 35))
+    monkeypatch.setattr(server, "_dekko_run", run)
+    return fake
 
 
 # --- classification -------------------------------------------------------
@@ -1778,3 +1802,41 @@ def test_streamed_usage_reaches_the_usage_log(stub, tmp_path):
     _tool(server.nim_prompt)("q", use_cache=False)
     entry = _usage_entries(tmp_path)[-1]
     assert entry["prompt_tokens"] == 11 and entry["completion_tokens"] == 7
+
+
+# --- dekko runner ---------------------------------------------------------
+
+
+def test_dekko_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    assert server._dekko_enabled() is False
+
+
+def test_dekko_override_beats_env(monkeypatch, fake_dekko):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    token = server._dekko_override.set(True)
+    try:
+        assert server._dekko_enabled() is True
+    finally:
+        server._dekko_override.reset(token)
+
+
+def test_dekko_off_without_binary(monkeypatch):
+    monkeypatch.delenv("CASTOR_NIM_DEKKO", raising=False)
+    monkeypatch.setattr(server, "_dekko_bin", lambda: None)
+    assert server._dekko_enabled() is False
+
+
+def test_dekko_off_below_min_version(monkeypatch, fake_dekko):
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 0))
+    assert server._dekko_enabled() is False
+
+
+def test_dekko_run_reports_timeout(monkeypatch, tmp_path):
+    def slow(*a, **k):
+        raise server.subprocess.TimeoutExpired(a[0], 10)
+
+    monkeypatch.setattr(server.subprocess, "run", slow)
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    ok, text = server._dekko_run(tmp_path, ["query", "symbol", "x"])
+    assert ok is False and "timed out" in text

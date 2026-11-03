@@ -1,4 +1,5 @@
 import fnmatch
+import contextvars
 import hashlib
 import json
 import logging
@@ -2934,6 +2935,7 @@ def _nim_reset_state() -> None:
             _nim_stats[name] = 0
     with _agent_index_lock:
         _agent_index_cache.clear()
+    _dekko_version_cache.clear()
 
 
 def _nim_gate() -> threading.BoundedSemaphore:
@@ -4858,6 +4860,99 @@ def _agent_run_tool(root: Path, name: str, args: dict) -> str:
     except (OSError, TypeError, ValueError) as exc:
         return f"[tool error: {exc}]"
     return f"[error: unknown tool {name!r}]"
+
+
+# --- dekko ----------------------------------------------------------------
+
+DEKKO_MIN_VERSION: tuple[int, int, int] = (1, 9, 35)
+NIM_DEKKO_TIMEOUT = 10.0  # seconds per dekko query
+NIM_DEKKO_MAP_TIMEOUT = 180.0  # seconds for a map build
+NIM_DEKKO_MAP_TTL = 60.0  # at most one map build per root per this long
+NIM_DEKKO_BUDGET = 1200  # token budget for one dekko query
+
+_dekko_override: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "dekko_override", default=None
+)
+_dekko_version_cache: dict[str, tuple[int, ...] | None] = {}
+
+
+def _dekko_bin() -> Path | None:
+    """The dekko script beside this interpreter, or None if it is absent."""
+    path = Path(sys.executable).parent / "dekko"
+    return path if path.is_file() else None
+
+
+def _dekko_version() -> tuple[int, ...] | None:
+    """Installed dekko version, read once per process (None if unknown)."""
+    if "v" in _dekko_version_cache:
+        return _dekko_version_cache["v"]
+    version = None
+    binary = _dekko_bin()
+    if binary is not None:
+        try:
+            result = subprocess.run(
+                [str(binary), "--version"],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=NIM_DEKKO_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None and result.returncode == 0:
+            version = _parse_dekko_version(result.stdout)
+    _dekko_version_cache["v"] = version
+    return version
+
+
+def _parse_dekko_version(text: str) -> tuple[int, ...] | None:
+    """Parse `dekko 1.9.35` into (1, 9, 35); None when it does not fit."""
+    parts = text.split()
+    if not parts:
+        return None
+    try:
+        return tuple(int(p) for p in parts[-1].split("."))
+    except ValueError:
+        return None
+
+
+def _dekko_enabled() -> bool:
+    """Whether dekko tools may run: switch on, binary there, version ok."""
+    override = _dekko_override.get()
+    if override is None:
+        on = os.environ.get("CASTOR_NIM_DEKKO", "").strip() != "0"
+    else:
+        on = override
+    if not on or _dekko_bin() is None:
+        return False
+    version = _dekko_version()
+    return version is not None and version >= DEKKO_MIN_VERSION
+
+
+def _dekko_run(
+    root: Path, args: list[str], timeout: float = NIM_DEKKO_TIMEOUT
+) -> tuple[bool, str]:
+    """Run dekko in `root`; failures come back as "[dekko error: ...]"."""
+    binary = _dekko_bin()
+    if binary is None:
+        return False, "[dekko error: not installed]"
+    try:
+        result = subprocess.run(
+            [str(binary), *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"[dekko error: timed out after {timeout:g}s]"
+    except OSError as exc:
+        return False, f"[dekko error: {exc}]"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[:300]
+        return False, f"[dekko error: exit {result.returncode}: {detail}]"
+    return True, result.stdout
 
 
 def _agent_parse_args(call: dict) -> dict | None:
