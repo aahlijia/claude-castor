@@ -7,9 +7,11 @@ and JSON fields (e.g. `sites` in `query callers --json`). dekko releases
 often, so this surface can drift silently.
 
 This script runs `dekko <subcommand> --help` for each tracked subcommand,
-then `dekko query callers/symbol --json` on this repo, and diffs the
-tracked flags, query actions and JSON keys against a checked-in snapshot.
-Drift outside the tracked subset is ignored on purpose.
+then each `--json` command Castor runs (query callers and symbol,
+outline, search, context, trace) on this repo with Castor's flags, and
+diffs the tracked flags, query actions and JSON keys (top level, plus the
+records Castor reads inside them) against a checked-in snapshot. Drift
+outside the tracked subset is ignored on purpose.
 
 It does not import `server.py`. It finds dekko the way Castor does, as the
 `dekko` script beside the running interpreter, so run it with the project
@@ -40,21 +42,50 @@ SNAPSHOT_PATH = Path(__file__).parent / "dekko_surface_snapshot.json"
 TRACKED_FLAGS = {
     "map": ["--if-stale", "--quiet"],
     "query": ["--sites", "--no-regen", "--budget", "--json"],
-    "outline": ["--budget", "--no-regen"],
-    "context": ["--with-source", "--budget", "--no-regen"],
-    "search": ["--budget", "--no-regen"],
-    "trace": ["--no-regen"],
+    "outline": ["--budget", "--no-regen", "--json"],
+    "context": ["--with-source", "--budget", "--no-regen", "--json"],
+    "search": ["--budget", "--no-regen", "--json"],
+    "trace": ["--no-regen", "--json"],
 }
 
 # `dekko query` actions Castor calls.
 TRACKED_ACTIONS = ["callers", "symbol"]
 
-# JSON probes: query action -> extra flags. Each runs against PROBE_SYMBOL
-# in this repo.
+# JSON probes, run in this repo with the flags Castor passes (keep in sync
+# with server.py's _dekko_command and _dekko_caller_report): name -> (argv,
+# {part: where in the JSON sits the record whose keys are tracked}). Every
+# probe also tracks its top-level keys. PROBE_CALLER calls PROBE_SYMBOL,
+# so the trace has a path.
 PROBE_SYMBOL = "_agent_grep"
-JSON_PROBES = {
-    "callers": ["--sites"],
-    "symbol": [],
+PROBE_CALLER = "_agent_run_tool"
+PROBE_FILE = "server.py"
+_BUDGET = ["--no-regen", "--budget", "1200"]
+JSON_PROBES: dict[str, tuple[list[str], dict[str, tuple]]] = {
+    "callers": (
+        ["query", "callers", PROBE_SYMBOL, "--sites", "--json", *_BUDGET],
+        {"result": ("results", 0)},
+    ),
+    "symbol": (["query", "symbol", PROBE_SYMBOL, "--json", *_BUDGET], {}),
+    "outline": (
+        ["outline", PROBE_FILE, "--json", *_BUDGET],
+        {"files": ("files", 0), "symbols": ("files", 0, "symbols", 0)},
+    ),
+    "search": (
+        ["search", PROBE_SYMBOL, "--json", *_BUDGET],
+        {"hits": ("hits", 0)},
+    ),
+    "context": (
+        ["context", PROBE_SYMBOL, "--with-source", "--json", *_BUDGET],
+        {
+            "target": ("target",),
+            "imports": ("imports", 0),
+            "neighbors": ("neighbors", 0),
+        },
+    ),
+    "trace": (
+        ["trace", PROBE_CALLER, PROBE_SYMBOL, "--json", "--no-regen"],
+        {"path_node": ("paths", 0, 0)},
+    ),
 }
 
 _FLAG_RE = re.compile(r"--[A-Za-z][\w-]*")
@@ -142,49 +173,50 @@ def _parse_actions(help_text: str) -> list[str]:
     return []
 
 
-def _result_keys(payload: dict) -> list[str]:
-    """Return the keys of the first item of `results`, if it is a list."""
-    results = payload.get("results")
-    if isinstance(results, list) and results and isinstance(results[0], dict):
-        return sorted(results[0])
+def _keys_at(payload: object, where: tuple) -> list[str]:
+    """The keys of the object at `where` (keys and list indexes), or []."""
+    node = payload
+    for step in where:
+        if isinstance(node, dict) and step in node:
+            node = node[step]
+        elif isinstance(node, list) and isinstance(step, int) and node:
+            node = node[step] if step < len(node) else None
+        else:
+            return []
 
-    return []
+    return sorted(node) if isinstance(node, dict) else []
 
 
-def _probe_json(action: str, extra: list[str]) -> dict[str, list[str]]:
-    """Run one `query --json` probe and record its JSON keys.
+def _probe_json(
+    argv: list[str], parts: dict[str, tuple]
+) -> dict[str, list[str]]:
+    """Run one `--json` probe and record its JSON keys.
 
     Args:
-        action: The query action, e.g. "callers".
-        extra: Extra flags for this action.
+        argv: The dekko arguments, as Castor passes them.
+        parts: Part label -> where its record sits in the JSON.
 
     Returns:
-        The top-level keys and the first result item's keys.
+        The top-level keys under "top_level" and each part's keys.
 
     Raises:
         SystemExit: With code 2 if the output is not a JSON object.
     """
-    out = _run(
-        ["query", action, PROBE_SYMBOL, *extra, "--no-regen", "--json"],
-        f"dekko query {action} --json",
-    )
+    what = "dekko " + " ".join(argv)
+    out = _run(argv, what)
     try:
         payload = json.loads(out)
     except json.JSONDecodeError as exc:
-        print(
-            f"[Error] dekko query {action} --json is not JSON.",
-            file=sys.stderr,
-        )
+        print(f"[Error] {what} is not JSON.", file=sys.stderr)
         raise SystemExit(2) from exc
 
     if not isinstance(payload, dict):
-        print(
-            f"[Error] dekko query {action} --json is not an object.",
-            file=sys.stderr,
-        )
+        print(f"[Error] {what} is not an object.", file=sys.stderr)
         raise SystemExit(2)
 
-    return {"top_level": sorted(payload), "result": _result_keys(payload)}
+    keys = {"top_level": sorted(payload)}
+    keys.update({part: _keys_at(payload, at) for part, at in parts.items()})
+    return keys
 
 
 def _collect_live() -> dict:
@@ -217,8 +249,8 @@ def _collect_live() -> dict:
         "flags": {sub: _parse_flags(text) for sub, text in help_texts.items()},
         "actions": _parse_actions(help_texts["query"]),
         "json": {
-            name: _probe_json(name, extra)
-            for name, extra in JSON_PROBES.items()
+            name: _probe_json(argv, parts)
+            for name, (argv, parts) in JSON_PROBES.items()
         },
     }
 
@@ -264,11 +296,11 @@ def _diff(snapshot: dict, live: dict) -> list[str]:
     )
     for name, keys in view["json"].items():
         old = snapshot.get("json", {}).get(name, {})
-        for part in ("top_level", "result"):
+        for part in sorted(set(old) | set(keys)):
             issues += _diff_lists(
-                f"`query {name} --json` {part} key",
+                f"`{name} --json` {part} key",
                 old.get(part, []),
-                keys[part],
+                keys.get(part, []),
             )
 
     return issues

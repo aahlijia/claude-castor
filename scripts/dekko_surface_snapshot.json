@@ -7,7 +7,8 @@
     "context": [
       "--with-source",
       "--budget",
-      "--no-regen"
+      "--no-regen",
+      "--json"
     ],
     "map": [
       "--if-stale",
@@ -15,7 +16,8 @@
     ],
     "outline": [
       "--budget",
-      "--no-regen"
+      "--no-regen",
+      "--json"
     ],
     "query": [
       "--sites",
@@ -25,10 +27,12 @@
     ],
     "search": [
       "--budget",
-      "--no-regen"
+      "--no-regen",
+      "--json"
     ],
     "trace": [
-      "--no-regen"
+      "--no-regen",
+      "--json"
     ]
   },
   "json": {
@@ -49,8 +53,86 @@
         "target"
       ]
     },
+    "context": {
+      "imports": [
+        "name",
+        "source"
+      ],
+      "neighbors": [
+        "direction",
+        "doc",
+        "hop",
+        "id",
+        "kind",
+        "line",
+        "path",
+        "signature",
+        "sites"
+      ],
+      "target": [
+        "doc",
+        "id",
+        "kind",
+        "line",
+        "path",
+        "signature"
+      ],
+      "top_level": [
+        "file",
+        "file_symbols",
+        "imports",
+        "imports_dropped",
+        "label",
+        "meta",
+        "module_callers",
+        "neighbors",
+        "source",
+        "source_truncated",
+        "target",
+        "trimmed"
+      ]
+    },
+    "outline": {
+      "files": [
+        "complete",
+        "doc",
+        "error",
+        "full_tokens",
+        "language",
+        "outline_tokens_complete",
+        "path",
+        "symbols"
+      ],
+      "symbols": [
+        "doc",
+        "kind",
+        "line",
+        "signature"
+      ],
+      "top_level": [
+        "files",
+        "meta",
+        "target"
+      ]
+    },
+    "search": {
+      "hits": [
+        "doc",
+        "id",
+        "kind",
+        "line",
+        "path",
+        "qualname",
+        "score",
+        "signature"
+      ],
+      "top_level": [
+        "hits",
+        "meta",
+        "query"
+      ]
+    },
     "symbol": {
-      "result": [],
       "top_level": [
         "end_line",
         "fan_in",
@@ -62,6 +144,19 @@
         "notes",
         "path",
         "signature"
+      ]
+    },
+    "trace": {
+      "path_node": [
+        "id",
+        "line",
+        "path",
+        "signature"
+      ],
+      "top_level": [
+        "from",
+        "paths",
+        "to"
       ]
     }
   },
