@@ -15,6 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1852,6 +1853,28 @@ def test_dekko_off_without_binary(monkeypatch):
 def test_dekko_off_below_min_version(monkeypatch, fake_dekko):
     monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 0))
     assert server._dekko_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("os_name", "python", "dekko", "found"),
+    [
+        ("posix", "bin/python", "bin/dekko", True),
+        ("posix", "bin/python", "bin/dekko.exe", False),
+        ("nt", "Scripts/python.exe", "Scripts/dekko.exe", True),
+        ("nt", "python.exe", "Scripts/dekko.exe", True),
+        ("nt", "python.exe", "other/dekko.exe", False),
+    ],
+)
+def test_dekko_bin_layouts(
+    monkeypatch, tmp_path, os_name, python, dekko, found
+):
+    (tmp_path / dekko).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / dekko).write_text("")
+    monkeypatch.setattr(server.sys, "executable", str(tmp_path / python))
+    # Only _dekko_bin reads server.os here; pathlib keeps the real os.name.
+    monkeypatch.setattr(server, "os", SimpleNamespace(name=os_name))
+    expect = tmp_path / dekko if found else None
+    assert server._dekko_bin() == expect
 
 
 def test_dekko_run_reports_timeout(monkeypatch, tmp_path):

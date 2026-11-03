@@ -4923,9 +4923,16 @@ _dekko_version_cache: dict[str, tuple[int, ...] | None] = {}
 
 
 def _dekko_bin() -> Path | None:
-    """The dekko script beside this interpreter, or None if it is absent."""
-    path = Path(sys.executable).parent / "dekko"
-    return path if path.is_file() else None
+    """The dekko script beside this interpreter, or None if it is absent.
+
+    On Windows a venv puts dekko.exe beside python.exe and a base install
+    puts it in Scripts\\ beside python.exe, so both are tried.
+    """
+    folder = Path(sys.executable).parent
+    names = [folder / "dekko"]
+    if os.name == "nt":
+        names += [folder / "dekko.exe", folder / "Scripts" / "dekko.exe"]
+    return next((path for path in names if path.is_file()), None)
 
 
 def _dekko_version() -> tuple[int, ...] | None:
