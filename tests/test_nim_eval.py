@@ -86,3 +86,36 @@ def test_parse_config_reads_model_and_step_model():
         "model": "vendor/big",
         "step": "vendor/fast",
     }
+
+
+def test_plain_cases_score_by_keyword_only():
+    case = {
+        "name": "s",
+        "role": "summarize",
+        "expected": [
+            {"id": "cache", "must": True, "keywords": ["use_cache"]},
+            {"id": "jobs", "keywords": ["gemini_poll"]},
+        ],
+    }
+    result = nim_eval.score_plain(case, '{"key_points": ["Pass USE_CACHE"]}')
+    assert result["hit"] == ["cache"] and result["must_hit"] == ["cache"]
+    assert result["leads"] == 0 and result["known"] == 2
+
+
+def test_report_leaves_precision_out_for_plain_roles():
+    row = {
+        "config": "a",
+        "role": "explain",
+        "leads": 0,
+        "matched": 0,
+        "hit": ["x"],
+        "known": 1,
+        "must_hit": ["x"],
+        "musts": 1,
+        "quotes": [0, 0],
+        "seconds": 3.0,
+        "steps": None,
+        "failed": False,
+    }
+    line = nim_eval.summarize([row], "a")
+    assert "precision -" in line and "recall 1/1" in line

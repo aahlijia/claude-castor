@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/repo/retry.py", line 48, in <module>
+    print(send_with_retry(lambda: next(replies)))
+          ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/repo/retry.py", line 42, in send_with_retry
+    pause_before_retry(status, headers, attempt)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/repo/retry.py", line 30, in pause_before_retry
+    delay = backoff(attempt, retry_after)
+  File "/repo/retry.py", line 24, in backoff
+    return max(delay, retry_after)
+TypeError: '>' not supported between instances of 'NoneType' and 'float'
