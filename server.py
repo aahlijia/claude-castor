@@ -2902,15 +2902,19 @@ class _NimKeyState:
 _nim_lock = threading.Lock()
 _nim_records_lock = threading.Lock()  # usage and trace files
 _nim_slots: threading.BoundedSemaphore | None = None
+_nim_http: httpx.Client | None = None  # shared, so connections are reused
 _nim_key_states: dict[str | None, _NimKeyState] = {}
 _nim_rotation = 0  # advances per admitted request so keys alternate
 _nim_stats = {"requests": 0, "ok": 0, "rate_limited": 0, "errors": 0}
 
 
 def _nim_reset_state() -> None:
-    """Drop limiters, cooldowns, counters and caches (used by tests)."""
-    global _nim_slots, _nim_rotation
+    """Drop limiters, cooldowns, counters, caches and the HTTP client."""
+    global _nim_slots, _nim_rotation, _nim_http
     with _nim_lock:
+        if _nim_http is not None:
+            _nim_http.close()
+        _nim_http = None
         _nim_slots = None
         _nim_key_states.clear()
         _nim_rotation = 0
@@ -2925,11 +2929,34 @@ def _nim_gate() -> threading.BoundedSemaphore:
     global _nim_slots
     with _nim_lock:
         if _nim_slots is None:
-            slots = int(
-                _nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY)
-            )
-            _nim_slots = threading.BoundedSemaphore(slots)
+            _nim_slots = threading.BoundedSemaphore(_nim_gate_size())
         return _nim_slots
+
+
+def _nim_gate_size() -> int:
+    """Simultaneous in-flight NIM requests (CASTOR_NIM_CONCURRENCY)."""
+    return int(_nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY))
+
+
+def _nim_client() -> httpx.Client:
+    """The shared HTTP client (lazy init), so requests reuse connections.
+
+    Redirects are never followed and there is no default timeout: each
+    request passes its own. httpx.Client is thread-safe.
+    """
+    global _nim_http
+    with _nim_lock:
+        if _nim_http is None:
+            slots = _nim_gate_size()
+            _nim_http = httpx.Client(
+                follow_redirects=False,
+                timeout=None,
+                limits=httpx.Limits(
+                    max_connections=slots + 2,
+                    max_keepalive_connections=slots,
+                ),
+            )
+        return _nim_http
 
 
 def _nim_key_state(key: str | None) -> _NimKeyState:
@@ -3176,7 +3203,7 @@ def _nim_send_once(
         max(base, read_timeout or 0), connect=NIM_CONNECT_TIMEOUT
     )
     try:
-        response = httpx.request(
+        response = _nim_client().request(
             method, url, headers=headers, json=payload, timeout=timeout
         )
     except httpx.TimeoutException:
