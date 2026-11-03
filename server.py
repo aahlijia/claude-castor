@@ -8212,13 +8212,15 @@ def nim_edit(
     caller, a constant and its mentions in the docs, table rows, import
     fixes. The model reads the repo with the nim_agent tools and answers
     with exact-text edit blocks. Castor checks each block (inside cwd and
-    `files`, old text found exactly once, no overlaps) and the uses of
-    each `must_cover` symbol: its call sites and definition must be edited
-    wherever they are, and other grep hits (references, strings, doc
-    mentions) wherever `files` allows (all of cwd without it). References
-    outside `files` do not refuse; the OK result lists them after the
-    `checked:` line so you can see what the patch left alone. A use
-    counts as edited only when a block changes its statement. The
+    `files`, old text found exactly once as whole lines, no overlaps) and
+    the uses of each `must_cover` symbol: its call sites and definition
+    must be edited wherever they are, and other grep hits (references,
+    strings, doc mentions) wherever `files` allows (all of cwd without
+    it). References outside `files` do not refuse; the OK result lists
+    them after the `checked:` line so you can see what the patch left
+    alone. A call site or definition counts as edited only when a block
+    changes its statement; any other mention only when its own line
+    changes. The
     reference search skips engine assets (.prefab, .meta, .unity and the
     rest of NIM_AGENT_SKIP_EXTENSIONS), files over 1 MB and binary or
     non-UTF-8 files, so mentions there are not required. Castor gives the
