@@ -3394,6 +3394,44 @@ def test_statement_end_balances_brackets_outside_strings():
     assert server._edit_statement_end(["f("] * 40, 1) == 20
 
 
+_PROSE = (
+    "Use `old_name` (Castor's helper) to build the map.\n"
+    "It runs once per root.\n"
+    "See `old_name` again here.\n"
+    "More prose.\n"
+)
+
+
+def _prose_edit(old, new):
+    """The FileEdit for one block on _PROSE, keyed for _edit_covered."""
+    start = _PROSE.index(old)
+    touched = server.LineChanges()
+    server._edit_line_changes(_PROSE, start, start + len(old), new, touched)
+    return {"d.md": server.FileEdit(None, "d.md", _PROSE, "", [], touched)}
+
+
+def test_reference_is_covered_only_by_an_edit_to_its_own_line():
+    other = _prose_edit("See `old_name` again", "See `new_name` again")
+    assert not server._edit_covered(other, "d.md", 1, "reference")
+    own = _prose_edit("Use `old_name`", "Use `new_name`")
+    assert server._edit_covered(own, "d.md", 1, "reference")
+
+
+def test_reference_line_is_not_covered_by_an_insertion_after_it():
+    edits = _prose_edit(
+        "It runs once per root.", "Inserted.\nIt runs once per root."
+    )
+    assert not server._edit_covered(edits, "d.md", 1, "reference")
+
+
+def test_apostrophe_inside_a_word_is_not_a_quote():
+    lines = _PROSE.split("\n")
+    assert server._edit_statement_end(lines, 1) == 1
+    code = ["x = old_name(  # don't", "    1,", ")", "y = 2"]
+    assert server._edit_statement_end(code, 1) == 3
+    assert server._edit_bracket_balance("f('(')") == 0
+
+
 def test_nim_edit_must_cover_dekko_failure_is_an_error(stub, repo, fake_dekko):
     _cover_repo(repo)
     boom = (False, "[dekko error: boom]")

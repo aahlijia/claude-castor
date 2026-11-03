@@ -7751,17 +7751,21 @@ def _edit_bracket_balance(line: str) -> int:
     """Openers minus closers in `line`, skipping quoted strings (roughly).
 
     A quote opens a string that ends at the same quote or the line end,
-    so a stray apostrophe hides at most the rest of its own line.
+    so a stray apostrophe hides at most the rest of its own line. An
+    apostrophe between two word characters (don't, Castor's) is not a
+    quote.
     """
     depth = 0
     quote = ""
     escaped = False
-    for char in line:
+    for at, char in enumerate(line):
         if escaped:
             escaped = False
         elif quote:
             escaped = char == "\\"
             quote = "" if char == quote else quote
+        elif char == "'" and _edit_in_word(line, at):
+            continue
         elif char in "\"'":
             quote = char
         elif char in _EDIT_OPENERS:
@@ -7769,6 +7773,15 @@ def _edit_bracket_balance(line: str) -> int:
         elif char in _EDIT_CLOSERS:
             depth -= 1
     return depth
+
+
+def _edit_in_word(line: str, at: int) -> bool:
+    """True when line[at] has a word character on both sides."""
+    return (
+        0 < at < len(line) - 1
+        and (line[at - 1].isalnum() or line[at - 1] == "_")
+        and (line[at + 1].isalnum() or line[at + 1] == "_")
+    )
 
 
 def _edit_statement_end(lines: list[str], line: int) -> int:
@@ -7787,19 +7800,26 @@ def _edit_statement_end(lines: list[str], line: int) -> int:
     return max(line, last)
 
 
-def _edit_covered(edits: dict[str, FileEdit], path: str, line: int) -> bool:
-    """True when some block in `path` changes the statement at `line`.
+def _edit_covered(
+    edits: dict[str, FileEdit], path: str, line: int, kind: str
+) -> bool:
+    """True when some block in `path` changes the use at `line`.
 
-    The statement runs from `line` to its bracket-balanced end E. A block
-    covers it by replacing or deleting a line in line..E, or by inserting
-    lines between two of them.
+    A grep-only reference (`kind` "reference") is covered only when its
+    own line is replaced or deleted. A call site or definition covers the
+    statement from `line` to its bracket-balanced end E: a block covers it
+    by replacing or deleting a line in line..E, or by inserting lines
+    between two of them.
     """
     edit = edits.get(path)
     if edit is None:
         return False
 
-    end = _edit_statement_end(edit.original.split("\n"), line)
     touched = edit.touched
+    if kind == "reference":
+        return line in touched.changed
+
+    end = _edit_statement_end(edit.original.split("\n"), line)
     return any(n in touched.changed for n in range(line, end + 1)) or any(
         line < k <= end for k in touched.inserts
     )
@@ -7862,7 +7882,7 @@ def _edit_uncovered(
     outside = []
     seen: set[tuple[str, int]] = set()
     for kind, (path, line), text in _edit_uses(report):
-        if (path, line) in seen or _edit_covered(edits, path, line):
+        if (path, line) in seen or _edit_covered(edits, path, line, kind):
             continue
         seen.add((path, line))
         if kind == "reference" and not _edit_path_in_scope(root, scope, path):
