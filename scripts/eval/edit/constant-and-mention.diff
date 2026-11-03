@@ -1,0 +1,39 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0db3a3d..e51a00d 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -194,7 +194,7 @@ counts; directories past 150 files), grep takes `context` lines and reports
+ match totals past its cap, and the model may batch up to 4 calls per step.
+ 
+ Resilience lives in `_nim_request`: a client-side sliding-window limiter
+-(`CASTOR_NIM_RPM`, default 40/60s, tracked per key) and a concurrency gate
++(`CASTOR_NIM_RPM`, default 35/60s, tracked per key) and a concurrency gate
+ (`_nim_gate_size`: 4 per key, at most 12, or `CASTOR_NIM_CONCURRENCY`), retry
+ with exponential backoff + jitter on 429/5xx/network (one timeout retry),
+ `Retry-After` honored, a per-key cooldown after a 429 (other keys keep going), and a fail-fast "try again in Ns" error once the
+diff --git a/README.md b/README.md
+index 7f8c14b..e0149d1 100644
+--- a/README.md
++++ b/README.md
+@@ -375,7 +375,7 @@ All optional, set as environment variables on the MCP server:
+ | `CASTOR_NIM_AGENT_ANSWER_TOKENS` | `16384` | Token cap for the agent's final answer, which reasons over everything it read |
+ | `CASTOR_NIM_TRACES` | `1` | `0` turns off the local usage log and agent traces under `~/.cache/claude-castor/` (kept 30 days) |
+ | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
+-| `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
++| `CASTOR_NIM_RPM` | `35` | Client-side requests per minute, per key |
+ | `CASTOR_NIM_CONCURRENCY` | `4` per key, at most `12` | Simultaneous in-flight requests; background jobs wait up to 300 s for a slot, foreground calls 30 s |
+ | `CASTOR_NIM_MAX_INPUT_CHARS` | `300000` | Prompt size budget (~75k tokens); larger prompts are rejected up front |
+ | `CASTOR_NIM_MAX_TOKENS` | `4096` | Completion cap per request |
+diff --git a/server.py b/server.py
+index 2077b58..a2cb940 100644
+--- a/server.py
++++ b/server.py
+@@ -2708,7 +2708,7 @@ NIM_KEYS_URL = "https://build.nvidia.com/settings/api-keys"
+ 
+ # Tunables. Free-tier limits are set by NVIDIA and change, so each default
+ # is a conservative guess that the CASTOR_NIM_* env var overrides.
+-NIM_DEFAULT_RPM = 40  # requests per 60s window, enforced client-side
++NIM_DEFAULT_RPM = 35  # requests per 60s window, enforced client-side
+ NIM_DEFAULT_CONCURRENCY_PER_KEY = 4  # in-flight requests, times the keys
+ NIM_MAX_CONCURRENCY = 12
+ NIM_DEFAULT_MAX_INPUT_CHARS = 300_000  # ~75k tokens of prompt
