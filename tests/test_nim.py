@@ -1887,3 +1887,72 @@ def test_ensure_map_ttl_counts_from_build_end(monkeypatch, tmp_path):
     clock[0] += 1
     assert server._dekko_ensure_map(tmp_path) is False
     assert len(calls) == 1
+
+
+# --- dekko agent tools ----------------------------------------------------
+
+
+def test_agent_offers_dekko_tools_when_map_builds(stub, repo, fake_dekko):
+    fake_dekko.queue += [(True, "")]
+    stub.queue.append((200, {}, _completion("src/a.py:2")))
+    _tool(server.nim_agent)("where?", str(repo))
+    names = [t["function"]["name"] for t in stub.posts()[0][3]["tools"]]
+    assert names == [
+        "grep",
+        "read_range",
+        "list_dir",
+        "callers",
+        "symbol",
+        "outline",
+        "context",
+        "search",
+        "trace",
+    ]
+    assert "Use grep for docs" in stub.posts()[0][3]["messages"][0]["content"]
+
+
+def test_callers_merges_grep_only_sites(repo, fake_dekko):
+    (repo / "src" / "b.py").write_text("from a import f\nf()\n# f() here\n")
+    fake_dekko.queue += [
+        (
+            True,
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "path": "src/b.py",
+                            "line": 1,
+                            "id": "src/b.py::<module>",
+                            "sites": [2],
+                        }
+                    ]
+                }
+            ),
+        )
+    ]
+    text = server._dekko_tool(repo, "callers", {"symbol": "f"})
+    assert "src/b.py:2 in <module>" in text
+    assert "grep-only" in text and "src/b.py:3:# f() here" in text
+    assert "src/b.py:2:f()" not in text
+
+
+def test_dekko_tool_drops_denied_paths(repo, fake_dekko):
+    fake_dekko.queue += [(True, ".env:1 SECRET\nsrc/a.py:2 TARGET\n")]
+    text = server._dekko_tool(repo, "symbol", {"name": "TARGET"})
+    assert ".env" not in text and "src/a.py:2" in text
+
+
+def test_agent_run_without_map_uses_grep_tools_only(stub, repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    stub.queue.append((200, {}, _completion("nothing at src/a.py:2")))
+    _tool(server.nim_agent)("where is TARGET?", str(repo))
+    names = [t["function"]["name"] for t in stub.posts()[0][3]["tools"]]
+    assert names == ["grep", "read_range", "list_dir"]
+
+
+def test_dekko_tool_failure_is_a_tool_error(repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: exit 5]")]
+    assert (
+        server._dekko_tool(repo, "outline", {"path": "src/a.py"})
+        == "[tool error: dekko error: exit 5]"
+    )
