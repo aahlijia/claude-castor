@@ -7178,6 +7178,8 @@ def _edit_locate(
     """Match one block in `text`: ((start, end, new), None) or (None, error).
 
     `taken` holds (start, end, index) of the file's earlier accepted blocks.
+    The match must be whole lines: it starts a line and ends right before
+    a line terminator or at the end of the file.
     """
     crlf = "\r\n" in text
     old = block.old.replace("\n", "\r\n") if crlf else block.old
@@ -7197,6 +7199,9 @@ def _edit_locate(
 
     start = hits[0]
     end = start + len(old)
+    if not _edit_whole_lines(text, start, end):
+        return None, "old text must be whole lines (copy each line in full)"
+
     if block.deletes:
         start, end = _edit_delete_range(text, start, end)
     for other_start, other_end, other_index in taken:
@@ -7239,22 +7244,22 @@ def _edit_bare_lines(text: str) -> list[str]:
     return [line.removesuffix("\r") for line in text.split("\n")]
 
 
-def _edit_delete_range(text: str, start: int, end: int) -> tuple[int, int]:
-    """Widen a line-aligned delete of text[start:end] to whole lines.
-
-    Line-aligned means it starts a line and ends right before a line
-    terminator or at the end of the file. It then also takes the LF or
-    CRLF after it, or at the end of a file with no final terminator the
-    one before it, so no blank line is left. Any other range is returned
-    as is (a plain substring delete).
-    """
+def _edit_whole_lines(text: str, start: int, end: int) -> bool:
+    """True when text[start:end] starts a line and ends one (or the file)."""
     starts_line = start == 0 or text[start - 1] == "\n"
+    ends_line = end == len(text) or text.startswith(("\n", "\r\n"), end)
+    return starts_line and ends_line
+
+
+def _edit_delete_range(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a whole-line delete of text[start:end] to take a terminator.
+
+    It takes the LF or CRLF after it, or at the end of a file with no
+    final terminator the one before it, so no blank line is left.
+    """
     after = (
         2 if text.startswith("\r\n", end) else int(text[end : end + 1] == "\n")
     )
-    if not starts_line or (after == 0 and end != len(text)):
-        return start, end
-
     if after:
         return start, end + after
 
@@ -7595,7 +7600,8 @@ exact existing text
 >>>NEW
 replacement text
 >>>END
-with every marker on its own line. Copy the old text exactly from a \
+with every marker on its own line. Copy the old text exactly, as whole \
+lines, from a \
 read_range or grep result: the "N: " before a read_range line and the \
 "path:N:" before a grep line are not part of the text. Include enough \
 surrounding lines that the old text occurs exactly once in its file, and \

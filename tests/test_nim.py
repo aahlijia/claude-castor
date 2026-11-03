@@ -2575,6 +2575,48 @@ def test_apply_rejects_out_of_scope_denied_and_escaping_paths(repo):
     assert errors == [] and len(changes) == 1
 
 
+_WHOLE_LINES = "old text must be whole lines (copy each line in full)"
+
+
+@pytest.mark.parametrize(
+    "old", ["TARGET", "= 1", "TARGET = 1\nthr", "ne\nTARGET = 1"]
+)
+def test_apply_refuses_old_text_that_is_not_whole_lines(repo, old):
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", old, "x")], repo, None
+    )
+    assert changes == {} and errors == [f"block 1: {_WHOLE_LINES}"]
+
+
+@pytest.mark.parametrize(
+    ("data", "old", "new", "expect"),
+    [
+        (b"a\nlast", "last", "LAST", b"a\nLAST"),
+        (b"a\r\nb\r\nc\r\n", "b", "B", b"a\r\nB\r\nc\r\n"),
+        (b"a\r\nb\r\nc", "b\nc", "C", b"a\r\nC"),
+    ],
+)
+def test_apply_accepts_whole_lines(repo, data, old, new, expect):
+    (repo / "src" / "w.txt").write_bytes(data)
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/w.txt", old, new)], repo, None
+    )
+    assert errors == []
+    assert changes[repo / "src" / "w.txt"].new.encode() == expect
+
+
+def test_nim_edit_repairs_a_mid_line_old_text(stub, repo):
+    _git_init(repo)
+    mid = _edit_answer(("src/a.py", "TARGET = ", "TARGET = 2\n\nTARGET = "))
+    _answers(stub, mid, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: yes]"
+    )
+    repair = stub.posts()[1][3]["messages"][1]["content"]
+    assert f"block 1: {_WHOLE_LINES}" in repair
+
+
 def test_apply_refuses_an_edit_inside_dekko_folder(repo):
     (repo / ".dekko").mkdir()
     (repo / ".dekko" / "notes.json").write_text('{"TARGET": 1}\n')
@@ -2588,7 +2630,7 @@ def test_apply_rejects_overlapping_blocks_even_when_paths_differ_in_form(repo):
     changes, errors = server._edit_apply_in_memory(
         [
             _blk(2, "./src/a.py", "TARGET = 1", "TARGET = 2"),
-            _blk(4, "src/a.py", "TARGET", "OTHER"),
+            _blk(4, "src/a.py", "TARGET = 1\nthree", "OTHER"),
         ],
         repo,
         None,
@@ -2666,15 +2708,11 @@ def test_apply_span_excludes_leading_and_trailing_terminators(repo):
         assert errors == []
         return changes[repo / "src" / name].spans
 
-    assert span("s1.py", b"one\nTARGET = 1\nthree\n", "\nTARGET") == [(2, 2)]
-    assert span("s2.py", b"one\r\nTARGET = 1\r\nthree\r\n", "\nTARGET") == [
-        (2, 2)
-    ]
-    assert span("s3.py", b"one\nTARGET = 1\nthree\n", "TARGET = 1\n") == [
-        (2, 2)
-    ]
-    assert span("s4.py", b"one\ntwo\nthree\n", "two\nthree\n") == [(2, 3)]
-    assert span("s6.py", b"one\ntwo", "\n") == [(1, 1)]
+    # Whole-line old text may start or end with an empty line's terminator.
+    assert span("s1.py", b"one\n\nTARGET\n", "\nTARGET") == [(3, 3)]
+    assert span("s2.py", b"one\r\n\r\nTARGET\r\n", "\nTARGET") == [(3, 3)]
+    assert span("s3.py", b"one\nTARGET\n\nx\n", "TARGET\n") == [(2, 2)]
+    assert span("s4.py", b"one\ntwo\nthree\n", "two\nthree") == [(2, 3)]
 
 
 def test_apply_rejects_identical_old_and_new(repo):
@@ -2749,7 +2787,6 @@ def _after_delete(repo, data, old):
         (b"a\r\nb\r\nc\r\n", "b", b"a\r\nc\r\n"),
         (b"a\r\nb", "b", b"a"),
         (b"only\n", "only", b""),
-        (b"keep me\n", "me", b"keep \n"),  # not line-aligned: substring
     ],
 )
 def test_delete_block_takes_the_whole_line(repo, data, old, expect):
@@ -2772,18 +2809,26 @@ def test_deleting_a_last_line_marks_only_that_line(repo, eol):
     )
 
 
-def test_delete_span_and_overlap_use_the_extended_range(repo):
+def test_delete_span_and_adjacent_deletes_use_the_extended_range(repo):
     (repo / "src" / "d.md").write_text("a\nb\nc\n")
     changes, errors = server._edit_apply_in_memory(
         [_delete(1, "src/d.md", "b")], repo, None
     )
     assert errors == [] and changes[repo / "src" / "d.md"].spans == [(2, 2)]
-    _, errors = server._edit_apply_in_memory(
-        [_delete(1, "src/d.md", "b"), _blk(2, "src/d.md", "\nc", "\nC")],
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "b"), _delete(2, "src/d.md", "c")],
         repo,
         None,
     )
-    assert errors == ["block 2: overlaps block 1 in src/d.md"]
+    assert errors == [] and changes[repo / "src" / "d.md"].new == "a\n"
+
+
+def test_a_delete_that_is_not_whole_lines_is_refused(repo):
+    (repo / "src" / "d.md").write_text("keep me\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "me")], repo, None
+    )
+    assert changes == {} and errors == [f"block 1: {_WHOLE_LINES}"]
 
 
 def test_zero_line_new_deletes_and_one_empty_line_blanks(repo):
@@ -3251,7 +3296,11 @@ def test_nim_edit_must_cover_flags_an_unedited_site(stub, repo, fake_dekko):
     fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
     answer = _edit_answer(
         ("src/lib.py", "def old_name():", "def new_name():"),
-        ("src/use.py", "old_name() + 1", "new_name() + 1"),
+        (
+            "src/use.py",
+            "    return old_name() + 1",
+            "    return new_name() + 1",
+        ),
     )
     _answers(stub, answer, answer)
     out = _tool(server.nim_edit)(
@@ -3271,8 +3320,16 @@ def test_nim_edit_must_cover_flags_an_unedited_definition(
     _cover_repo(repo)
     fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
     answer = _edit_answer(
-        ("src/use.py", "old_name() + 1", "new_name() + 1"),
-        ("src/use.py", "old_name() + 2", "new_name() + 2"),
+        (
+            "src/use.py",
+            "    return old_name() + 1",
+            "    return new_name() + 1",
+        ),
+        (
+            "src/use.py",
+            "    return old_name() + 2",
+            "    return new_name() + 2",
+        ),
     )
     _answers(stub, answer, answer)
     out = _tool(server.nim_edit)(
@@ -3291,8 +3348,16 @@ def test_nim_edit_must_cover_passes_when_every_site_is_edited(
     fake_dekko.queue += [(True, ""), *_cover_dekko()]
     answer = _edit_answer(
         ("src/lib.py", "def old_name():", "def new_name():"),
-        ("src/use.py", "old_name() + 1", "new_name() + 1"),
-        ("src/use.py", "old_name() + 2", "new_name() + 2"),
+        (
+            "src/use.py",
+            "    return old_name() + 1",
+            "    return new_name() + 1",
+        ),
+        (
+            "src/use.py",
+            "    return old_name() + 2",
+            "    return new_name() + 2",
+        ),
     )
     _answers(stub, answer)
     out = _tool(server.nim_edit)(
@@ -3367,7 +3432,9 @@ def test_coverage_counts_an_argument_added_inside_a_call(repo, fake_dekko):
 def test_coverage_counts_a_single_line_rename(repo, fake_dekko):
     (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
     (repo / "src" / "w.py").write_text("def go():\n    return old_name()\n")
-    rename = _blk(2, "src/w.py", "old_name()", "new_name()")
+    rename = _blk(
+        2, "src/w.py", "    return old_name()", "    return new_name()"
+    )
     errors = _coverage_errors(
         repo,
         fake_dekko,
@@ -3386,7 +3453,12 @@ def test_coverage_counts_a_later_line_of_a_signature(repo, fake_dekko):
         "def go():\n    return old_name(1, 2)\n"
     )
     signature = _blk(1, "src/lib.py", "    b,\n):", "    b: int,\n):")
-    call = _blk(2, "src/w.py", "old_name(1, 2)", "old_name(1, b=2)")
+    call = _blk(
+        2,
+        "src/w.py",
+        "    return old_name(1, 2)",
+        "    return old_name(1, b=2)",
+    )
     errors = _coverage_errors(
         repo,
         fake_dekko,
@@ -3573,8 +3645,8 @@ def test_nim_edit_start_reports_bad_input_at_once(stub, repo):
 
 _FULL_COVER = _edit_answer(
     ("src/lib.py", "def old_name():", "def new_name():"),
-    ("src/use.py", "old_name() + 1", "new_name() + 1"),
-    ("src/use.py", "old_name() + 2", "new_name() + 2"),
+    ("src/use.py", "    return old_name() + 1", "    return new_name() + 1"),
+    ("src/use.py", "    return old_name() + 2", "    return new_name() + 2"),
 )
 
 
