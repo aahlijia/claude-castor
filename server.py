@@ -2935,6 +2935,8 @@ def _nim_reset_state() -> None:
             _nim_stats[name] = 0
     with _agent_index_lock:
         _agent_index_cache.clear()
+    with _dekko_map_lock:
+        _dekko_map_cache.clear()
     _dekko_version_cache.clear()
 
 
@@ -4953,6 +4955,32 @@ def _dekko_run(
         detail = (result.stderr or result.stdout).strip()[:300]
         return False, f"[dekko error: exit {result.returncode}: {detail}]"
     return True, result.stdout
+
+
+_dekko_map_lock = threading.Lock()
+_dekko_map_cache: dict[Path, tuple[float, bool]] = {}
+
+
+def _dekko_ensure_map(root: Path) -> bool:
+    """True when a usable dekko map exists for `root` after this call.
+
+    Runs `dekko map --if-stale --quiet` at most once per NIM_DEKKO_MAP_TTL
+    seconds per root; a failed build is cached too, so a broken repo is
+    not retried on every call. False, running nothing, when dekko is off.
+    """
+    if not _dekko_enabled():
+        return False
+    now = time.monotonic()
+    with _dekko_map_lock:
+        hit = _dekko_map_cache.get(root)
+    if hit is not None and now - hit[0] < NIM_DEKKO_MAP_TTL:
+        return hit[1]
+    ok, _ = _dekko_run(
+        root, ["map", "--if-stale", "--quiet"], timeout=NIM_DEKKO_MAP_TIMEOUT
+    )
+    with _dekko_map_lock:
+        _dekko_map_cache[root] = (now, ok)
+    return ok
 
 
 def _agent_parse_args(call: dict) -> dict | None:
