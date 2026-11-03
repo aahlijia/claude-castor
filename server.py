@@ -7405,24 +7405,32 @@ def _edit_repo_prefix(root: Path, top: Path) -> str | None:
 
 
 def _edit_apply_check(diff: str, top: Path) -> tuple[bool, str]:
-    """Run `git apply --check -v` at the repo top level."""
+    """Run `git apply --check -v` at the repo top level.
+
+    The diff goes to a temp file that is closed before git reads it
+    (Windows cannot open a file another handle holds) and removed after.
+    """
+    name = ""
     try:
-        with tempfile.NamedTemporaryFile(suffix=".diff") as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".diff", delete=False) as tmp:
+            name = tmp.name
             tmp.write(diff.encode("utf-8"))
-            tmp.flush()
-            done = subprocess.run(
-                ["git", "apply", "--check", "-v", tmp.name],
-                cwd=str(top),
-                env=_edit_git_env(),
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                timeout=30,
-            )
+        done = subprocess.run(
+            ["git", "apply", "--check", "-v", name],
+            cwd=str(top),
+            env=_edit_git_env(),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
     except subprocess.TimeoutExpired:
         return False, "git apply --check timed out"
     except OSError as exc:
         return False, f"git apply --check failed: {exc}"
+    finally:
+        if name:
+            Path(name).unlink(missing_ok=True)
     if done.returncode != 0:
         return False, done.stderr.strip()
     if "Skipped patch" in done.stderr:

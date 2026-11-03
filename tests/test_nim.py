@@ -2782,6 +2782,25 @@ def test_git_check_reports_a_failing_patch(tmp_path):
     assert ok is False and err
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_git_check_closes_and_removes_its_temp_patch(
+    tmp_path, monkeypatch, fail
+):
+    seen = {}
+
+    def run(args, **kwargs):
+        path = Path(args[-1])
+        seen["path"], seen["text"] = path, path.read_text()
+        if fail:
+            raise subprocess.TimeoutExpired(args, 30)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    ok, _ = server._edit_apply_check("the diff\n", tmp_path)
+    assert ok is not fail
+    assert seen["text"] == "the diff\n" and not seen["path"].exists()
+
+
 def test_git_check_outside_a_repo_returns_none(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
