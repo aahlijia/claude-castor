@@ -7016,10 +7016,23 @@ def _parse_edit_blocks(answer: str) -> tuple[list[EditBlock], list[str]]:
 
 
 @dataclass
+class LineChanges:
+    """The original lines one file's blocks really change.
+
+    `changed` holds 1-based original lines replaced or deleted; `inserts`
+    holds each k where new lines go in before original line k.
+    """
+
+    changed: set[int] = field(default_factory=set)
+    inserts: set[int] = field(default_factory=set)
+
+
+@dataclass
 class FileEdit:
     """One file's edit: original text, new text and the replaced line ranges.
 
     `spans` are 1-based inclusive line ranges in the original, one per block.
+    `touched` is what the blocks change inside those spans, line by line.
     """
 
     path: Path
@@ -7027,6 +7040,7 @@ class FileEdit:
     original: str
     new: str
     spans: list[tuple[int, int]]
+    touched: LineChanges = field(default_factory=LineChanges)
 
 
 _EDIT_PATH_ERRORS = {
@@ -7160,6 +7174,32 @@ def _edit_locate(
     return (start, end, new), None
 
 
+def _edit_line_changes(
+    text: str, start: int, end: int, new: str, into: LineChanges
+) -> None:
+    """Add to `into` the original lines that replacing text[start:end]
+    with `new` changes.
+
+    The block is widened to whole lines on both sides, then the old and
+    new lines are diffed, so a line inside the block that comes out the
+    same is not counted as changed.
+    """
+    head = text.rfind("\n", 0, start) + 1
+    tail = text.find("\n", end)
+    tail = len(text) if tail == -1 else tail
+    old_lines = text[head:tail].split("\n")
+    new_lines = (text[head:start] + new + text[end:tail]).split("\n")
+    first = text.count("\n", 0, head) + 1
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, False)
+    for tag, i1, i2, _, _ in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if i1 == i2:
+            into.inserts.add(first + i1)
+        else:
+            into.changed.update(range(first + i1, first + i2))
+
+
 def _edit_splice(text: str, parts: list[tuple[int, int, str]]) -> str:
     """Apply (start, end, new) replacements to `text` by offset in one pass."""
     out: list[str] = []
@@ -7230,17 +7270,32 @@ def _edit_apply_in_memory(
         )
 
     changes = {
-        path: FileEdit(
-            path,
-            path.relative_to(root).as_posix(),
-            texts[path],
-            _edit_splice(texts[path], parts),
-            spans[path],
-        )
+        path: _edit_file_edit(path, root, texts[path], parts, spans[path])
         for path, parts in placed.items()
         if path not in failed
     }
     return changes, [message for _, message in sorted(errors)]
+
+
+def _edit_file_edit(
+    path: Path,
+    root: Path,
+    text: str,
+    parts: list[tuple[int, int, str]],
+    spans: list[tuple[int, int]],
+) -> FileEdit:
+    """The FileEdit for one file's accepted blocks."""
+    touched = LineChanges()
+    for start, end, new in parts:
+        _edit_line_changes(text, start, end, new, touched)
+    return FileEdit(
+        path,
+        path.relative_to(root).as_posix(),
+        text,
+        _edit_splice(text, parts),
+        spans,
+        touched,
+    )
 
 
 def _edit_quote_path(path: str) -> str:
@@ -7624,11 +7679,67 @@ def _edit_explore(
     )
 
 
-def _edit_covered(
-    spans: dict[str, list[tuple[int, int]]], path: str, line: int
-) -> bool:
-    """True when `line` of `path` lies inside one of its edited spans."""
-    return any(start <= line <= end for start, end in spans.get(path, []))
+NIM_EDIT_STATEMENT_LINES = 20  # a statement is followed at most this far
+_EDIT_OPENERS = "([{"
+_EDIT_CLOSERS = ")]}"
+
+
+def _edit_bracket_balance(line: str) -> int:
+    """Openers minus closers in `line`, skipping quoted strings (roughly).
+
+    A quote opens a string that ends at the same quote or the line end,
+    so a stray apostrophe hides at most the rest of its own line.
+    """
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in line:
+        if escaped:
+            escaped = False
+        elif quote:
+            escaped = char == "\\"
+            quote = "" if char == quote else quote
+        elif char in "\"'":
+            quote = char
+        elif char in _EDIT_OPENERS:
+            depth += 1
+        elif char in _EDIT_CLOSERS:
+            depth -= 1
+    return depth
+
+
+def _edit_statement_end(lines: list[str], line: int) -> int:
+    """The last line of the statement that starts at 1-based `line`.
+
+    Found by bracket balance from `line`, capped at
+    NIM_EDIT_STATEMENT_LINES lines and at the end of the file.
+    """
+    last = min(len(lines), line + NIM_EDIT_STATEMENT_LINES - 1)
+    depth = 0
+    for number in range(line, last + 1):
+        depth += _edit_bracket_balance(lines[number - 1])
+        if depth <= 0:
+            return number
+
+    return max(line, last)
+
+
+def _edit_covered(edits: dict[str, FileEdit], path: str, line: int) -> bool:
+    """True when some block in `path` changes the statement at `line`.
+
+    The statement runs from `line` to its bracket-balanced end E. A block
+    covers it by replacing or deleting a line in line..E, or by inserting
+    lines between two of them.
+    """
+    edit = edits.get(path)
+    if edit is None:
+        return False
+
+    end = _edit_statement_end(edit.original.split("\n"), line)
+    touched = edit.touched
+    return any(n in touched.changed for n in range(line, end + 1)) or any(
+        line < k <= end for k in touched.inserts
+    )
 
 
 def _edit_report_problem(
@@ -7674,7 +7785,7 @@ _EditUse = tuple[str, int, str]
 def _edit_uncovered(
     report: _CallerReport,
     symbol: str,
-    spans: dict[str, list[tuple[int, int]]],
+    edits: dict[str, FileEdit],
     root: Path,
     scope: list[str] | None,
 ) -> tuple[list[str], list[_EditUse]]:
@@ -7688,7 +7799,7 @@ def _edit_uncovered(
     outside = []
     seen: set[tuple[str, int]] = set()
     for kind, (path, line), text in _edit_uses(report):
-        if (path, line) in seen or _edit_covered(spans, path, line):
+        if (path, line) in seen or _edit_covered(edits, path, line):
             continue
         seen.add((path, line))
         if kind == "reference" and not _edit_path_in_scope(root, scope, path):
@@ -7702,7 +7813,7 @@ def _edit_uncovered(
 def _edit_symbol_coverage(
     root: Path,
     symbol: str,
-    spans: dict[str, list[tuple[int, int]]],
+    edits: dict[str, FileEdit],
     scope: list[str] | None,
 ) -> tuple[list[str], list[_EditUse]]:
     """(errors, references outside scope) for the uses of `symbol`."""
@@ -7711,7 +7822,7 @@ def _edit_symbol_coverage(
     if problem is not None or report is None:
         return [problem or f"must_cover: no report for {symbol}"], []
 
-    return _edit_uncovered(report, symbol, spans, root, scope)
+    return _edit_uncovered(report, symbol, edits, root, scope)
 
 
 def _edit_check_coverage(
@@ -7720,7 +7831,7 @@ def _edit_check_coverage(
     must_cover: list[str],
     scope: list[str] | None = None,
 ) -> tuple[list[str], list[_EditUse]]:
-    """Every use of each symbol must lie inside an edited span.
+    """Every use of each symbol must be changed by some block.
 
     Uses are dekko's call sites, the definition, and grep hits dekko does
     not list (a reference such as `x or f`, a string, a doc mention).
@@ -7744,11 +7855,11 @@ def _edit_check_coverage(
         return [f"must_cover: dekko could not refresh the map ({why})"], []
 
     _agent_index(root, fresh=True)  # the reference grep sees new files
-    spans = {edit.relative: edit.spans for edit in changes.values()}
+    edits = {edit.relative: edit for edit in changes.values()}
     errors: list[str] = []
     outside: set[_EditUse] = set()
     for symbol in must_cover:
-        found, left = _edit_symbol_coverage(root, symbol, spans, scope)
+        found, left = _edit_symbol_coverage(root, symbol, edits, scope)
         errors += found
         outside.update(left)
     return errors, sorted(outside)
