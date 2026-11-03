@@ -632,6 +632,94 @@ def test_run_edit_case_keeps_the_raw_answers(tmp_path, nim_stub):
     nim_eval.report([row], ["a"])
 
 
+_BAD = "<<<EDIT a.txt\n>>>NEW\ntwo\n>>>END"
+_GOOD = "<<<EDIT a.txt\n<<<OLD\none\n>>>NEW\ntwo\n>>>END"
+
+
+def test_refuse_case_with_a_429_in_the_repair_run_is_an_error(
+    tmp_path, nim_stub, monkeypatch
+):
+    stub, test_nim = nim_stub
+    monkeypatch.setattr(test_nim.server, "NIM_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(test_nim.server, "NIM_BACKOFF_JITTER", 0.0)
+    case, _ = _edit_fixture(tmp_path, "two")
+    case["expect"] = "refuse"
+    del case["reference_diff"]
+    stub.queue.append((200, {}, test_nim._completion(_BAD)))
+    for _ in range(10):
+        stub.queue.append((429, {"Retry-After": "0"}, {"detail": "no"}))
+    row = nim_eval.run_edit_case(case, CONFIG, test_nim.server)
+    assert "repair run failed" in row["answer"]
+    assert "error" in row and "correct" not in row
+    assert "clean_error" not in row
+
+
+def test_patch_case_with_a_stalled_answer_is_an_error(
+    tmp_path, nim_stub, monkeypatch
+):
+    stub, test_nim = nim_stub
+    monkeypatch.setenv("CASTOR_NIM_TIMEOUT", "0.2")
+    monkeypatch.setattr(test_nim.server, "NIM_AGENT_ANSWER_TIMEOUT", 0.2)
+    case, _ = _edit_fixture(tmp_path, "two")
+    # The tool step runs out of tokens, so the answer step (no tools) runs
+    # and stalls after a complete block: ok text with the cut-off note.
+    stub.queue.append((200, {}, test_nim._completion("", finish="length")))
+    sse = {"__sse__": [test_nim._delta(_GOOD)], "stall_after": 1}
+    stub.queue.append((200, {}, {**sse, "stall": 0.6}))
+    row = nim_eval.run_edit_case(case, CONFIG, test_nim.server)
+    assert nim_eval.CUT_OFF_NOTE in row["raw_answers"][0]
+    assert "error" in row and "correct" not in row
+    line = nim_eval.summarize([row], "a")
+    assert "no completed runs" in line and "errors 1" in line
+
+
+def _saved_edit_row(answer, raw, **facts):
+    return {
+        "case": "e",
+        "config": "a",
+        "role": "edit",
+        "scoring": 4,
+        "answer": answer,
+        "raw_answers": raw,
+        "facts": {
+            **_facts(**facts),
+            "touched_paths": ["a.txt"],
+            "reference_paths": ["a.txt"],
+        },
+        "seconds": 1.0,
+        "steps": 1,
+    }
+
+
+def test_rescore_applies_the_repair_and_stall_rules(tmp_path):
+    case = {"name": "e", "role": "edit", "expect": "refuse"}
+    repair = _saved_edit_row(
+        "[nim_edit: REFUSED after repair round]\n- block 1: old text is "
+        "empty\n- repair run failed: [NVIDIA NIM error: rate limited]",
+        [_BAD],
+        expect="refuse",
+        refused=True,
+        trees_equal=None,
+    )
+    stall = _saved_edit_row(
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]",
+        [_GOOD + "\n\n[Note: response cut off after a stall of 0s.]"],
+    )
+    clean = _saved_edit_row(
+        "[nim_edit: REFUSED]\n- x",
+        [_BAD],
+        expect="refuse",
+        refused=True,
+        trees_equal=None,
+    )
+    saved = tmp_path / "results.json"
+    saved.write_text(json.dumps([repair, stall, clean]))
+    nim_eval.rescore(saved, [case])
+    rows = json.loads(saved.read_text())
+    assert ["error" in r for r in rows] == [True, True, False]
+    assert ["correct" in r for r in rows] == [False, False, True]
+
+
 def test_summarize_edit_counts_error_rows():
     rows = [
         {"config": "a", "role": "edit", "case": "x", "error": "boom"},
