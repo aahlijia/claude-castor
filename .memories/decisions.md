@@ -65,6 +65,8 @@
 - **Rejected:** Kimi K2.6 (strongest open model but 404 for this account),
   Nemotron 3 Super (404), DeepSeek V4.1 Flash and gpt-oss-20b (timed out or ran
   100+ s per step), GLM-5.3-Flash (95 to 116 s per step).
+- **Superseded 2026-11-02:** agent roles moved to Nemotron 3.5 Super first,
+  then plain calls too (see "Plain NIM calls default to Nemotron 3.5 Super").
 
 ### 2026-11-02: Several NIM keys rotate; limiter and cooldown are per key
 - **Why:** the limit is account-wide, so more accounts is the only way past
@@ -140,3 +142,32 @@
 - **Rejected:** narrow cross-checked questions (not worth building until the
   remaining problem is shown to be precision the model could fix); caching role
   results (repeat runs are rare).
+
+### 2026-11-02: Plain NIM calls default to Nemotron 3.5 Super
+- **Why:** `scripts/nim_eval.py` plain roles (3 explain cases with known
+  causes, 3 docs with known key points; 2 runs each, response cache off).
+  Super recall 44/48, must 16/18; Ultra 39/48, must 14/18 (missed GEMINI.md's
+  "NIM is not an agent" and CLAUDE.md's "agy replaces the Gemini CLI" in both
+  runs). The decision rule (keep Ultra only if its recall is higher on both
+  roles by more than its own run spread) did not hold on either role.
+  Results: `~/.cache/claude-castor/eval/results-20261102-212138.json`.
+- **Speed is load-dependent, not settled:** in that eval (21:00 local) Super
+  averaged 75 s per call against Ultra's 16 s. The day's usage log says that
+  hour was the exception: Super ran 127 tokens/s at 19:00 and 93 at 20:00, then
+  29 at 21:00; Ultra ran 35 to 59 all day. GEMINI.md tells Claude to pass Ultra
+  when Super is crawling.
+- **Rejected:** keeping Ultra on that hour's latency alone (one hour against a
+  day of logs showing Super faster per token).
+
+### 2026-11-02: Review steps stay at 8
+- **Why:** the nim-performance design's gate for cutting `NIM_REVIEW_STEPS`
+  to 4 was "must-catch must not drop". At 4 steps (2 runs, 3.5 Super) NQC
+  must-catch fell from 2/8 to 0/8, though lead precision rose from 9% to 17%
+  (both scored with SCORING_VERSION 2; the 8-step file was rescored).
+  Time could not be judged: NIM was slow that hour (168 s median at 4 steps
+  vs 70 s at 8 earlier). Castor's planted-bug case was 2/2 both ways.
+  Results: `results-20261102-213502.json` (4 steps),
+  `results-20261102-200125.json` (8 steps).
+- **Rejected:** 4 steps on precision alone (two runs is noise-level, and a
+  missed must is the costlier error); re-running until it passes.
+

@@ -94,3 +94,21 @@
 - **The agent's answer request can outrun 180 s** (6,144 thinking tokens plus
   the review at about 60 tokens/s); it has its own 360 s timeout. Each timeout
   is retried once, so a stuck request costs about 6 minutes.
+- **Agent grep reads the git index, cached 60 s per root.** Fixed 2026-11-02
+  (it walked Unity's `Library/`, 20 s for review context). A file created
+  mid-run is missed until the cache expires or `_nim_reset_state()`; tests
+  that add files after a first grep must reset. Outside git it still walks
+  (pruning `NIM_AGENT_SKIP_DIRS`).
+- **NIM summaries over ~35k tokens of input cover only the start.** A 216k-char
+  part of DECISIONS.md produced 15 points from its first third and none of
+  the C-rulings after it; at 120k-char parts every part was covered. The merge
+  also packed all bullets into one newline-joined string once; `_tidy_summary`
+  splits them.
+- **NIM speed swings by the hour.** 3.5 Super ran 127 tokens/s at 19:00 and 29
+  at 21:00 on 2026-11-02 (Ultra 35 to 59). Never compare models on one hour's
+  timings; check `nim_usage` or the usage log by hour.
+- **Each Nemotron request spends its full reasoning budget.** At ~55 tokens/s
+  a 1,024-token step budget is ~18 s before any output, so a 2-request triage
+  cannot finish in 15 s. A tool step that answers without tools can also run
+  into the 4,096 cap; its partial text is dropped and the answer step starts
+  over (one triage run took 154 s that way).
