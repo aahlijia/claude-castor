@@ -117,3 +117,26 @@
 - **Rejected:** finishing the planned 15 reviews (each refuted lead costs
   reviewer tokens, and 5 reviews already showed nothing unique); more prompt
   rules (tried in castor before, partly followed).
+
+### 2026-11-02: Agent roles default to Nemotron 3.5 Super; no split-model default
+- **Why:** scored with `scripts/nim_eval.py` (3 castor cases plus the 5 NQC
+  pilot diffs, 15 NQC runs per model). On NQC, Ultra and 3.5 Super had the same
+  lead precision (14%), recall 17% and 12%, and 3 of 12 must-catch hits each, but
+  3.5 Super took 80 s per review against 203 s. Both got full marks on the
+  castor scout, triage and planted-bug cases; 3.5 Super did them in 10 to 30 s.
+  A set `CASTOR_NIM_MODEL` is still followed (self-hosted setups).
+- **Rejected:** Mistral Large 4 (every request timed out at 180 s on the free
+  tier); fast step model plus Ultra answer (Lightning or 3.5 Super steps scored
+  12 to 13% precision, no better, and still slow); deciding on one run (3.5
+  Super first looked twice as precise as Ultra, then matched it over three).
+
+### 2026-11-02: Reviews get Castor-built context and quote-checked citations
+- **Why:** against the old code on the same NQC diffs (Ultra), recall rose from
+  10% to 17%, must-catch hits from 0 of 4 to 3 of 12, failures from 1 in 5 to 0
+  in 15, and time fell from 336 s to 203 s (80 s on 3.5 Super). Precision did not
+  move (12% to 14%): the model still invents bugs on real diffs, so the first
+  pass stays an occasional extra. Quote checks catch wrong-line citations (about
+  1 in 4 quotes on NQC answers did not match their line).
+- **Rejected:** narrow cross-checked questions (not worth building until the
+  remaining problem is shown to be precision the model could fix); caching role
+  results (repeat runs are rare).

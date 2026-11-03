@@ -79,3 +79,18 @@
   stubs `subprocess.run` so agy never runs; only `["git", ...]` passes through
   to the real one (the agent's file map needs `git ls-files`). A new helper
   that shells out to anything else fails in tests until the fixture allows it.
+- **Eval scoring by line proximity overstates hits.** Matching leads to known
+  findings by file and line alone credited the old reviewer with 9 of 10
+  must-catches; the hand scoring said 0 of 4 on NQC. Each finding needs
+  keywords for its substance, and loose ones still slip (`empty` matched
+  "non-empty"). Spot-check hits before trusting a score; re-score with
+  `--rescore` after editing cases.
+- **Single eval runs are noisy.** One run per model put 3.5 Super at twice
+  Ultra's precision; three runs made them equal. Repeat NQC cases at least
+  twice before changing a default.
+- **Ultra spends every tool step it is given,** whatever the prompt says (19 of
+  19 steps at about 20 s each with the context already supplied). Cap steps in
+  code; prompt limits are ignored.
+- **The agent's answer request can outrun 180 s** (6,144 thinking tokens plus
+  the review at about 60 tokens/s); it has its own 360 s timeout. Each timeout
+  is retried once, so a stuck request costs about 6 minutes.
