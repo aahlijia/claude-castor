@@ -7134,14 +7134,20 @@ def _edit_file_diff(edit: FileEdit, prefix: str = "") -> str:
     return "".join(out)
 
 
-def _edit_build_diff(changes: dict[Path, FileEdit], prefix: str = "") -> str:
+def _edit_build_diff(changes: dict[Path, FileEdit], prefix: str) -> str:
     """One unified diff over all changed files, sorted by relative path.
 
     `prefix` is the project root's path below the repo top level ("" or
     "/"-terminated), since git reads header paths from the top level.
+    Callers use `_edit_make_patch`, which supplies it.
     """
     edits = sorted(changes.values(), key=lambda e: e.relative)
     return "".join(_edit_file_diff(edit, prefix) for edit in edits)
+
+
+def _edit_git_env() -> dict[str, str]:
+    """Environment for git calls whose messages Castor matches."""
+    return {**os.environ, "LC_ALL": "C"}
 
 
 def _edit_work_tree(root: Path) -> tuple[Path | None, str | None]:
@@ -7150,6 +7156,7 @@ def _edit_work_tree(root: Path) -> tuple[Path | None, str | None]:
     try:
         done = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            env=_edit_git_env(),
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -7167,12 +7174,15 @@ def _edit_work_tree(root: Path) -> tuple[Path | None, str | None]:
     return None, stderr or f"git exited {done.returncode}"
 
 
-def _edit_repo_prefix(root: Path, top: Path) -> str:
-    """`root` below the repo top level as "a/b/" (or "" at the top)."""
+def _edit_repo_prefix(root: Path, top: Path) -> str | None:
+    """`root` below the repo top level as "a/b/" ("" at the top).
+
+    None when `root` is not under `top`.
+    """
     try:
         below = root.resolve().relative_to(top.resolve()).as_posix()
     except ValueError:
-        return ""
+        return None
     return "" if below == "." else below + "/"
 
 
@@ -7185,6 +7195,7 @@ def _edit_apply_check(diff: str, top: Path) -> tuple[bool, str]:
             done = subprocess.run(
                 ["git", "apply", "--check", "-v", tmp.name],
                 cwd=str(top),
+                env=_edit_git_env(),
                 capture_output=True,
                 text=True,
                 stdin=subprocess.DEVNULL,
@@ -7212,6 +7223,35 @@ def _edit_git_check(diff: str, root: Path) -> tuple[bool | None, str]:
     if top is None:
         return None, ""
     return _edit_apply_check(diff, top)
+
+
+def _edit_make_patch(
+    changes: dict[Path, FileEdit], root: Path
+) -> tuple[str, bool | None, str]:
+    """Build the diff for `changes` and check it with git: (diff, checked,
+    detail).
+
+    The only supported way to build a patch: it takes the header prefix
+    from the repo top level and runs the check there. `checked` is None
+    outside a repo, False when git failed or could not run, else True.
+    """
+    top, reason = _edit_work_tree(root)
+    if reason is not None:
+        return "", False, f"git check could not run: {reason}"
+    if top is None:
+        diff = _edit_build_diff(changes, "")
+        return diff, None, "not checked by git (apply with patch -p1)"
+    prefix = _edit_repo_prefix(root, top)
+    if prefix is None:
+        return (
+            "",
+            False,
+            "git check could not run: cwd is not inside the repository "
+            "top level",
+        )
+    diff = _edit_build_diff(changes, prefix)
+    ok, detail = _edit_git_check(diff, root)
+    return diff, ok, detail
 
 
 def _edit_prune_patches(days: int = NIM_EDIT_PATCH_DAYS) -> None:
