@@ -1493,3 +1493,89 @@ def test_triage_refuses_a_log_over_the_size_cap(captured, repo, monkeypatch):
     monkeypatch.setattr(server, "NIM_TRIAGE_MAX_LOG_BYTES", 10)
     out = _tool(server.nim_triage_log)(str(repo), "big.log")
     assert "split it first" in out and not captured
+
+
+# --- chunked summarize -------------------------------------------------------
+
+
+def _summary_json(text):
+    return _completion(json.dumps({"summary": text, "key_points": [text]}))
+
+
+def test_summarize_splits_a_big_file_and_merges(stub, tmp_path):
+    row = "decision C{} keeps the host authoritative\n"
+    (tmp_path / "DECISIONS.md").write_text(
+        "".join(row.format(i) for i in range(3500))
+    )
+    for text in ("p", "p", "merged"):
+        stub.queue.append((200, {}, _summary_json(text)))
+    out = json.loads(_tool(server.nim_summarize)(str(tmp_path), "DECISIONS.md"))
+    assert out["summary"] == "merged"
+    users = [p[3]["messages"][-1]["content"] for p in stub.posts()]
+    assert len(users) == 3
+    assert sorted("Part 1 of 2" in u for u in users[:2]) == [False, True]
+    assert all("[PARTS]" not in u for u in users[:2])
+    assert "[PARTS]" in users[2] and "2 parts" in users[2]
+    assert "DECISIONS.md (lines 1-" in "".join(users[:2])
+    for post in stub.posts():
+        assert post[3]["max_tokens"] == server.NIM_SUMMARIZE_MAX_TOKENS
+        assert post[3]["reasoning_budget"] == server.NIM_SUMMARIZE_THINKING
+
+
+def test_summarize_a_file_under_the_chunk_size_makes_one_request(
+    stub, tmp_path
+):
+    (tmp_path / "big.md").write_text("x" * 110_000)  # over the old 100 KB
+    stub.queue.append((200, {}, _summary_json("S")))
+    out = json.loads(_tool(server.nim_summarize)(str(tmp_path), "big.md"))
+    assert out["summary"] == "S" and len(stub.posts()) == 1
+    assert "skipped" not in stub.posts()[0][3]["messages"][-1]["content"]
+
+
+def test_summarize_chunk_error_aborts_without_a_merge(stub, tmp_path):
+    (tmp_path / "big.md").write_text("line\n" * 100_000)
+    stub.queue.append((400, {}, {"detail": "bad chunk"}))
+    stub.queue.append((200, {}, _summary_json("p")))
+    out = _tool(server.nim_summarize)(str(tmp_path), "big.md")
+    assert out.startswith("[NVIDIA NIM error") and "bad chunk" in out
+    users = [p[3]["messages"][-1]["content"] for p in stub.posts()]
+    assert not any("[PARTS]" in u for u in users)
+
+
+def test_summarize_packs_a_directory_into_chunks(tmp_path):
+    root = tmp_path / "d"
+    root.mkdir()
+    (root / "a_small.md").write_text("a" * 100)
+    (root / "b_big.md").write_text("b\n" * 1500)
+    (root / "c_small.md").write_text("c" * 100)
+    (root / "skip.log").write_text("noise")
+    blocks, error = server._summary_blocks(root, tmp_path, 1400)
+    assert error is None
+    labels = [label for label, _ in blocks]
+    assert labels[0] == "d/a_small.md" and labels[-1] == "d/c_small.md"
+    assert labels[1] == "d/b_big.md (lines 1-600)"
+    assert not any("skip.log" in label for label in labels)
+    chunks = server._pack_chunks(blocks, 1400)
+    assert all(len(c) <= 1400 for c in chunks) and len(chunks) == 3
+    assert "[FILE: d/a_small.md]" in chunks[0]
+    assert "[FILE: d/b_big.md (lines 1-600)]" in chunks[0]
+    assert "[FILE: d/c_small.md]" in chunks[-1]
+
+
+def test_summarize_refuses_a_target_past_the_ceiling(
+    stub, tmp_path, monkeypatch
+):
+    (tmp_path / "huge.md").write_text("x" * 5000)
+    monkeypatch.setattr(server, "NIM_SUMMARIZE_MAX_CHARS", 1000)
+    out = _tool(server.nim_summarize)(str(tmp_path), "huge.md")
+    assert "ceiling" in out and not stub.posts()
+
+
+def test_summary_key_points_packed_in_one_string_are_split():
+    packed = json.dumps(
+        {"summary": "S", "key_points": ["- one\n2. two\n\n\u2022 three"]}
+    )
+    out = json.loads(server._tidy_summary(packed))
+    assert out["key_points"] == ["one", "two", "three"]
+    plain = json.dumps({"summary": "S", "key_points": "solo"})
+    assert json.loads(server._tidy_summary(plain))["key_points"] == ["solo"]
