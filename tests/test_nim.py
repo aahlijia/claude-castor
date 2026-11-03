@@ -2931,8 +2931,8 @@ def _cover_dekko():
     }
     symbol = {"path": "src/lib.py", "line": 1}
     return [
+        (True, ""),  # the coverage check's fresh map build
         (True, json.dumps(callers)),
-        (True, json.dumps(symbol)),
         (True, json.dumps(symbol)),
     ]
 
@@ -2998,8 +2998,8 @@ def test_nim_edit_must_cover_dekko_failure_is_an_error(
     stub, repo, fake_dekko
 ):
     _cover_repo(repo)
-    fake_dekko.queue += [(True, ""), (False, "[dekko error: boom]")]
-    fake_dekko.queue += [(False, "[dekko error: boom]")]
+    boom = (False, "[dekko error: boom]")
+    fake_dekko.queue += [(True, ""), (True, ""), boom, (True, ""), boom]
     answer = _edit_answer(("src/lib.py", "def old_name():", "def new():"))
     _answers(stub, answer, answer)
     out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
@@ -3112,3 +3112,137 @@ def test_nim_edit_start_reports_bad_input_at_once(stub, repo):
         "[Error: invalid must_cover symbol: a b]"
     )
     assert not stub.posts()
+
+
+_FULL_COVER = _edit_answer(
+    ("src/lib.py", "def old_name():", "def new_name():"),
+    ("src/use.py", "old_name() + 1", "new_name() + 1"),
+    ("src/use.py", "old_name() + 2", "new_name() + 2"),
+)
+
+
+def test_nim_edit_coverage_refreshes_a_warm_map(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    assert server._dekko_ensure_map(repo) is True  # an earlier agent run
+    _answers(stub, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 3 blocks, repair round: no]"
+    )
+    assert [c[:2] for c in fake_dekko.calls] == [
+        ["map", "--if-stale"],
+        ["map", "--if-stale"],
+        ["query", "callers"],
+        ["query", "symbol"],
+    ]
+
+
+def test_nim_edit_failed_map_refresh_refuses(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    crash = (False, "[dekko error: crash]")
+    fake_dekko.queue += [(True, ""), crash, crash]
+    assert server._dekko_ensure_map(repo) is True
+    _answers(stub, _FULL_COVER, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- must_cover: dekko could not refresh the map",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_must_cover_flags_a_grep_only_reference(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    _git_init(repo)
+    assert "src/reg.py" not in server._agent_index(repo)  # warm, pre-file
+    (repo / "src" / "reg.py").write_text("HANDLERS = [\n    old_name,\n]\n")
+    (repo / ".dekko").mkdir()
+    (repo / ".dekko" / "MAP.md").write_text("old_name\n")
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    _answers(stub, _FULL_COVER, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- reference src/reg.py:2 of old_name not edited",
+    ]
+
+
+def test_callers_tool_lists_grep_only_references(repo, fake_dekko):
+    _cover_repo(repo)
+    (repo / "src" / "reg.py").write_text("HANDLERS = [old_name]\n")
+    fake_dekko.queue += _cover_dekko()[1:]
+    text = server._dekko_tool(repo, "callers", {"symbol": "old_name"})
+    assert "src/use.py:2 in go" in text
+    assert "grep-only" in text and "src/reg.py:1:HANDLERS = [old_name]" in text
+    assert "src/lib.py:1:" not in text and "src/use.py:6:" not in text
+
+
+def test_nim_edit_start_rejects_must_cover_without_dekko(stub, repo):
+    start = _tool(server.nim_edit_start)
+    assert start("rename", str(repo), must_cover=["x"]) == (
+        "[Error: must_cover needs the dekko map]"
+    )
+    assert not stub.posts()
+
+
+def test_nim_edit_refuses_parse_errors_beside_a_valid_block(stub, repo):
+    broken = _GOOD_EDIT + "\n<<<EDIT src/a.py\n<<<OLD\nthree\n>>>END"
+    _answers(stub, broken, broken)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 2: missing >>>NEW",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_failed_repair_run_refuses(stub, repo):
+    _answers(stub, _BAD_EDIT)
+    stub.queue.append((401, {}, {"error": "bad key"}))
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    lines = out.split("\n")
+    assert lines[:2] == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 1: old text not found in src/a.py",
+    ]
+    assert len(lines) == 3 and lines[2].startswith("- repair run failed: [")
+    assert _patches() == []
+
+
+def test_nim_edit_start_refusal_polls_as_a_failed_job(stub, repo):
+    _answers(stub, _BAD_EDIT, _BAD_EDIT)
+    job_id = _job_id(_tool(server.nim_edit_start)("t", str(repo)))
+    for _ in range(200):
+        out = _tool(server.gemini_poll)(job_id)
+        if "still running" not in out:
+            break
+        time.sleep(0.05)
+    head, rest = out.split("\n", 1)
+    assert head.startswith(f"[Job {job_id} failed after ")
+    assert rest.startswith("[nim_edit: REFUSED after repair round]")
+
+
+def test_nim_edit_early_returns_carry_all_stats(stub, repo):
+    keys = {"blocks": 0, "files": 0, "repair": False, "outcome": "refused"}
+    for args, kwargs in (
+        (("  ", str(repo)), {}),
+        (("t", str(repo)), {"must_cover": ["x"]}),
+    ):
+        _, stats = server._run_nim_edit(*args, **kwargs)
+        assert keys.items() <= stats.items() and stats["patch"] is None
+
+
+def test_nim_edit_patch_path_is_absolute_with_a_relative_cache(
+    stub, repo, tmp_path, monkeypatch
+):
+    _git_init(repo)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", "relcache")
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    path = Path(out.split("\n")[1].removeprefix("patch: "))
+    assert path.is_absolute() and path.is_file()
+    assert path.is_relative_to(tmp_path.resolve() / "relcache")

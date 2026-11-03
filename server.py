@@ -4788,6 +4788,11 @@ def _agent_grep_readable(root: Path, path: Path, glob: str | None) -> bool:
     )
 
 
+def _grep_matches(lines: list[str], regex: re.Pattern) -> list[int]:
+    """1-based numbers of the lines `regex` matches (first 2000 chars)."""
+    return [n for n, line in enumerate(lines, 1) if regex.search(line[:2000])]
+
+
 def _agent_grep_file(
     root: Path, path: Path, regex: re.Pattern, room: int, after: int
 ) -> tuple[list[str], int]:
@@ -4802,9 +4807,7 @@ def _agent_grep_file(
         return [], 0
     rel = path.relative_to(root)
     lines = data.decode("utf-8", errors="replace").splitlines()
-    matches = [
-        n for n, line in enumerate(lines, 1) if regex.search(line[:2000])
-    ]
+    matches = _grep_matches(lines, regex)
     matched = set(matches)
     shown = sorted(
         {
@@ -4979,19 +4982,21 @@ _dekko_map_lock = threading.Lock()
 _dekko_map_cache: dict[Path, tuple[float, bool]] = {}
 
 
-def _dekko_ensure_map(root: Path) -> bool:
+def _dekko_ensure_map(root: Path, fresh: bool = False) -> bool:
     """True when a usable dekko map exists for `root` after this call.
 
     Runs `dekko map --if-stale --quiet` at most once per NIM_DEKKO_MAP_TTL
     seconds per root; a failed build is cached too, so a broken repo is
-    not retried on every call. False, running nothing, when dekko is off.
+    not retried on every call. `fresh` skips the cached result (nim_edit's
+    coverage check must see the tree as it is now) and still updates it.
+    False, running nothing, when dekko is off.
     """
     if not _dekko_enabled():
         return False
     now = time.monotonic()
     with _dekko_map_lock:
         hit = _dekko_map_cache.get(root)
-    if hit is not None and now - hit[0] < NIM_DEKKO_MAP_TTL:
+    if not fresh and hit is not None and now - hit[0] < NIM_DEKKO_MAP_TTL:
         return hit[1]
     ok, _ = _dekko_run(
         root, ["map", "--if-stale", "--quiet"], timeout=NIM_DEKKO_MAP_TIMEOUT
@@ -5059,7 +5064,6 @@ _DEKKO_TOOL_ARGS = {
     for t in DEKKO_AGENT_TOOLS
 }
 _DEKKO_BUDGET_ARGS = ["--no-regen", "--budget", str(NIM_DEKKO_BUDGET)]
-_GREP_HIT_RE = re.compile(r"^(.+?):(\d+):")
 
 
 def _agent_tools(root: Path) -> list[dict]:
@@ -5167,30 +5171,60 @@ def _dekko_call_sites(data: dict) -> list[tuple[str, int, str]]:
     return sites
 
 
-def _grep_only_hits(
-    root: Path, symbol: str, known: set[tuple[str, int]]
-) -> list[str]:
-    """Grep lines for `symbol` that dekko's sites and definition miss."""
-    text = _agent_grep(root, rf"\b{re.escape(symbol)}\b", ".", None)
-    hits = []
-    for line in text.splitlines():
-        found = _GREP_HIT_RE.match(line)
-        if found is None:
-            if not line.startswith("[no matches"):
-                hits.append(line)
-        elif (found.group(1), int(found.group(2))) not in known:
-            hits.append(line)
-    return hits
+_GREP_TIMED_OUT = "[search timed out; narrow the path or pattern]"
 
 
-def _dekko_callers(
+def _symbol_references(
     root: Path, symbol: str
-) -> tuple[list[tuple[str, int]] | None, str]:
-    """Call sites of `symbol`: (sites, text), sites None if dekko failed.
+) -> tuple[list[tuple[str, int, str]], bool]:
+    """Every whole-word grep hit for `symbol`: ((path, line, text), done).
 
-    The text merges dekko's call-graph sites with grep hits the graph
-    missed, so a dynamic call is not silently absent.
+    Searches the same files as the agent's grep, with no hit cap, and
+    skips dekko's own `.dekko/` folder. `done` is False when the search
+    timed out, so the list may be short.
     """
+    regex = re.compile(rf"\b{re.escape(symbol)}\b")
+    deadline = time.monotonic() + NIM_AGENT_GREP_SECONDS
+    hits: list[tuple[str, int, str]] = []
+    for path in _agent_grep_candidates(root, root):
+        if time.monotonic() > deadline:
+            return hits, False
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(".dekko/") or not _agent_grep_readable(
+            root, path, None
+        ):
+            continue
+        data = _read_bytes(path)
+        if data is None or _is_binary_bytes(data):
+            continue
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        hits += [(rel, n, lines[n - 1]) for n in _grep_matches(lines, regex)]
+    return hits, True
+
+
+@dataclass
+class _CallerReport:
+    """What dekko and grep know about one symbol's uses.
+
+    `found` holds dekko's call sites as (path, line, caller); `extra` the
+    grep hits that are neither a site nor the definition, as (path, line,
+    text); `complete` is False when that grep timed out.
+    """
+
+    found: list[tuple[str, int, str]]
+    definition: tuple[str, int] | None
+    extra: list[tuple[str, int, str]]
+    complete: bool
+
+    @property
+    def sites(self) -> list[tuple[str, int]]:
+        return [(path, line) for path, line, _ in self.found]
+
+
+def _dekko_caller_report(
+    root: Path, symbol: str
+) -> tuple[_CallerReport | None, str]:
+    """(report, "") for `symbol`, or (None, error text) if dekko failed."""
     ok, raw = _dekko_run(
         root,
         ["query", "callers", symbol, "--sites", "--json", *_DEKKO_BUDGET_ARGS],
@@ -5201,18 +5235,43 @@ def _dekko_callers(
         found = _dekko_call_sites(json.loads(raw))
     except (ValueError, TypeError, KeyError, AttributeError):
         return None, "[dekko error: unreadable callers output]"
-    sites = [(path, line) for path, line, _ in found]
-    known = set(sites)
     definition = _dekko_definition(root, symbol)
+    known = {(path, line) for path, line, _ in found}
     if definition is not None:
         known.add(definition)
-    lines = [f"callers of {symbol} (dekko, {len(sites)} sites):"]
-    lines += [f"{path}:{line} in {who}" for path, line, who in found]
-    extra = _grep_only_hits(root, symbol, known)
+    hits, complete = _symbol_references(root, symbol)
+    extra = [hit for hit in hits if (hit[0], hit[1]) not in known]
+    return _CallerReport(found, definition, extra, complete), ""
+
+
+def _render_callers(symbol: str, report: _CallerReport) -> str:
+    """The callers tool text: dekko's sites, then grep-only hits."""
+    lines = [f"callers of {symbol} (dekko, {len(report.found)} sites):"]
+    lines += [f"{path}:{line} in {who}" for path, line, who in report.found]
+    extra = [
+        f"{path}:{line}:{text.strip()[:NIM_AGENT_LINE_CHARS]}"
+        for path, line, text in report.extra
+    ]
+    if not report.complete:
+        extra.append(_GREP_TIMED_OUT)
     if extra:
         lines.append("grep-only (not in the call graph; check these):")
         lines += extra
-    return sites, "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _dekko_callers(
+    root: Path, symbol: str
+) -> tuple[list[tuple[str, int]] | None, str]:
+    """Call sites of `symbol`: (sites, text), sites None if dekko failed.
+
+    The text merges dekko's call-graph sites with grep hits the graph
+    missed, so a dynamic call is not silently absent.
+    """
+    report, error = _dekko_caller_report(root, symbol)
+    if report is None:
+        return None, error
+    return report.sites, _render_callers(symbol, report)
 
 
 def _dekko_row(item: dict) -> str:
@@ -5405,16 +5464,17 @@ def _agent_tracked_files(root: Path) -> list[str]:
     return _agent_index(root) or []
 
 
-def _agent_index(root: Path) -> list[str] | None:
+def _agent_index(root: Path, fresh: bool = False) -> list[str] | None:
     """_git_listed_files filtered for the agent, cached per root.
 
     Entries live NIM_AGENT_INDEX_TTL seconds, so the greps of one run or
-    one review context share a single `git ls-files`. None outside git.
+    one review context share a single `git ls-files`. `fresh` skips the
+    cached entry and replaces it. None outside git.
     """
     now = time.monotonic()
     with _agent_index_lock:
         hit = _agent_index_cache.get(root)
-    if hit is not None and now - hit[0] < NIM_AGENT_INDEX_TTL:
+    if not fresh and hit is not None and now - hit[0] < NIM_AGENT_INDEX_TTL:
         return hit[1]
     names = _git_listed_files(root)
     if names is not None:
@@ -7285,8 +7345,11 @@ def _edit_prune_patches(days: int = NIM_EDIT_PATCH_DAYS) -> None:
 
 
 def _edit_write_patch(diff: str) -> Path:
-    """Write the diff under the cache dir as exact UTF-8 bytes."""
-    folder = _cache_dir() / NIM_EDIT_PATCH_DIR
+    """Write the diff under the cache dir as exact UTF-8 bytes.
+
+    The returned path is absolute even when XDG_CACHE_HOME is relative.
+    """
+    folder = (_cache_dir() / NIM_EDIT_PATCH_DIR).resolve()
     folder.mkdir(parents=True, exist_ok=True)
     _edit_prune_patches()
     name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.diff"
@@ -7480,48 +7543,80 @@ def _edit_covered(
     return any(start <= line <= end for start, end in spans.get(path, []))
 
 
+def _edit_report_problem(
+    report: _CallerReport | None, symbol: str
+) -> str | None:
+    """Why `report` cannot prove coverage of `symbol`, or None if it can."""
+    if report is None:
+        return f"must_cover: dekko could not list callers of {symbol}"
+
+    if report.definition is None:
+        return f"must_cover: dekko could not find the definition of {symbol}"
+
+    if not _dekko_allowed(report.definition[0]):
+        return f"must_cover: the definition of {symbol} is off limits"
+
+    if not report.complete:
+        return f"must_cover: the search for {symbol} timed out"
+
+    return None
+
+
+def _edit_uncovered(
+    report: _CallerReport,
+    symbol: str,
+    spans: dict[str, list[tuple[int, int]]],
+) -> list[str]:
+    """One error per definition, call site or reference left unedited."""
+    wanted = [("definition", report.definition)]
+    wanted += [("call site", site) for site in report.sites]
+    wanted += [("reference", (path, line)) for path, line, _ in report.extra]
+    errors = []
+    seen: set[tuple[str, int]] = set()
+    for kind, (path, line) in wanted:
+        if (path, line) in seen or _edit_covered(spans, path, line):
+            continue
+        seen.add((path, line))
+        errors.append(f"{kind} {path}:{line} of {symbol} not edited")
+
+    return errors
+
+
 def _edit_symbol_coverage(
     root: Path, symbol: str, spans: dict[str, list[tuple[int, int]]]
 ) -> list[str]:
-    """Errors for the definition and call sites of `symbol` left unedited."""
-    sites, _ = _dekko_callers(root, symbol)
-    if sites is None:
-        return [f"must_cover: dekko could not list callers of {symbol}"]
+    """Errors for the uses of `symbol` that no block's span covers."""
+    report, _ = _dekko_caller_report(root, symbol)
+    problem = _edit_report_problem(report, symbol)
+    if problem is not None or report is None:
+        return [problem or f"must_cover: no report for {symbol}"]
 
-    definition = _dekko_definition(root, symbol)
-    if definition is None:
-        return [f"must_cover: dekko could not find the definition of {symbol}"]
-
-    if not _dekko_allowed(definition[0]):
-        return [f"must_cover: the definition of {symbol} is off limits"]
-
-    errors = []
-    path, line = definition
-    if not _edit_covered(spans, path, line):
-        errors.append(f"definition {path}:{line} of {symbol} not edited")
-    for path, line in dict.fromkeys(sites):
-        if (path, line) != definition and not _edit_covered(spans, path, line):
-            errors.append(f"call site {path}:{line} of {symbol} not edited")
-
-    return errors
+    return _edit_uncovered(report, symbol, spans)
 
 
 def _edit_check_coverage(
     changes: dict[Path, FileEdit], root: Path, must_cover: list[str]
 ) -> list[str]:
-    """Every call site and definition of each symbol must be in a span.
+    """Every use of each symbol must lie inside an edited span.
 
-    A site counts as edited when its line lies inside a span of its file's
-    FileEdit; a dekko failure is an error, never a pass.
+    Uses are dekko's call sites, the definition, and grep hits dekko does
+    not list (a reference such as `x or f`, a string, a doc mention). The
+    map and the grep's file index are rebuilt first (`fresh`), so a use
+    added since the last agent run is not missed. A dekko failure is an
+    error, never a pass.
 
     Args:
         changes: The in-memory edits, keyed by resolved path.
         root: Resolved project root.
-        must_cover: Symbols whose sites must all be edited.
+        must_cover: Symbols whose uses must all be edited.
 
     Returns:
         Errors like "call site server.py:3441 of _nim_admit not edited".
     """
+    if not _dekko_ensure_map(root, fresh=True):
+        return ["must_cover: dekko could not refresh the map"]
+
+    _agent_index(root, fresh=True)  # the reference grep sees new files
     spans = {edit.relative: edit.spans for edit in changes.values()}
     errors: list[str] = []
     for symbol in must_cover:
@@ -7666,6 +7761,17 @@ def _edit_outcome(
     return head + diff
 
 
+def _edit_base_stats() -> dict[str, Any]:
+    """The stats keys every nim_edit run reports, set for a refusal."""
+    return {
+        "blocks": 0,
+        "files": 0,
+        "repair": False,
+        "outcome": "refused",
+        "patch": None,
+    }
+
+
 def _dispatch_nim_edit(
     task: str,
     cwd: str,
@@ -7697,12 +7803,12 @@ def _run_nim_edit(
     """
     error = _edit_input_error(task, cwd, files, must_cover)
     if error:
-        return error, {}
+        return error, _edit_base_stats()
 
     root = Path(cwd).expanduser().resolve()
     cover = list(must_cover or [])
     if cover and not _dekko_ensure_map(root):
-        return NIM_EDIT_NO_DEKKO, {}
+        return NIM_EDIT_NO_DEKKO, _edit_base_stats()
 
     job = _edit_job(task, root, files, cover, model)
     steps = min(max(1, max_steps or NIM_EDIT_STEPS), NIM_AGENT_MAX_STEPS)
@@ -7715,9 +7821,7 @@ def _run_nim_edit(
     )
     started = time.monotonic()
     ok, text, stats = _edit_explore(job, job.prompt, steps)
-    stats.update(
-        blocks=0, files=0, repair=False, outcome="refused", patch=None
-    )
+    stats.update(_edit_base_stats())
     if ok:
         check = _edit_check_answer(text, job)
         if check.errors:
@@ -7811,6 +7915,9 @@ def nim_edit_start(
     error = _edit_input_error(task, cwd, files, must_cover)
     if error:
         return error
+
+    if must_cover and not _dekko_enabled():
+        return NIM_EDIT_NO_DEKKO
 
     kwargs: dict[str, Any] = {
         "task": task,
