@@ -2644,6 +2644,91 @@ def test_patch_file_written_and_pruned(tmp_path, monkeypatch):
     assert new.read_bytes() == b"new\n"
 
 
+def test_diff_from_a_subdirectory_root_uses_the_repo_top_level(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    top = _patch_repo(
+        tmp_path, {"f.txt": b"top\nold\n", "pkg/f.txt": b"pkg\nold\n"}
+    )
+    root = top / "pkg"
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "f.txt", "old", "new")], root, None
+    )
+    assert errors == []
+    tree, reason = server._edit_work_tree(root)
+    assert reason is None and tree.resolve() == top.resolve()
+    prefix = server._edit_repo_prefix(root, tree)
+    assert prefix == "pkg/"
+    diff = server._edit_build_diff(changes, prefix)
+    assert "--- a/pkg/f.txt" in diff
+    assert server._edit_git_check(diff, root) == (True, "")
+    patch = server._edit_write_patch(diff)
+    subprocess.run(["git", "-C", str(top), "apply", str(patch)], check=True)
+    assert (top / "pkg" / "f.txt").read_text() == "pkg\nnew\n"
+    assert (top / "f.txt").read_text() == "top\nold\n"
+
+
+def test_git_check_fails_on_a_skipped_patch(tmp_path, monkeypatch):
+    top = _patch_repo(tmp_path, {"f.txt": b"old\n"})
+    real = server.subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "apply"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, "", "Skipped patch 'f.txt'."
+            )
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    ok, message = server._edit_git_check("x", top)
+    assert ok is False and "Skipped patch" in message
+
+
+def test_git_check_says_when_git_could_not_run(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(server.subprocess, "run", boom)
+    ok, message = server._edit_git_check("x", tmp_path)
+    assert ok is False
+    assert message.startswith("git check could not run:")
+
+
+def test_diff_keeps_form_feed_and_lone_cr(tmp_path, monkeypatch):
+    root, _, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"w.txt": b"a\x0cb\rc\nold\nz\n"},
+        [_blk(1, "w.txt", "old", "new")],
+    )
+    assert (root / "w.txt").read_bytes() == b"a\x0cb\rc\nnew\nz\n"
+
+
+def test_prune_continues_past_a_failing_unlink(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    folder = server._cache_dir() / server.NIM_EDIT_PATCH_DIR
+    folder.mkdir(parents=True)
+    age = time.time() - 31 * 86400
+    files = [folder / "a.diff", folder / "b.diff"]
+    for f in files:
+        f.write_text("x")
+        os.utime(f, (age, age))
+    real = Path.unlink
+    calls = []
+
+    def flaky(self, *args, **kwargs):
+        calls.append(self.name)
+        if len(calls) == 1:
+            raise PermissionError("no")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    server._edit_prune_patches()
+    assert len(calls) == 2
+    assert sum(f.exists() for f in files) == 1
+
+
 def test_main_guard_is_the_last_top_level_statement():
     import ast
 
