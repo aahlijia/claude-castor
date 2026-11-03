@@ -37,6 +37,7 @@ off during a run, so repeated runs are independent.
 """
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -44,6 +45,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
@@ -140,8 +142,32 @@ def build_task(
     return task, error or ""
 
 
+@contextlib.contextmanager
+def dekko_scope(config: dict, server: ModuleType) -> Iterator[None]:
+    """Set the server's dekko override for a run when the config names one."""
+    if config.get("dekko") is None:
+        yield
+        return
+    token = server._dekko_override.set(config["dekko"])
+    try:
+        yield
+    finally:
+        server._dekko_override.reset(token)
+
+
+def _prepare_dekko(config: dict, cwd: Path, server: ModuleType) -> None:
+    """With dekko on, make sure the snapshot has a map before the run."""
+    if config.get("dekko") is True:
+        server._dekko_ensure_map(cwd)
+
+
 def run_plain(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one explain or summarize case through its tool and score it."""
+    with dekko_scope(config, server):
+        return _run_plain(case, config, server)
+
+
+def _run_plain(case: dict, config: dict, server: ModuleType) -> dict:
     base = Path(case["_base"])
     started = time.monotonic()
     if case["role"] == "explain":
@@ -152,6 +178,7 @@ def run_plain(case: dict, config: dict, server: ModuleType) -> dict:
         )
     else:
         cwd = snapshot(case, server)
+        _prepare_dekko(config, cwd, server)
         text = _tool_fn(server.nim_summarize)(
             str(cwd), case["target"], config["model"]
         )
@@ -161,6 +188,7 @@ def run_plain(case: dict, config: dict, server: ModuleType) -> dict:
         case=case["name"],
         role=case["role"],
         config=config["label"],
+        dekko=config.get("dekko"),
         seconds=round(time.monotonic() - started, 1),
         steps=None,
         quotes=[0, 0],
@@ -215,12 +243,19 @@ def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one case under one configuration and score it."""
     if case["role"] in PLAIN_ROLES:
         return run_plain(case, config, server)
+    with dekko_scope(config, server):
+        return _run_agent_case(case, config, server)
+
+
+def _run_agent_case(case: dict, config: dict, server: ModuleType) -> dict:
     cwd = snapshot(case, server)
+    _prepare_dekko(config, cwd, server)
     task, error = build_task(case, cwd, server)
     if task is None:
         return {
             "case": case["name"],
             "config": config["label"],
+            "dekko": config.get("dekko"),
             "error": error,
         }
     steps = getattr(server, ROLE_STEPS.get(case["role"], ""), None) or 8
@@ -241,6 +276,7 @@ def run_case(case: dict, config: dict, server: ModuleType) -> dict:
         case=case["name"],
         role=case["role"],
         config=config["label"],
+        dekko=config.get("dekko"),
         seconds=seconds,
         steps=stats.get("steps") or footer_steps(text),
         quotes=stats.get("quotes") or footer_quotes(text),
@@ -414,7 +450,23 @@ def parse_config(raw: str) -> dict:
         key, _, value = item.partition("=")
         if key == "step":
             config["step"] = value
+        elif key == "dekko":
+            if value not in ("on", "off"):
+                raise ValueError(f"dekko must be on or off, got {value!r}")
+            config["dekko"] = value == "on"
     return config
+
+
+def select_cases(
+    cases: list[dict], only: list[str], roles: list[str]
+) -> list[dict]:
+    """Cases whose name is in only and whose role is in roles (empty = all)."""
+    return [
+        c
+        for c in cases
+        if (not only or c["name"] in only)
+        and (not roles or c["role"] in roles)
+    ]
 
 
 def main() -> None:
@@ -424,10 +476,19 @@ def main() -> None:
         "--config",
         action="append",
         default=[],
-        help="label=model[,step=model]; repeatable (default: server default)",
+        help=(
+            "label=model[,step=model][,dekko=on|off]; repeatable "
+            "(default: server default)"
+        ),
     )
     parser.add_argument("--server", type=Path, default=ROOT / "server.py")
     parser.add_argument("--only", action="append", default=[])
+    parser.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        help="keep only cases with this role; repeatable",
+    )
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument(
@@ -444,8 +505,7 @@ def main() -> None:
         for case in json.loads(path.read_text()):
             case["_base"] = str(path.resolve().parent)
             cases.append(case)
-    if args.only:
-        cases = [c for c in cases if c["name"] in args.only]
+    cases = select_cases(cases, args.only, args.role)
     if args.rescore:
         rescore(args.rescore, cases)
         return
