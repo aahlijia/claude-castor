@@ -782,6 +782,25 @@ def test_agent_tools_are_confined_and_skip_secrets(repo):
     assert ".env" not in server._agent_run_tool(repo, "list_dir", {})
 
 
+def _read(repo, path):
+    return server._agent_run_tool(
+        repo, "read_range", {"path": path, "start": 1, "end": 5}
+    )
+
+
+def test_agent_dekko_folders_are_off_limits(repo):
+    (repo / ".dekko").mkdir()
+    (repo / ".dekko" / "MAP.md").write_text("map of TARGET\n")
+    (repo / "sub" / ".dekko").mkdir(parents=True)
+    (repo / "sub" / ".dekko" / "x").write_text("TARGET\n")
+    assert _read(repo, ".dekko/MAP.md").startswith("[error: path is off")
+    assert _read(repo, "sub/.dekko/x").startswith("[error: path is off")
+    assert ".dekko" not in server._agent_run_tool(repo, "list_dir", {})
+    listing = server._agent_run_tool(repo, "list_dir", {"path": "sub"})
+    assert ".dekko" not in listing
+    assert ".dekko" not in server._agent_grep(repo, "TARGET", ".", None)
+
+
 def test_agent_symlink_out_of_project_is_refused(repo, tmp_path):
     (repo / "link.txt").symlink_to(tmp_path / "outside.txt")
     out = server._agent_run_tool(
@@ -2435,6 +2454,15 @@ def test_apply_rejects_out_of_scope_denied_and_escaping_paths(repo):
         [_blk(1, "src/a.py", "TARGET = 1", "x")], repo, ["./src/"]
     )
     assert errors == [] and len(changes) == 1
+
+
+def test_apply_refuses_an_edit_inside_dekko_folder(repo):
+    (repo / ".dekko").mkdir()
+    (repo / ".dekko" / "notes.json").write_text('{"TARGET": 1}\n')
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, ".dekko/notes.json", "TARGET", "x")], repo, None
+    )
+    assert changes == {} and errors == ["block 1: denied"]
 
 
 def test_apply_rejects_overlapping_blocks_even_when_paths_differ_in_form(repo):

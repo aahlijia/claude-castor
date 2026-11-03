@@ -4533,7 +4533,9 @@ NIM_AGENT_SKIP_DIRS = SKIP_DIRS | {"Library", "Temp", "obj"}
 NIM_AGENT_INDEX_TTL = 60.0
 _agent_index_lock = threading.Lock()
 _agent_index_cache: dict[Path, tuple[float, list[str] | None]] = {}
-_NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg"}
+# .dekko holds dekko's map and notes: read through the dekko tools only.
+_NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg", ".dekko"}
+_AGENT_DENIED_ERROR = "path is off limits (secrets, .git and .dekko)"
 _NIM_AGENT_DENIED_NAMES = {
     "id_rsa",
     "id_ed25519",
@@ -4663,7 +4665,7 @@ _BARE_CITATION_RE = re.compile(
 
 
 def _agent_denied(relative: Path) -> bool:
-    """True for paths the agent may never read (secrets, .git)."""
+    """True for paths the agent may never read (secrets, .git, .dekko)."""
     if _NIM_AGENT_DENIED_DIRS & set(relative.parts):
         return True
     name = relative.name.lower()
@@ -4687,7 +4689,7 @@ def _agent_resolve(root: Path, raw: str) -> tuple[Path | None, str | None]:
     if not target.is_relative_to(root):
         return None, "path is outside the project"
     if _agent_denied(target.relative_to(root)):
-        return None, "path is off limits (secrets and .git)"
+        return None, _AGENT_DENIED_ERROR
     return target, None
 
 
@@ -5199,9 +5201,9 @@ def _symbol_references(
 ) -> tuple[list[tuple[str, int, str]], bool]:
     """Every whole-word grep hit for `symbol`: ((path, line, text), done).
 
-    Searches the same files as the agent's grep, with no hit cap, and
-    skips dekko's own `.dekko/` folder. `done` is False when the search
-    timed out, so the list may be short.
+    Searches the same files as the agent's grep, with no hit cap (denied
+    paths, `.dekko/` folders included, are skipped). `done` is False when
+    the search timed out, so the list may be short.
     """
     regex = re.compile(rf"\b{re.escape(symbol)}\b")
     deadline = time.monotonic() + NIM_AGENT_GREP_SECONDS
@@ -5210,9 +5212,7 @@ def _symbol_references(
         if time.monotonic() > deadline:
             return hits, False
         rel = path.relative_to(root).as_posix()
-        if rel.startswith(".dekko/") or not _agent_grep_readable(
-            root, path, None
-        ):
+        if not _agent_grep_readable(root, path, None):
             continue
         data = _read_bytes(path)
         if data is None or _is_binary_bytes(data):
@@ -6975,7 +6975,7 @@ class FileEdit:
 
 _EDIT_PATH_ERRORS = {
     "path is outside the project": "outside cwd",
-    "path is off limits (secrets and .git)": "denied",
+    _AGENT_DENIED_ERROR: "denied",
 }
 
 
