@@ -1509,7 +1509,8 @@ def test_summarize_splits_a_big_file_and_merges(stub, tmp_path):
     )
     for text in ("p", "p", "merged"):
         stub.queue.append((200, {}, _summary_json(text)))
-    out = json.loads(_tool(server.nim_summarize)(str(tmp_path), "DECISIONS.md"))
+    summarize = _tool(server.nim_summarize)
+    out = json.loads(summarize(str(tmp_path), "DECISIONS.md"))
     assert out["summary"] == "merged"
     users = [p[3]["messages"][-1]["content"] for p in stub.posts()]
     assert len(users) == 3
