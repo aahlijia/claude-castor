@@ -2265,3 +2265,52 @@ def test_dekko_trace_exit_ten_is_an_error_not_no_path(deny_repo, fake_dekko):
         deny_repo, "trace", {"source": "a", "target": "b"}
     )
     assert text == "[tool error: dekko error: exit 10: boom]"
+
+
+# --- review call sites from dekko ----------------------------------------
+
+_REVIEW_DIFF = (
+    "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-def func():\n+def func(x):\n"
+)
+
+
+def _callers_json(sites):
+    return json.dumps(
+        {"results": [{"path": "src/a.py", "line": 1, "id": "x", "sites": sites}]}
+    )
+
+
+def test_review_uses_prefers_dekko_sites(repo, fake_dekko):
+    fake_dekko.queue += [(True, ""), (True, _callers_json([2]))]
+    out = server._review_uses(repo, _REVIEW_DIFF)
+    assert "uses of func:" in out
+    assert "src/a.py:2:TARGET = 1" in out
+
+
+def test_review_uses_falls_back_to_grep_when_dekko_off(
+    repo, fake_dekko, monkeypatch
+):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    (repo / "src" / "c.py").write_text("def func():\n    pass\nfunc()\n")
+    diff = "--- a/src/c.py\n+++ b/src/c.py\n@@ -1,1 +1,1 @@\n-def func():\n+def func(x):\n"
+    out = server._review_uses(repo, diff)
+    assert "src/c.py:3:func()" in out
+    assert fake_dekko.calls == []
+
+
+def test_review_uses_falls_back_to_grep_when_callers_fail(repo, fake_dekko):
+    (repo / "src" / "c.py").write_text("func()\n")
+    fake_dekko.queue += [
+        (True, ""),
+        (False, "[dekko error: exit 4: ambiguous name]"),
+    ]
+    out = server._review_uses(repo, _REVIEW_DIFF)
+    assert "src/c.py:1:func()" in out
+
+
+def test_review_uses_caps_dekko_sites(repo, fake_dekko):
+    (repo / "src" / "a.py").write_text("x\n" * 20)
+    fake_dekko.queue += [(True, ""), (True, _callers_json(list(range(2, 14))))]
+    out = server._review_uses(repo, _REVIEW_DIFF)
+    assert out.count("src/a.py:") == server.NIM_REVIEW_USES_PER_SYMBOL
+    assert "(4 more)" in out
