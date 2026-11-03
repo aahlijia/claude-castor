@@ -1480,8 +1480,9 @@ def _dispatch(
 # these let a long prompt run off-thread so Claude can keep working and
 # collect the result later via gemini_poll. Jobs are in-memory only — a
 # server restart drops them. Concurrency is capped by the pool so a
-# fan-out cannot spawn unbounded agy processes.
-JOB_POOL_SIZE = 4
+# fan-out cannot spawn unbounded agy processes. The pool is sized to the
+# NIM gate (see _job_pool_size, built after the NIM helpers).
+JOB_POOL_MAX = 8
 MAX_JOBS = 50
 
 
@@ -1505,7 +1506,6 @@ class _Job:
 
 _jobs: dict[str, _Job] = {}
 _jobs_lock = threading.Lock()
-_job_pool = ThreadPoolExecutor(max_workers=JOB_POOL_SIZE)
 
 
 def _evict_jobs() -> None:
@@ -1541,6 +1541,7 @@ def _run_job(job_id: str, kwargs: dict[str, Any], runner: Any = None) -> None:
     session param), so concurrent workers never race on a transcript file.
     A bracketed response (agy error/status) is recorded as an "error".
     """
+    _nim_patience.on = True  # a job may wait for NIM; Claude is not blocked
     try:
         response = (runner or _dispatch)(**kwargs)
     except Exception as exc:  # worker must never crash silently
@@ -2696,7 +2697,8 @@ NIM_KEYS_URL = "https://build.nvidia.com/settings/api-keys"
 # Tunables. Free-tier limits are set by NVIDIA and change, so each default
 # is a conservative guess that the CASTOR_NIM_* env var overrides.
 NIM_DEFAULT_RPM = 40  # requests per 60s window, enforced client-side
-NIM_DEFAULT_CONCURRENCY = 4  # simultaneous in-flight requests
+NIM_DEFAULT_CONCURRENCY_PER_KEY = 4  # in-flight requests, times the keys
+NIM_MAX_CONCURRENCY = 12
 NIM_DEFAULT_MAX_INPUT_CHARS = 300_000  # ~75k tokens of prompt
 NIM_DEFAULT_MAX_TOKENS = 4096  # completion cap per request
 NIM_DEFAULT_TEMPERATURE = 0.2
@@ -2708,9 +2710,11 @@ NIM_MAX_TIMEOUTS = 2  # a timed-out request is retried at most once
 NIM_BACKOFF_BASE = 2.0
 NIM_BACKOFF_MAX = 30.0
 NIM_BACKOFF_JITTER = 1.0
-# Longest Castor blocks Claude waiting on its own limiter or a cooldown
-# before returning a "try again in Ns" error instead.
+# Longest Castor blocks Claude waiting on its own limiter, a cooldown or a
+# free slot before returning a "try again in Ns" error instead. Background
+# jobs block no one, so they wait up to NIM_JOB_MAX_WAIT.
 NIM_MAX_WAIT = 30.0
+NIM_JOB_MAX_WAIT = 300.0
 NIM_MAX_COOLDOWN = 600.0
 NIM_MAX_LISTED_MODELS = 200
 # Reasoning models spend tokens thinking first; 8 left them with no content.
@@ -2934,8 +2938,37 @@ def _nim_gate() -> threading.BoundedSemaphore:
 
 
 def _nim_gate_size() -> int:
-    """Simultaneous in-flight NIM requests (CASTOR_NIM_CONCURRENCY)."""
-    return int(_nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY))
+    """Simultaneous in-flight NIM requests.
+
+    CASTOR_NIM_CONCURRENCY when set; otherwise
+    NIM_DEFAULT_CONCURRENCY_PER_KEY per key, at most NIM_MAX_CONCURRENCY.
+    Keys are env-only, so this is fixed for the process.
+    """
+    keys = max(1, len(_nim_api_keys()))
+    scaled = min(NIM_MAX_CONCURRENCY, NIM_DEFAULT_CONCURRENCY_PER_KEY * keys)
+    return int(_nim_env("CASTOR_NIM_CONCURRENCY", scaled))
+
+
+def _nim_max_wait() -> float:
+    """How long this thread may wait for a key or slot.
+
+    NIM_JOB_MAX_WAIT on a background-job worker (_run_job marks it),
+    NIM_MAX_WAIT otherwise: foreground calls block Claude, so fail fast.
+    """
+    return (
+        NIM_JOB_MAX_WAIT
+        if getattr(_nim_patience, "on", False)
+        else (NIM_MAX_WAIT)
+    )
+
+
+def _job_pool_size() -> int:
+    """Background workers: the NIM gate size, at most JOB_POOL_MAX.
+
+    A background agent run has one request in flight, so workers past the
+    gate would only queue for slots.
+    """
+    return min(_nim_gate_size(), JOB_POOL_MAX)
 
 
 def _nim_client() -> httpx.Client:
@@ -2957,6 +2990,10 @@ def _nim_client() -> httpx.Client:
                 ),
             )
         return _nim_http
+
+
+_nim_patience = threading.local()
+_job_pool = ThreadPoolExecutor(max_workers=_job_pool_size())
 
 
 def _nim_key_state(key: str | None) -> _NimKeyState:
@@ -3021,14 +3058,13 @@ def _nim_pick_key(keys: list[str | None]) -> tuple[str | None, float]:
 def _nim_admit(
     keys: list[str | None] | None = None,
 ) -> tuple[str | None, str | None]:
-    """Wait for a usable key and rate-limit slot, within NIM_MAX_WAIT.
+    """Wait for a usable key and rate-limit slot, within _nim_max_wait().
 
     Returns (key, None) once admitted, or (None, bracketed error) when the
-    wait would exceed NIM_MAX_WAIT: failing fast beats blocking Claude for
-    minutes.
+    wait would run past it: failing fast beats blocking Claude for minutes.
     """
     keys = keys or _nim_api_keys() or [None]
-    deadline = time.monotonic() + NIM_MAX_WAIT
+    deadline = time.monotonic() + _nim_max_wait()
     while True:
         key, wait = _nim_pick_key(keys)
         if wait <= 0:
@@ -3278,7 +3314,7 @@ def _nim_request(
         headers = {"Accept": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        if not slots.acquire(timeout=NIM_MAX_WAIT):
+        if not slots.acquire(timeout=_nim_max_wait()):
             return None, "[NVIDIA NIM is busy — too many requests in flight.]"
         started = time.monotonic()
         try:
@@ -4219,7 +4255,7 @@ def nim_status(verify: bool = True) -> str:
         listed = "listed" if model in ids else "NOT in catalog"
         lines.append(f"models_listed: {len(ids)} (default model {listed})")
     rpm = int(_nim_env("CASTOR_NIM_RPM", NIM_DEFAULT_RPM))
-    slots = int(_nim_env("CASTOR_NIM_CONCURRENCY", NIM_DEFAULT_CONCURRENCY))
+    slots = _nim_gate_size()
     max_in = int(
         _nim_env("CASTOR_NIM_MAX_INPUT_CHARS", NIM_DEFAULT_MAX_INPUT_CHARS)
     )
