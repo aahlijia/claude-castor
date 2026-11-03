@@ -1580,3 +1580,28 @@ def test_summary_key_points_packed_in_one_string_are_split():
     assert out["key_points"] == ["one", "two", "three"]
     plain = json.dumps({"summary": "S", "key_points": "solo"})
     assert json.loads(server._tidy_summary(plain))["key_points"] == ["solo"]
+
+
+def test_wrong_directory_with_a_unique_basename_is_verified_and_tagged(
+    tmp_path,
+):
+    root = tmp_path / "w"
+    (root / "Tools" / "playtest").mkdir(parents=True)
+    (root / "Tools" / "playtest" / "run.sh").write_text("a\nb\nfail here\n")
+    (root / "x").mkdir()
+    (root / "x" / "dup.py").write_text("1\n")
+    (root / "y").mkdir()
+    (root / "y" / "dup.py").write_text("1\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    root = root.resolve()
+    server._nim_reset_state()
+    out, verified, total = server._agent_verify_citations(
+        "Tools/run.sh:3 and z/dup.py:1 and run.sh:9", root
+    )
+    assert "Tools/run.sh:3 [path is Tools/playtest/run.sh]" in out
+    assert "z/dup.py:1 [unverified]" in out and "run.sh:9 [unverified]" in out
+    assert (verified, total) == (1, 3)
+    out, matched, checked = server._agent_check_quotes(
+        "- Tools/run.sh:3 - `fail here`", root
+    )
+    assert (matched, checked) == (1, 1)

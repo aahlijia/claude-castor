@@ -4959,37 +4959,57 @@ def _unique_basenames(root: Path) -> dict[str, str]:
     return {b: n for b, n in seen.items() if n and "/" in n}
 
 
+def _citation_target(root: Path, raw: str, unique: dict[str, str]) -> str:
+    """The project path a citation names.
+
+    `raw` itself when it is a file; otherwise the one project file with
+    its basename (models cite `mansion.sh` or the wrong directory for
+    Tools/playtest/mansion.sh), else `raw` unchanged.
+    """
+    target, error = _agent_resolve(root, raw)
+    if not error and target is not None and target.is_file():
+        return raw
+    return unique.get(Path(raw).name, raw)
+
+
 def _agent_verify_citations(answer: str, root: Path) -> tuple[str, int, int]:
     """Mark every path:line citation that doesn't exist as [unverified].
 
-    Returns (annotated answer, verified count, total count).
+    A wrong directory with a unique basename is checked against that file
+    and tagged [path is <real path>]. Returns (annotated answer, verified
+    count, total count).
     """
-    counts: dict[str, int | None] = {}
+    counts: dict[str, tuple[int | None, str]] = {}
     tally = [0, 0]
     unique = _unique_basenames(root)
 
-    def line_count(raw: str) -> int | None:
+    def line_count(raw: str) -> tuple[int | None, str]:
         if raw not in counts:
-            target, error = _agent_resolve(root, unique.get(raw, raw))
+            name = _citation_target(root, raw, unique)
+            target, error = _agent_resolve(root, name)
             data = None
             if not error and target is not None and target.is_file():
                 data = _read_bytes(target)
-            counts[raw] = (
+            total = (
                 len(data.decode("utf-8", errors="replace").splitlines())
                 if data is not None
                 else None
             )
+            counts[raw] = (total, name)
         return counts[raw]
 
     def mark(match: re.Match, bare: bool = False) -> str:
-        total = line_count(match.group(1))
+        raw = match.group(1)
+        total, name = line_count(raw)
         if bare and total is None:
             return match.group(0)
         tally[1] += 1
-        if _citation_lines_exist(match.group(2), total):
-            tally[0] += 1
-            return match.group(0)
-        return match.group(0) + " [unverified]"
+        if not _citation_lines_exist(match.group(2), total):
+            return match.group(0) + " [unverified]"
+        tally[0] += 1
+        if name != raw and "/" in raw:
+            return match.group(0) + f" [path is {name}]"
+        return match.group(0)
 
     answer = _CITATION_RE.sub(mark, answer)
     answer = _BARE_CITATION_RE.sub(lambda m: mark(m, bare=True), answer)
@@ -5031,7 +5051,9 @@ def _agent_check_line_quote(
         return line
     raw = cite.group(1)
     if raw not in cache:
-        cache[raw] = _agent_text_lines(root, unique.get(raw, raw))
+        cache[raw] = _agent_text_lines(
+            root, _citation_target(root, raw, unique)
+        )
     text = cache[raw]
     if text is None:
         return line
