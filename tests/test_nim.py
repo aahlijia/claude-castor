@@ -2269,14 +2269,16 @@ def test_dekko_trace_exit_ten_is_an_error_not_no_path(deny_repo, fake_dekko):
 
 # --- review call sites from dekko ----------------------------------------
 
-_REVIEW_DIFF = (
-    "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-def func():\n+def func(x):\n"
-)
+_REVIEW_DIFF = "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-def func():\n+def func(x):\n"
 
 
 def _callers_json(sites):
     return json.dumps(
-        {"results": [{"path": "src/a.py", "line": 1, "id": "x", "sites": sites}]}
+        {
+            "results": [
+                {"path": "src/a.py", "line": 1, "id": "x", "sites": sites}
+            ]
+        }
     )
 
 
@@ -2314,3 +2316,24 @@ def test_review_uses_caps_dekko_sites(repo, fake_dekko):
     out = server._review_uses(repo, _REVIEW_DIFF)
     assert out.count("src/a.py:") == server.NIM_REVIEW_USES_PER_SYMBOL
     assert "(4 more)" in out
+
+
+def test_review_uses_runs_one_dekko_call_per_symbol(repo, fake_dekko):
+    fake_dekko.queue += [(True, ""), (True, _callers_json([2]))]
+    server._review_uses(repo, _REVIEW_DIFF)
+    queries = [c for c in fake_dekko.calls if c[0] == "query"]
+    assert [c[1] for c in queries] == ["callers"]
+
+
+def test_review_uses_reads_each_file_once(repo, fake_dekko, monkeypatch):
+    (repo / "src" / "a.py").write_text("x\n" * 20)
+    fake_dekko.queue += [(True, ""), (True, _callers_json(list(range(2, 17))))]
+    real = server._file_lines
+    reads = []
+    monkeypatch.setattr(
+        server, "_file_lines", lambda r, p: reads.append(p) or real(r, p)
+    )
+    out = server._review_uses(repo, _REVIEW_DIFF)
+    assert reads == ["src/a.py"]
+    assert out.count("src/a.py:") == server.NIM_REVIEW_USES_PER_SYMBOL
+    assert "(7 more)" in out
