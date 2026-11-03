@@ -2200,3 +2200,68 @@ def test_callers_argv_and_definition_query(deny_repo, fake_dekko):
         ],
         ["query", "symbol", "target", "--json", "--no-regen", *budget],
     ]
+
+
+# Real dekko 1.9.35 stderr for a name defined in a denied and an allowed file
+# (exit 4, printed even with --json).
+_AMBIGUOUS = (
+    False,
+    "[dekko error: exit 4: dekko: 'dup' is ambiguous; candidates:\n"
+    "  src/.env_helpers.py:6  dup()\n"
+    "  src/a.py:3  dup()]",
+)
+_AMBIGUOUS_ALL_DENIED = (
+    False,
+    "[dekko error: exit 4: dekko: 'dup' is ambiguous; candidates:\n"
+    "  src/.env_helpers.py:6  dup()\n"
+    "  .ssh/tool.py:2  dup()]",
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("symbol", {"name": "dup"}),
+        ("context", {"symbol": "dup"}),
+        ("callers", {"symbol": "dup"}),
+        ("trace", {"source": "dup", "target": "dup"}),
+        ("search", {"text": "dup"}),
+    ],
+)
+def test_dekko_ambiguity_error_lists_allowed_candidates_only(
+    deny_repo, fake_dekko, name, args
+):
+    fake_dekko.queue += [_AMBIGUOUS]
+    text = server._dekko_tool(deny_repo, name, args)
+    assert "env_helpers" not in text
+    assert "src/a.py:3  dup()" in text and "ambiguous" in text
+
+
+def test_dekko_ambiguity_with_only_denied_candidates(deny_repo, fake_dekko):
+    fake_dekko.queue += [_AMBIGUOUS_ALL_DENIED]
+    text = server._dekko_tool(deny_repo, "symbol", {"name": "dup"})
+    assert text == "[tool error: no symbol matches]"
+
+
+def test_dekko_other_error_lines_naming_denied_paths_are_dropped(
+    deny_repo, fake_dekko
+):
+    fake_dekko.queue += [
+        (False, "[dekko error: exit 5: bad\nsrc/.env_helpers.py broke\nok]")
+    ]
+    text = server._dekko_tool(deny_repo, "outline", {"path": "src/a.py"})
+    assert "env_helpers" not in text and "bad" in text
+
+
+def test_dekko_callers_failure_text_is_scrubbed(deny_repo, fake_dekko):
+    fake_dekko.queue += [_AMBIGUOUS]
+    sites, text = server._dekko_callers(deny_repo, "dup")
+    assert sites is None and "env_helpers" not in text
+
+
+def test_dekko_trace_exit_ten_is_an_error_not_no_path(deny_repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: exit 10: boom]")]
+    text = server._dekko_tool(
+        deny_repo, "trace", {"source": "a", "target": "b"}
+    )
+    assert text == "[tool error: dekko error: exit 10: boom]"
