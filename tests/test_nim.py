@@ -40,6 +40,22 @@ def _completion(text, finish="stop"):
     }
 
 
+def _write_sse(handler, spec):
+    """Stream spec["__sse__"] chunks, pausing after chunk `stall_after`."""
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.end_headers()
+    try:
+        for i, chunk in enumerate(spec["__sse__"], 1):
+            handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.flush()
+            if spec.get("stall_after") == i:
+                time.sleep(spec.get("stall", 1.0))
+        handler.wfile.write(b"data: [DONE]\n\n")
+    except OSError:  # the client gave up on a stall
+        pass
+
+
 class Stub:
     """Scripted OpenAI-compatible endpoint on a loopback port."""
 
@@ -57,6 +73,9 @@ class Stub:
                 pass
 
             def _reply(self, status, headers, body):
+                if isinstance(body, dict) and "__sse__" in body:
+                    _write_sse(self, body)
+                    return
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -213,7 +232,8 @@ def test_prompt_success_sends_expected_request(stub):
     assert path == "/v1/chat/completions"
     assert headers["Authorization"] == f"Bearer {KEY}"
     assert body["model"] == server.NIM_DEFAULT_MODEL
-    assert body["stream"] is False
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
     assert body["messages"][0] == {
         "role": "system",
         "content": server.SYSTEM_INSTRUCTION,
@@ -1611,7 +1631,7 @@ def test_wrong_directory_with_a_unique_basename_is_verified_and_tagged(
     assert (matched, checked) == (1, 1)
 
 
-# --- transport -----------------------------------------------------------------
+# --- transport -----------------------------------------------------------
 
 
 def test_requests_reuse_one_http_client(stub):
@@ -1649,3 +1669,112 @@ def test_background_job_waits_for_a_slot_a_foreground_call_does_not(
     threading.Timer(0.3, gate.release).start()
     job = _job_id(_tool(server.nim_start)("bg", use_cache=False))
     assert _poll_until_done(job) == "stub answer"
+
+
+# --- streaming -----------------------------------------------------------
+
+
+def _delta(content=None, finish=None, calls=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if calls is not None:
+        delta["tool_calls"] = calls
+    return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+USAGE = {"prompt_tokens": 11, "completion_tokens": 7}
+
+
+def test_streamed_answer_is_rebuilt(stub):
+    chunks = [
+        _delta("Hel"),
+        {"choices": [{"delta": {"reasoning_content": "hmm"}}]},
+        _delta("lo", finish="stop"),
+        {"choices": [], "usage": USAGE},
+    ]
+    stub.queue.append((200, {}, {"__sse__": chunks}))
+    assert _tool(server.nim_prompt)("q", use_cache=False) == "Hello"
+
+
+def test_streamed_tool_call_split_across_deltas_is_merged(stub, repo):
+    first = {"index": 0, "id": "c1", "type": "function"}
+    first["function"] = {"name": "grep", "arguments": '{"pat'}
+    rest = {"index": 0, "function": {"arguments": 'tern": "TARGET"}'}}
+    stub.queue.append(
+        (
+            200,
+            {},
+            {
+                "__sse__": [
+                    _delta(calls=[first]),
+                    _delta(calls=[rest], finish="tool_calls"),
+                ]
+            },
+        )
+    )
+    stub.queue.append((200, {}, {"__sse__": [_delta("done", "stop")]}))
+    out = _tool(server.nim_agent)("find TARGET", str(repo))
+    assert out.startswith("done")
+    tool_msg = stub.posts()[1][3]["messages"][-1]
+    assert tool_msg["tool_call_id"] == "c1"
+    assert "src/a.py:2:TARGET = 1" in tool_msg["content"]
+
+
+def test_streamed_length_finish_keeps_the_truncation_note(stub):
+    stub.queue.append(
+        (200, {}, {"__sse__": [_delta("partial"), _delta("", "length")]})
+    )
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("partial") and "truncated at max_tokens" in out
+
+
+def test_stalled_answer_returns_partial_text_with_a_note(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_TIMEOUT", "0.2")
+    spec = {"__sse__": [_delta("half an "), _delta("answer")]}
+    stub.queue.append((200, {}, {**spec, "stall_after": 2, "stall": 0.5}))
+    out = _tool(server.nim_prompt)("q", use_cache=False)
+    assert out.startswith("half an answer")
+    assert "[Note: response cut off after a stall of 0s.]" in out
+    assert len(stub.posts()) == 1
+
+
+def test_stalled_tool_step_fails_as_a_timeout_and_retries_once(
+    stub, repo, monkeypatch
+):
+    monkeypatch.setenv("CASTOR_NIM_TIMEOUT", "0.2")
+    call = {"index": 0, "id": "c1", "function": {"name": "grep"}}
+    stalled = {
+        "__sse__": [_delta(calls=[call])],
+        "stall_after": 1,
+        "stall": 0.5,
+    }
+    stub.queue.extend([(200, {}, stalled), (200, {}, stalled)])
+    out = _tool(server.nim_agent)("t", str(repo))
+    assert out.startswith("[NVIDIA NIM error") and "stream stopped" in out
+    assert len(stub.posts()) == 2
+
+
+def test_stream_can_be_turned_off(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_STREAM", "0")
+    _tool(server.nim_prompt)("q", use_cache=False)
+    body = stub.posts()[0][3]
+    assert body["stream"] is False and "stream_options" not in body
+
+
+def test_streamed_usage_reaches_the_usage_log(stub, tmp_path):
+    stub.queue.append(
+        (
+            200,
+            {},
+            {
+                "__sse__": [
+                    _delta("ok", "stop"),
+                    {"choices": [], "usage": USAGE},
+                ]
+            },
+        )
+    )
+    _tool(server.nim_prompt)("q", use_cache=False)
+    entry = _usage_entries(tmp_path)[-1]
+    assert entry["prompt_tokens"] == 11 and entry["completion_tokens"] == 7
