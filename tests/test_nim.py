@@ -2385,3 +2385,12 @@ def test_parse_edit_blocks_reports_missing_path():
     )
     assert errors == ["block 1: missing path"]
     assert [b.index for b in blocks] == [2]
+
+
+def test_main_guard_is_the_last_top_level_statement():
+    import ast
+
+    tree = ast.parse(Path(server.__file__).read_text())
+    last = tree.body[-1]
+    assert isinstance(last, ast.If)
+    assert ast.unparse(last.test) == "__name__ == '__main__'"

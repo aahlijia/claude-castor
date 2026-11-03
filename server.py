@@ -6814,10 +6814,6 @@ def _triage_ends(lines: list[str], label: str) -> str:
     )
 
 
-if __name__ == "__main__":
-    mcp.run()
-
-
 # ---------------------------------------------------------------------------
 # NIM edit
 #
@@ -6928,3 +6924,7 @@ def _parse_edit_blocks(answer: str) -> tuple[list[EditBlock], list[str]]:
             blocks.append(block)
         if error:
             errors.append(error)
+
+
+if __name__ == "__main__":
+    mcp.run()
