@@ -1911,6 +1911,59 @@ def test_ensure_map_ttl_counts_from_build_end(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
+def _clocked_dekko(monkeypatch, tmp_path, results):
+    """dekko on, a fake clock, and `_dekko_run` popping `results`."""
+    clock = [1000.0]
+    calls = []
+
+    def run(root, args, timeout=10.0):
+        calls.append(args)
+        return results.pop(0)
+
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 35))
+    monkeypatch.setattr(server, "_dekko_run", run)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    return clock, calls
+
+
+def test_ensure_map_failure_waits_out_the_fail_ttl(monkeypatch, tmp_path):
+    clock, calls = _clocked_dekko(
+        monkeypatch, tmp_path, [(False, "[dekko error: crash]"), (True, "")]
+    )
+    assert server._dekko_ensure_map(tmp_path) is False
+    clock[0] += server.NIM_DEKKO_MAP_TTL * 2
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert server._dekko_ensure_map(tmp_path, fresh=True) is False
+    assert len(calls) == 1
+    clock[0] += server.NIM_DEKKO_MAP_FAIL_TTL
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(calls) == 2
+
+
+def test_ensure_map_fresh_skips_only_a_cached_success(monkeypatch, tmp_path):
+    clock, calls = _clocked_dekko(
+        monkeypatch, tmp_path, [(True, ""), (True, ""), (True, "")]
+    )
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(calls) == 1
+    assert server._dekko_ensure_map(tmp_path, fresh=True) is True
+    assert len(calls) == 2
+    clock[0] += server.NIM_DEKKO_MAP_TTL
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(calls) == 3
+
+
+def test_ensure_map_reset_clears_a_cached_failure(fake_dekko, tmp_path):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    assert server._dekko_ensure_map(tmp_path) is False
+    server._nim_reset_state()
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(fake_dekko.calls) == 2
+
+
 # --- dekko agent tools ----------------------------------------------------
 
 
