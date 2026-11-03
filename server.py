@@ -7444,7 +7444,7 @@ def _edit_write_patch(diff: str) -> Path:
 
 NIM_EDIT_STEPS = 12
 NIM_EDIT_REPAIR_STEPS = 4
-NIM_EDIT_NO_DEKKO = "[Error: must_cover needs the dekko map]"
+NIM_EDIT_NO_DEKKO = "[Error: must_cover needs the dekko map: {reason}]"
 NIM_EDIT_UNCHECKED = "not checked by git (apply with patch -p1)"
 
 NIM_EDIT_PROMPT = """\
@@ -7739,8 +7739,9 @@ def _edit_check_coverage(
         (errors like "call site server.py:3441 of _nim_admit not edited",
         sorted (path, line, text) of references outside `scope`).
     """
-    if not _dekko_ensure_map(root, fresh=True):
-        return ["must_cover: dekko could not refresh the map"], []
+    ok, why = _dekko_map_status(root, fresh=True)
+    if not ok:
+        return [f"must_cover: dekko could not refresh the map ({why})"], []
 
     _agent_index(root, fresh=True)  # the reference grep sees new files
     spans = {edit.relative: edit.spans for edit in changes.values()}
@@ -7958,8 +7959,9 @@ def _run_nim_edit(
 
     root = Path(cwd).expanduser().resolve()
     cover = list(must_cover or [])
-    if cover and not _dekko_ensure_map(root):
-        return NIM_EDIT_NO_DEKKO, _edit_base_stats()
+    ok, why = _dekko_map_status(root) if cover else (True, "")
+    if not ok:
+        return NIM_EDIT_NO_DEKKO.format(reason=why), _edit_base_stats()
 
     job = _edit_job(task, root, files, cover, model)
     steps = min(max(1, max_steps or NIM_EDIT_STEPS), NIM_AGENT_MAX_STEPS)
@@ -8072,8 +8074,9 @@ def nim_edit_start(
     if error:
         return error
 
-    if must_cover and not _dekko_enabled():
-        return NIM_EDIT_NO_DEKKO
+    off = _dekko_off_reason() if must_cover else None
+    if off is not None:
+        return NIM_EDIT_NO_DEKKO.format(reason=off)
 
     kwargs: dict[str, Any] = {
         "task": task,

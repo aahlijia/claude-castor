@@ -3144,14 +3144,19 @@ def test_nim_edit_must_cover_dekko_failure_is_an_error(
 
 def test_nim_edit_must_cover_needs_dekko(stub, repo):
     out = _tool(server.nim_edit)("rename", str(repo), must_cover=["x"])
-    assert out == "[Error: must_cover needs the dekko map]"
+    assert out == (
+        "[Error: must_cover needs the dekko map: dekko is switched off]"
+    )
     assert not stub.posts()
 
 
 def test_nim_edit_must_cover_needs_a_map_that_builds(stub, repo, fake_dekko):
-    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    fake_dekko.queue += [(False, "[dekko error: exit 2: no parser]")]
     out = _tool(server.nim_edit)("rename", str(repo), must_cover=["x"])
-    assert out == "[Error: must_cover needs the dekko map]"
+    assert out == (
+        "[Error: must_cover needs the dekko map: the dekko map build "
+        "failed: exit 2: no parser]"
+    )
     assert not stub.posts()
 
 
@@ -3280,7 +3285,8 @@ def test_nim_edit_failed_map_refresh_refuses(stub, repo, fake_dekko):
     out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
     assert out.split("\n") == [
         "[nim_edit: REFUSED after repair round]",
-        "- must_cover: dekko could not refresh the map",
+        "- must_cover: dekko could not refresh the map (the dekko map "
+        "build failed: crash)",
     ]
     assert _patches() == []
 
@@ -3316,9 +3322,29 @@ def test_callers_tool_lists_grep_only_references(repo, fake_dekko):
 def test_nim_edit_start_rejects_must_cover_without_dekko(stub, repo):
     start = _tool(server.nim_edit_start)
     assert start("rename", str(repo), must_cover=["x"]) == (
-        "[Error: must_cover needs the dekko map]"
+        "[Error: must_cover needs the dekko map: dekko is switched off]"
     )
     assert not stub.posts()
+
+
+def test_nim_edit_start_says_dekko_is_missing(stub, repo, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: None)
+    out = _tool(server.nim_edit_start)("rename", str(repo), must_cover=["x"])
+    assert out == (
+        "[Error: must_cover needs the dekko map: dekko is not installed "
+        "beside the server's Python]"
+    )
+
+
+def test_nim_edit_start_names_an_old_dekko(
+    stub, repo, fake_dekko, monkeypatch
+):
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 0))
+    out = _tool(server.nim_edit_start)("rename", str(repo), must_cover=["x"])
+    assert out == (
+        "[Error: must_cover needs the dekko map: dekko 1.9.0 is below 1.9.35]"
+    )
 
 
 def test_nim_edit_refuses_parse_errors_beside_a_valid_block(stub, repo):
