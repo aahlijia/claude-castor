@@ -2545,8 +2545,8 @@ def _apply_edits(tmp_path, monkeypatch, files, blocks):
     root = _patch_repo(tmp_path, files)
     changes, errors = server._edit_apply_in_memory(blocks, root, None)
     assert errors == []
-    diff = server._edit_build_diff(changes)
-    assert server._edit_git_check(diff, root) == (True, "")
+    diff, checked, detail = server._edit_make_patch(changes, root)
+    assert (checked, detail) == (True, "")
     patch = server._edit_write_patch(diff)
     subprocess.run(["git", "-C", str(root), "apply", str(patch)], check=True)
     return root, changes, diff
@@ -2620,9 +2620,7 @@ def test_diff_with_two_files_is_sorted(tmp_path, monkeypatch):
 def test_git_check_reports_a_failing_patch(tmp_path):
     root = _patch_repo(tmp_path, {"a.py": b"one\n"})
     edit = server.FileEdit(root / "a.py", "a.py", "zzz\n", "yyy\n", [(1, 1)])
-    ok, err = server._edit_git_check(
-        server._edit_build_diff({root / "a.py": edit}), root
-    )
+    _, ok, err = server._edit_make_patch({root / "a.py": edit}, root)
     assert ok is False and err
 
 
@@ -2727,6 +2725,59 @@ def test_prune_continues_past_a_failing_unlink(tmp_path, monkeypatch):
     server._edit_prune_patches()
     assert len(calls) == 2
     assert sum(f.exists() for f in files) == 1
+
+
+def test_make_patch_from_a_subdirectory_with_a_decoy(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    top = _patch_repo(
+        tmp_path, {"f.txt": b"top\nold\n", "pkg/f.txt": b"pkg\nold\n"}
+    )
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "f.txt", "old", "new")], top / "pkg", None
+    )
+    assert errors == []
+    diff, checked, detail = server._edit_make_patch(changes, top / "pkg")
+    assert (checked, detail) == (True, "")
+    assert "--- a/pkg/f.txt" in diff
+    patch = server._edit_write_patch(diff)
+    subprocess.run(["git", "-C", str(top), "apply", str(patch)], check=True)
+    assert (top / "pkg" / "f.txt").read_text() == "pkg\nnew\n"
+    assert (top / "f.txt").read_text() == "top\nold\n"
+
+
+def test_build_diff_requires_a_prefix():
+    with pytest.raises(TypeError):
+        server._edit_build_diff({})
+
+
+def test_make_patch_outside_a_repo_is_unchecked(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "a.txt").write_text("old\n")
+    changes, _ = server._edit_apply_in_memory(
+        [_blk(1, "a.txt", "old", "new")], plain, None
+    )
+    diff, checked, detail = server._edit_make_patch(changes, plain)
+    assert checked is None and "patch -p1" in detail
+    assert "--- a/a.txt" in diff
+
+
+def test_work_tree_ignores_the_locale(tmp_path, monkeypatch):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    assert server._edit_work_tree(plain) == (None, None)
+
+
+def test_make_patch_refuses_a_root_outside_the_top(tmp_path, monkeypatch):
+    top = _patch_repo(tmp_path, {"a.py": b"one\n"})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(server, "_edit_work_tree", lambda root: (top, None))
+    diff, checked, detail = server._edit_make_patch({}, elsewhere)
+    assert (diff, checked) == ("", False)
+    assert detail.startswith("git check could not run: cwd is not inside")
 
 
 def test_main_guard_is_the_last_top_level_statement():
