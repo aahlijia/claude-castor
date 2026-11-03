@@ -6517,14 +6517,48 @@ def _merge_spans(
     return merged
 
 
+def _site_row(root: Path, path: str, line: int) -> str | None:
+    """A `path:line:text` row for a call site, None if it cannot be read."""
+    target, error = _agent_resolve(root, path)
+    if error or target is None or not target.is_file():
+        return None
+    try:
+        with target.open(encoding="utf-8", errors="replace") as handle:
+            for number, text in enumerate(handle, 1):
+                if number == line:
+                    clipped = text.rstrip("\r\n")[:NIM_AGENT_LINE_CHARS]
+                    return f"{path}:{line}:{clipped}"
+    except OSError:
+        return None
+    return None
+
+
+def _dekko_use_rows(root: Path, name: str) -> list[str]:
+    """Rows for `name`'s call sites from dekko; empty if it has none."""
+    sites, _ = _dekko_callers(root, name)
+    rows = (_site_row(root, path, line) for path, line in sites or [])
+    return [row for row in rows if row]
+
+
+def _grep_use_rows(root: Path, name: str) -> list[str]:
+    hits = _agent_grep(root, rf"\b{re.escape(name)}\b", ".", None)
+    return [] if hits.startswith("[") else hits.splitlines()
+
+
 def _review_uses(root: Path, diff: str) -> str:
-    """Where each function the diff touches is used across the project."""
+    """Where each function the diff touches is used across the project.
+
+    Call sites come from dekko's call graph when it is on and has a map,
+    else (or when it has none for a name) from grep.
+    """
+    use_dekko = _dekko_enabled() and _dekko_ensure_map(root)
     sections: list[str] = []
     for name in _diff_symbols(diff):
-        hits = _agent_grep(root, rf"\b{re.escape(name)}\b", ".", None)
-        if hits.startswith("["):
+        rows = (use_dekko and _dekko_use_rows(root, name)) or _grep_use_rows(
+            root, name
+        )
+        if not rows:
             continue
-        rows = hits.splitlines()
         shown = rows[:NIM_REVIEW_USES_PER_SYMBOL]
         more = len(rows) - len(shown)
         tail = f"\n  ({more} more)" if more > 0 else ""
