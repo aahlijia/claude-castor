@@ -7115,10 +7115,10 @@ def _edit_lines(text: str) -> list[str]:
     return lines
 
 
-def _edit_file_diff(edit: FileEdit) -> str:
+def _edit_file_diff(edit: FileEdit, prefix: str = "") -> str:
     """The `git apply` diff for one file, with no-newline markers."""
-    old = _edit_quote_path("a/" + edit.relative)
-    new = _edit_quote_path("b/" + edit.relative)
+    old = _edit_quote_path("a/" + prefix + edit.relative)
+    new = _edit_quote_path("b/" + prefix + edit.relative)
     body = list(
         difflib.unified_diff(
             _edit_lines(edit.original), _edit_lines(edit.new), n=3
@@ -7134,38 +7134,57 @@ def _edit_file_diff(edit: FileEdit) -> str:
     return "".join(out)
 
 
-def _edit_build_diff(changes: dict[Path, FileEdit]) -> str:
-    """One unified diff over all changed files, sorted by relative path."""
+def _edit_build_diff(changes: dict[Path, FileEdit], prefix: str = "") -> str:
+    """One unified diff over all changed files, sorted by relative path.
+
+    `prefix` is the project root's path below the repo top level ("" or
+    "/"-terminated), since git reads header paths from the top level.
+    """
     edits = sorted(changes.values(), key=lambda e: e.relative)
-    return "".join(_edit_file_diff(edit) for edit in edits)
+    return "".join(_edit_file_diff(edit, prefix) for edit in edits)
 
 
-def _edit_in_work_tree(root: Path) -> bool:
-    """True when `root` is inside a git work tree."""
+def _edit_work_tree(root: Path) -> tuple[Path | None, str | None]:
+    """(top level, None) in a work tree; (None, None) when not a repo;
+    (None, reason) when git could not answer."""
     try:
         done = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return done.returncode == 0 and done.stdout.strip() == "true"
+    except subprocess.TimeoutExpired:
+        return None, "git timed out"
+    except OSError as exc:
+        return None, str(exc)
+    if done.returncode == 0 and done.stdout.strip():
+        return Path(done.stdout.strip()), None
+    stderr = done.stderr.strip()
+    if "not a git repository" in stderr:
+        return None, None
+    return None, stderr or f"git exited {done.returncode}"
 
 
-def _edit_git_check(diff: str, root: Path) -> tuple[bool | None, str]:
-    """`git apply --check` the diff in `root`; None outside a work tree."""
-    if not _edit_in_work_tree(root):
-        return None, ""
+def _edit_repo_prefix(root: Path, top: Path) -> str:
+    """`root` below the repo top level as "a/b/" (or "" at the top)."""
+    try:
+        below = root.resolve().relative_to(top.resolve()).as_posix()
+    except ValueError:
+        return ""
+    return "" if below == "." else below + "/"
+
+
+def _edit_apply_check(diff: str, top: Path) -> tuple[bool, str]:
+    """Run `git apply --check -v` at the repo top level."""
     try:
         with tempfile.NamedTemporaryFile(suffix=".diff") as tmp:
             tmp.write(diff.encode("utf-8"))
             tmp.flush()
             done = subprocess.run(
-                ["git", "apply", "--check", tmp.name],
-                cwd=str(root),
+                ["git", "apply", "--check", "-v", tmp.name],
+                cwd=str(top),
                 capture_output=True,
                 text=True,
                 stdin=subprocess.DEVNULL,
@@ -7175,9 +7194,24 @@ def _edit_git_check(diff: str, root: Path) -> tuple[bool | None, str]:
         return False, "git apply --check timed out"
     except OSError as exc:
         return False, f"git apply --check failed: {exc}"
-    if done.returncode == 0:
-        return True, ""
-    return False, done.stderr.strip()
+    if done.returncode != 0:
+        return False, done.stderr.strip()
+    if "Skipped patch" in done.stderr:
+        return False, done.stderr.strip()
+    return True, ""
+
+
+def _edit_git_check(diff: str, root: Path) -> tuple[bool | None, str]:
+    """`git apply --check` the diff; None outside a work tree.
+
+    The diff's header paths must already carry `_edit_repo_prefix`.
+    """
+    top, reason = _edit_work_tree(root)
+    if reason is not None:
+        return False, f"git check could not run: {reason}"
+    if top is None:
+        return None, ""
+    return _edit_apply_check(diff, top)
 
 
 def _edit_prune_patches(days: int = NIM_EDIT_PATCH_DAYS) -> None:
@@ -7185,11 +7219,15 @@ def _edit_prune_patches(days: int = NIM_EDIT_PATCH_DAYS) -> None:
     folder = _cache_dir() / NIM_EDIT_PATCH_DIR
     cutoff = time.time() - days * 86400
     try:
-        for entry in folder.iterdir():
-            if entry.is_file() and entry.stat().st_mtime < cutoff:
-                entry.unlink()
+        entries = list(folder.iterdir())
     except OSError:
         return
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 def _edit_write_patch(diff: str) -> Path:
