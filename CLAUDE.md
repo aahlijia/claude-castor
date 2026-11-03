@@ -294,6 +294,9 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands `server.py` depends on. After an intended agy
   upgrade, update `server.py`, then refresh with `--update-snapshot`.
+- Before a release and after a dekko bump, run `uv run python
+  scripts/check_dekko_surface.py` to catch drift in the dekko flags and JSON
+  fields Castor relies on; `--update-snapshot` refreshes it.
 - The version string lives only in `pyproject.toml`. Work happens on `develop`.
 
 ---

@@ -1,0 +1,69 @@
+{
+  "actions": [
+    "callers",
+    "symbol"
+  ],
+  "flags": {
+    "context": [
+      "--with-source",
+      "--budget",
+      "--no-regen"
+    ],
+    "map": [
+      "--if-stale",
+      "--quiet"
+    ],
+    "outline": [
+      "--budget",
+      "--no-regen"
+    ],
+    "query": [
+      "--sites",
+      "--no-regen",
+      "--budget",
+      "--json"
+    ],
+    "search": [
+      "--budget",
+      "--no-regen"
+    ],
+    "trace": [
+      "--no-regen"
+    ]
+  },
+  "json": {
+    "callers": {
+      "result": [
+        "id",
+        "kind",
+        "line",
+        "path",
+        "signature",
+        "sites"
+      ],
+      "top_level": [
+        "action",
+        "meta",
+        "module_level",
+        "results",
+        "target"
+      ]
+    },
+    "symbol": {
+      "result": [],
+      "top_level": [
+        "end_line",
+        "fan_in",
+        "fan_out",
+        "id",
+        "kind",
+        "language",
+        "line",
+        "notes",
+        "path",
+        "signature"
+      ]
+    }
+  },
+  "version": "dekko 1.9.35"
+}
