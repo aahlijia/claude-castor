@@ -2685,8 +2685,10 @@ def gemini_status(cwd: str | None = None) -> str:
 
 NIM_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # Pinned fallback only; override with CASTOR_NIM_MODEL or the `model`
-# argument. nim_models lists what the endpoint currently serves.
-NIM_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+# argument. nim_models lists what the endpoint currently serves. 3.5 Super
+# replaced Nemotron 3 Ultra (2026-11-02): higher recall on the plain-call
+# eval (44/48 vs 39/48) and 2-3x Ultra's tokens/s outside peak load.
+NIM_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 NIM_KEY_ENV_VARS = ("NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY")
 # Comma- or whitespace-separated list. Each key has its own rate limit and
 # cooldown, and requests rotate across them.
@@ -3663,7 +3665,7 @@ def nim_prompt(
             backends.
         model: NIM model id, e.g. "nvidia/nemotron-3-ultra-550b-a55b". Call
             nim_models for what is available. Defaults to
-            CASTOR_NIM_MODEL, then a built-in default.
+            CASTOR_NIM_MODEL, then Nemotron 3.5 Super.
         use_cache: If True (default), reuse a stored response for an
             identical prompt/model. Session calls are never cached.
         temperature: Sampling temperature 0 to 2 (default 0.2).
@@ -3712,7 +3714,7 @@ def nim_start(
         files: Absolute paths to files to inline into the prompt.
         directory: A directory whose contents should be inlined.
         raw: If True, skip the structured-response system instruction.
-        model: NIM model id (see nim_models).
+        model: NIM model id (see nim_models; default Nemotron 3.5 Super).
         use_cache: If True (default), a cache hit completes the job
             immediately without calling NIM.
         temperature: Sampling temperature 0 to 2 (default 0.2).
@@ -3775,7 +3777,7 @@ def nim_review(
         cwd: Absolute path to the git repository.
         diff: A unified diff to review. When None, uncommitted changes in
             cwd are captured automatically.
-        model: NIM model id (see nim_models).
+        model: NIM model id (see nim_models; default Nemotron 3.5 Super).
 
     Returns:
         Review findings, or a bracketed error/status string.
@@ -3796,7 +3798,7 @@ def nim_security_review(
         cwd: Absolute path to the git repository.
         diff: A unified diff to review. When None, uncommitted changes in
             cwd are captured automatically.
-        model: NIM model id (see nim_models).
+        model: NIM model id (see nim_models; default Nemotron 3.5 Super).
 
     Returns:
         Security findings, or a bracketed error/status string.
@@ -3819,7 +3821,7 @@ def nim_explain_error(
     Args:
         error: The error message or stack trace to diagnose.
         files: Absolute paths to relevant source files to inline.
-        model: NIM model id (see nim_models).
+        model: NIM model id (see nim_models; default Nemotron 3.5 Super).
 
     Returns:
         Ranked root-cause hypotheses, or a bracketed error string.
@@ -3847,7 +3849,7 @@ def nim_summarize(cwd: str, target: str, model: str | None = None) -> str:
         cwd: Absolute path to the project root.
         target: A file or directory path under cwd (absolute, or relative
             to cwd).
-        model: NIM model id (see nim_models).
+        model: NIM model id (see nim_models; default Nemotron 3.5 Super).
 
     Returns:
         A JSON string with keys: summary, key_points. On parse failure,
@@ -5331,7 +5333,8 @@ def nim_agent(
         task: What to find out, with enough context to act without asking
             (names, paths, what a good answer looks like).
         cwd: Absolute project root the tools are confined to.
-        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then the default).
+        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
+            Super).
         max_steps: Request budget, 1 to 30 (default 12).
         max_tokens: Completion cap per request (default 4096).
 
@@ -5598,7 +5601,8 @@ def nim_scout(
         question: What the work is and what to locate (names, paths, the
             decision the lines feed).
         cwd: Absolute project root.
-        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then the default).
+        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
+            Super).
         max_steps: Request budget (default 10).
 
     Returns:
@@ -5671,7 +5675,8 @@ def nim_first_pass_review(
             diff_file or range, uncommitted changes (git diff HEAD) are used.
         focus: Project rules to check against, in a few lines (for example
             ownership and sync rules). Keep it short.
-        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then the default).
+        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
+            Super).
         max_steps: Request budget (default 8).
 
     Returns:
@@ -5913,7 +5918,8 @@ def nim_triage_log(
         log_path: The log file, absolute or relative to `cwd`.
         question: Optional extra thing to determine (for example "did the
             soak test finish all 50 rounds").
-        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then the default).
+        model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
+            Super).
         max_steps: Request budget (default 3).
 
     Returns:
