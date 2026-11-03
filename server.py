@@ -4913,6 +4913,7 @@ DEKKO_MIN_VERSION: tuple[int, int, int] = (1, 9, 35)
 NIM_DEKKO_TIMEOUT = 10.0  # seconds per dekko query
 NIM_DEKKO_MAP_TIMEOUT = 180.0  # seconds for a map build
 NIM_DEKKO_MAP_TTL = 60.0  # at most one map build per root per this long
+NIM_DEKKO_MAP_FAIL_TTL = 1800.0  # a failed build is not retried for this long
 NIM_DEKKO_BUDGET = 1200  # token budget for one dekko query
 
 _dekko_override: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
@@ -4963,15 +4964,32 @@ def _parse_dekko_version(text: str) -> tuple[int, ...] | None:
 
 def _dekko_enabled() -> bool:
     """Whether dekko tools may run: switch on, binary there, version ok."""
+    return _dekko_off_reason() is None
+
+
+def _dekko_off_reason() -> str | None:
+    """Why dekko may not run (switched off, missing, too old), or None."""
     override = _dekko_override.get()
     if override is None:
         on = os.environ.get("CASTOR_NIM_DEKKO", "").strip() != "0"
     else:
         on = override
-    if not on or _dekko_bin() is None:
-        return False
+    if not on:
+        return "dekko is switched off"
+
+    if _dekko_bin() is None:
+        return "dekko is not installed beside the server's Python"
+
     version = _dekko_version()
-    return version is not None and version >= DEKKO_MIN_VERSION
+    if version is None:
+        return "the installed dekko's version could not be read"
+
+    if version < DEKKO_MIN_VERSION:
+        found = ".".join(str(part) for part in version)
+        wanted = ".".join(str(part) for part in DEKKO_MIN_VERSION)
+        return f"dekko {found} is below {wanted}"
+
+    return None
 
 
 def _dekko_run(
@@ -5001,31 +5019,69 @@ def _dekko_run(
 
 
 _dekko_map_lock = threading.Lock()
-_dekko_map_cache: dict[Path, tuple[float, bool]] = {}
+# root -> (when the build ended, ok, failure reason or "")
+_dekko_map_cache: dict[Path, tuple[float, bool, str]] = {}
+
+
+def _dekko_cached_map(root: Path, fresh: bool) -> tuple[bool, str] | None:
+    """The cached build result for `root` still in force, or None.
+
+    A failure holds for NIM_DEKKO_MAP_FAIL_TTL even when `fresh`; a
+    success holds for NIM_DEKKO_MAP_TTL unless `fresh`.
+    """
+    with _dekko_map_lock:
+        hit = _dekko_map_cache.get(root)
+    if hit is None:
+        return None
+
+    stamp, ok, reason = hit
+    age = time.monotonic() - stamp
+    if not ok and age < NIM_DEKKO_MAP_FAIL_TTL:
+        return False, reason
+
+    if ok and not fresh and age < NIM_DEKKO_MAP_TTL:
+        return True, ""
+
+    return None
+
+
+def _dekko_map_status(root: Path, fresh: bool = False) -> tuple[bool, str]:
+    """(True, "") when a usable dekko map exists for `root` after this call.
+
+    Runs `dekko map --if-stale --quiet` at most once per NIM_DEKKO_MAP_TTL
+    seconds per root. A failed or timed-out build is cached for
+    NIM_DEKKO_MAP_FAIL_TTL, so a repo whose build never finishes does not
+    block every run for the build timeout. `fresh` skips a cached success
+    (nim_edit's coverage check must see the tree as it is now), never a
+    cached failure. (False, why) when dekko is off or the build failed;
+    nothing runs when dekko is off.
+    """
+    off = _dekko_off_reason()
+    if off is not None:
+        return False, off
+
+    cached = _dekko_cached_map(root, fresh)
+    if cached is not None:
+        return cached
+
+    ok, text = _dekko_run(
+        root, ["map", "--if-stale", "--quiet"], timeout=NIM_DEKKO_MAP_TIMEOUT
+    )
+    reason = "" if ok else _dekko_build_failure(text)
+    with _dekko_map_lock:
+        _dekko_map_cache[root] = (time.monotonic(), ok, reason)
+    return ok, reason
 
 
 def _dekko_ensure_map(root: Path, fresh: bool = False) -> bool:
-    """True when a usable dekko map exists for `root` after this call.
+    """True when a usable dekko map exists for `root` (_dekko_map_status)."""
+    return _dekko_map_status(root, fresh)[0]
 
-    Runs `dekko map --if-stale --quiet` at most once per NIM_DEKKO_MAP_TTL
-    seconds per root; a failed build is cached too, so a broken repo is
-    not retried on every call. `fresh` skips the cached result (nim_edit's
-    coverage check must see the tree as it is now) and still updates it.
-    False, running nothing, when dekko is off.
-    """
-    if not _dekko_enabled():
-        return False
-    now = time.monotonic()
-    with _dekko_map_lock:
-        hit = _dekko_map_cache.get(root)
-    if not fresh and hit is not None and now - hit[0] < NIM_DEKKO_MAP_TTL:
-        return hit[1]
-    ok, _ = _dekko_run(
-        root, ["map", "--if-stale", "--quiet"], timeout=NIM_DEKKO_MAP_TIMEOUT
-    )
-    with _dekko_map_lock:
-        _dekko_map_cache[root] = (time.monotonic(), ok)
-    return ok
+
+def _dekko_build_failure(text: str) -> str:
+    """A one-line reason for a failed map build, from "[dekko error: x]"."""
+    detail = text.removeprefix("[dekko error:").removesuffix("]").strip()
+    return "the dekko map build failed: " + _edit_one_line(detail)[:160]
 
 
 def _dekko_function(name: str, description: str, params: dict) -> dict:
