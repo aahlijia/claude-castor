@@ -1,5 +1,6 @@
 import fnmatch
 import contextvars
+import difflib
 import hashlib
 import json
 import logging
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -2737,6 +2739,8 @@ NIM_CACHE_BACKEND = "nvidia_nim"
 # this many days. CASTOR_NIM_TRACES=0 turns both off.
 NIM_USAGE_DIR = "nim-usage"
 NIM_TRACES_DIR = "nim-traces"
+NIM_EDIT_PATCH_DIR = "nim-patches"
+NIM_EDIT_PATCH_DAYS = 30
 NIM_RECORDS_TTL_DAYS = 30
 
 _NIM_CONTEXT_MARKERS = (
@@ -7152,6 +7156,122 @@ def _edit_apply_in_memory(
         if path not in failed
     }
     return changes, [message for _, message in sorted(errors)]
+
+
+def _edit_quote_path(path: str) -> str:
+    """Quote a header path the way `git diff` does (C-style) when needed."""
+    raw = path.encode("utf-8")
+    escapes = {0x09: "\\t", 0x0A: "\\n", 0x22: '\\"', 0x5C: "\\\\"}
+    out = []
+    quoted = False
+    for byte in raw:
+        if byte in escapes:
+            out.append(escapes[byte])
+            quoted = True
+        elif byte < 0x20 or byte >= 0x7F:
+            out.append(f"\\{byte:03o}")
+            quoted = True
+        else:
+            out.append(chr(byte))
+            quoted = quoted or byte == 0x20
+    return '"' + "".join(out) + '"' if quoted else path
+
+
+def _edit_lines(text: str) -> list[str]:
+    """Split on newlines only (git's notion of a line), keeping them."""
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _edit_file_diff(edit: FileEdit) -> str:
+    """The `git apply` diff for one file, with no-newline markers."""
+    old = _edit_quote_path("a/" + edit.relative)
+    new = _edit_quote_path("b/" + edit.relative)
+    body = list(
+        difflib.unified_diff(
+            _edit_lines(edit.original), _edit_lines(edit.new), n=3
+        )
+    )[2:]
+    if not body:
+        return ""
+    out = [f"diff --git {old} {new}\n", f"--- {old}\n", f"+++ {new}\n"]
+    for line in body:
+        out.append(line)
+        if not line.endswith("\n"):
+            out.append("\n\\ No newline at end of file\n")
+    return "".join(out)
+
+
+def _edit_build_diff(changes: dict[Path, FileEdit]) -> str:
+    """One unified diff over all changed files, sorted by relative path."""
+    edits = sorted(changes.values(), key=lambda e: e.relative)
+    return "".join(_edit_file_diff(edit) for edit in edits)
+
+
+def _edit_in_work_tree(root: Path) -> bool:
+    """True when `root` is inside a git work tree."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def _edit_git_check(diff: str, root: Path) -> tuple[bool | None, str]:
+    """`git apply --check` the diff in `root`; None outside a work tree."""
+    if not _edit_in_work_tree(root):
+        return None, ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".diff") as tmp:
+            tmp.write(diff.encode("utf-8"))
+            tmp.flush()
+            done = subprocess.run(
+                ["git", "apply", "--check", tmp.name],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=30,
+            )
+    except subprocess.TimeoutExpired:
+        return False, "git apply --check timed out"
+    except OSError as exc:
+        return False, f"git apply --check failed: {exc}"
+    if done.returncode == 0:
+        return True, ""
+    return False, done.stderr.strip()
+
+
+def _edit_prune_patches(days: int = NIM_EDIT_PATCH_DAYS) -> None:
+    """Delete patch files older than `days` days."""
+    folder = _cache_dir() / NIM_EDIT_PATCH_DIR
+    cutoff = time.time() - days * 86400
+    try:
+        for entry in folder.iterdir():
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+    except OSError:
+        return
+
+
+def _edit_write_patch(diff: str) -> Path:
+    """Write the diff under the cache dir as exact UTF-8 bytes."""
+    folder = _cache_dir() / NIM_EDIT_PATCH_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    _edit_prune_patches()
+    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.diff"
+    target = folder / name
+    target.write_bytes(diff.encode("utf-8"))
+    return target
 
 
 if __name__ == "__main__":

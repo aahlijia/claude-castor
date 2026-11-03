@@ -6,6 +6,7 @@ HTTP server that replays scripted responses and records every request.
 
 import importlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2591,6 +2592,128 @@ def test_apply_file_scope_is_exact(repo):
         blocks[:1], repo, ["./src/a.py"]
     )
     assert errors == [] and list(changes) == [repo / "src" / "a.py"]
+
+
+def _patch_repo(tmp_path, files):
+    root = tmp_path / "gitrepo"
+    root.mkdir()
+    for rel, data in files.items():
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(data)
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "init"],
+    ):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True)
+    return root
+
+
+def _apply_edits(tmp_path, monkeypatch, files, blocks):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = _patch_repo(tmp_path, files)
+    changes, errors = server._edit_apply_in_memory(blocks, root, None)
+    assert errors == []
+    diff = server._edit_build_diff(changes)
+    assert server._edit_git_check(diff, root) == (True, "")
+    patch = server._edit_write_patch(diff)
+    subprocess.run(["git", "-C", str(root), "apply", str(patch)], check=True)
+    return root, changes, diff
+
+
+def test_diff_round_trips_through_git_apply(tmp_path, monkeypatch):
+    root, changes, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"src/a.py": b"one\nTARGET = 1\nthree\n"},
+        [_blk(1, "src/a.py", "TARGET = 1", "TARGET = 2")],
+    )
+    edit = changes[root / "src" / "a.py"]
+    assert (root / "src" / "a.py").read_text() == edit.new
+
+
+def test_diff_keeps_a_missing_final_newline(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"src/a.py": b"a\nTARGET = 1"},
+        [_blk(1, "src/a.py", "TARGET = 1", "TARGET = 2")],
+    )
+    assert (root / "src" / "a.py").read_bytes() == b"a\nTARGET = 2"
+    assert "\\ No newline at end of file" in diff
+
+
+def test_diff_handles_a_path_with_a_space(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"docs/my notes.md": b"x\nold\n"},
+        [_blk(1, "docs/my notes.md", "old", "new")],
+    )
+    assert (root / "docs" / "my notes.md").read_text() == "x\nnew\n"
+    assert '--- "a/docs/my notes.md"' in diff
+
+
+def test_diff_quotes_non_ascii_paths(tmp_path, monkeypatch):
+    root, _, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"docs/café.md": b"old\n"},
+        [_blk(1, "docs/café.md", "old", "new")],
+    )
+    assert (root / "docs" / "café.md").read_text() == "new\n"
+
+
+def test_diff_keeps_crlf_bytes(tmp_path, monkeypatch):
+    root, _, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"w.txt": b"a\r\nold\r\nc\r\n"},
+        [_blk(1, "w.txt", "old", "new")],
+    )
+    assert (root / "w.txt").read_bytes() == b"a\r\nnew\r\nc\r\n"
+
+
+def test_diff_with_two_files_is_sorted(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"b.py": b"x = 1\n", "a.py": b"y = 1\n"},
+        [_blk(1, "b.py", "x = 1", "x = 2"), _blk(2, "a.py", "y = 1", "y = 2")],
+    )
+    assert diff.index("a/a.py") < diff.index("a/b.py")
+    assert (root / "a.py").read_text() == "y = 2\n"
+    assert (root / "b.py").read_text() == "x = 2\n"
+
+
+def test_git_check_reports_a_failing_patch(tmp_path):
+    root = _patch_repo(tmp_path, {"a.py": b"one\n"})
+    edit = server.FileEdit(root / "a.py", "a.py", "zzz\n", "yyy\n", [(1, 1)])
+    ok, err = server._edit_git_check(
+        server._edit_build_diff({root / "a.py": edit}), root
+    )
+    assert ok is False and err
+
+
+def test_git_check_outside_a_repo_returns_none(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert server._edit_git_check("", plain) == (None, "")
+
+
+def test_patch_file_written_and_pruned(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    old = server._edit_write_patch("old\n")
+    age = time.time() - 31 * 86400
+    os.utime(old, (age, age))
+    new = server._edit_write_patch("new\n")
+    assert not old.exists() and new.exists()
+    assert new.parent.name == server.NIM_EDIT_PATCH_DIR
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}\.diff", new.name)
+    assert new.read_bytes() == b"new\n"
 
 
 def test_main_guard_is_the_last_top_level_statement():
