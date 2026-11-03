@@ -6112,12 +6112,17 @@ def nim_agent(
 
     Unlike nim_prompt, the model is given read-only tools (grep,
     read_range, list_dir) that Castor runs locally, confined to `cwd`
-    (secrets and .git are off limits), so it explores on its own over
-    several requests. Use it for bulk reading that would otherwise fill
-    Claude's context: locating code, tracing a symbol, a first-pass
-    review, triaging a log. It cannot edit files or run commands. Every
-    path:line it cites is checked against the files; failures are tagged
-    [unverified]. Treat the answer as leads to confirm, not evidence.
+    (secrets, .git and .dekko are off limits), so it explores on its own
+    over several requests. With dekko 1.9.35 or later installed it also
+    gets dekko's call-graph tools (callers, symbol, outline, context,
+    search, trace; CASTOR_NIM_DEKKO=0 turns them off), and Castor builds
+    dekko's map in `.dekko/` under `cwd` (an untracked directory; the
+    repo's .gitignore is left alone). Use it for bulk reading that would
+    otherwise fill Claude's context: locating code, tracing a symbol, a
+    first-pass review, triaging a log. It cannot edit files or run
+    commands. Every path:line it cites is checked against the files;
+    failures are tagged [unverified]. Treat the answer as leads to
+    confirm, not evidence.
 
     Each step is one NIM request, so a long run spends free-tier quota.
     Slow models (GLM-5.3-Flash, gpt-oss-20b, Mistral Large 4 on the free
@@ -8179,16 +8184,24 @@ def nim_edit(
     wherever they are, and other grep hits (references, strings, doc
     mentions) wherever `files` allows (all of cwd without it). References
     outside `files` do not refuse; the OK result lists them after the
-    `checked:` line so you can see what the patch left alone. Castor gives
-    the model one repair round, then builds a unified diff and runs
-    `git apply --check`. NIM never writes files; Castor writes only the
-    patch, under its cache dir.
+    `checked:` line so you can see what the patch left alone. A use
+    counts as edited only when a block changes its statement. The
+    reference search skips engine assets (.prefab, .meta, .unity and the
+    rest of NIM_AGENT_SKIP_EXTENSIONS), files over 1 MB and binary or
+    non-UTF-8 files, so mentions there are not required. Castor gives the
+    model one repair round, then builds a unified diff and runs
+    `git apply --check`. NIM never writes files and Castor never edits
+    project files: it writes the patch and a trace under its cache dir,
+    and builds dekko's map in `.dekko/` under cwd when `must_cover` or
+    the dekko tools are used.
 
     Read the diff before applying it, then run `git apply <patch>` from
-    the repo top level (`patch -p1` outside git). A refusal lists what
-    failed and writes nothing, so it is safe: retry with a sharper task or
-    make the edit yourself. `must_cover` needs the dekko map. File
-    contents go to NVIDIA's hosted API.
+    the repo top level (`patch -p1` from cwd outside git). A refusal
+    lists what failed and writes no patch, so it is safe: retry with a
+    sharper task or make the edit yourself. `must_cover` needs the dekko
+    map and takes functions, methods and classes (dekko does not index
+    module constants, so a constant always refuses). File contents go to
+    NVIDIA's hosted API.
 
     Args:
         task: The edit, as precisely as you would brief an implementer
@@ -8196,9 +8209,10 @@ def nim_edit(
         cwd: Absolute project root; every edit stays inside it.
         files: Optional fence: files or directories, relative to cwd, the
             edit may touch. Omit it to allow all of cwd.
-        must_cover: Optional symbols whose call sites and definition must
-            all be edited (the old name in a rename), plus every other
-            mention inside `files`. Needs dekko.
+        must_cover: Optional functions, methods or classes whose call
+            sites and definition must all be edited (the old name in a
+            rename), plus every other mention inside `files`. Needs
+            dekko.
         model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
             Super).
         max_steps: Request budget, 1 to 30 (default 12); a repair round

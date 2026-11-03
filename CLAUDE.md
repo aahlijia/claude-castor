@@ -35,8 +35,12 @@ the system keyring.
 
 ### 3. Install Python dependencies
 
+dekko (the code map behind the NIM agent's call-graph tools and
+`nim_edit`'s `must_cover`) is installed with the server's dependencies:
+`uv` installs it from `pyproject.toml`. With pip, install it yourself:
+
 ```bash
-pip install fastmcp
+pip install fastmcp "dekko[all]>=1.9.35"
 # or, if using uv:
 uv add fastmcp
 ```
@@ -144,7 +148,7 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_review` / `nim_security_review` | `(cwd, diff=None, model=None)` | Diff review (defaults to `git diff HEAD`) |
 | `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
-| `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir run by Castor; cited `path:line` are verified |
+| `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir, plus dekko's callers/symbol/outline/context/search/trace when dekko is on, run by Castor; cited `path:line` are verified |
 | `nim_agent_start` | same | Background `nim_agent`; poll with `gemini_poll` |
 | `nim_scout` | `(question, cwd, model=None, max_steps=None)` | Role: the exact `path:start-end` ranges a task needs |
 | `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
@@ -157,10 +161,17 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
 
 `nim_agent` (`_nim_agent_loop`) is confined to `cwd` (symlinks resolved before
-the containment check; `.env*`, key files and `.git` are off limits), reads at
-most 120 lines per call, caps each tool result, and never lets the model edit or
-run anything. Each step is one NIM request (default 12 steps, max 30; reviews
-8). `nim_edit` reuses the loop with an edit-block answer rule and returns
+the containment check; `.env*`, key files, `.git` and `.dekko` are off limits),
+reads at most 120 lines per call, caps each tool result, and never lets the
+model edit or run anything. Each step is one NIM request (default 12 steps, max
+30; reviews 8). With dekko >= 1.9.35 installed the loop also offers six dekko
+tools (`callers`, `symbol`, `outline`, `context`, `search`, `trace`; on by
+default, `CASTOR_NIM_DEKKO=0` turns them off). A call to a tool the run did
+not offer gets the unknown-tool reply. To offer them, any agent role builds
+dekko's map in `.dekko/` under `cwd` (`dekko map --if-stale`, at most once a
+minute per root; a failed build is not retried for 30 minutes). It shows in
+`git status` as an untracked directory; Castor never edits the repo's
+`.gitignore`. `nim_edit` reuses the loop with an edit-block answer rule and returns
 patches Castor checks (`_run_nim_edit`). Agent roles default to
 `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super); `CASTOR_NIM_AGENT_MODEL`
 overrides it, and a set `CASTOR_NIM_MODEL` is followed.
