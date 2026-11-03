@@ -217,3 +217,50 @@
 - **Note:** the plan's on/off comparison mixed agent tools and review
   context; the gate compared dekko-on runs of the two servers instead.
 - **Rejected:** keeping it on the 0b gate's strength (different change).
+
+### 2026-11-03: No `[1m]` NIM model ids; Castor's input cap stays at 300k chars
+- **Why:** the catalog has no `[1m]` ids and the API 404s them (`[1m]` is a
+  Claude Code naming convention). The plain ids already take a ~950k-token
+  needle prompt (Super 109 s, Mistral Large 4 216 s). The 1,048,576 figure
+  NIM reports is a gateway `max_tokens` cap. Castor's 300k-char budget is
+  about answer quality (summaries cover only the start past ~35k tokens),
+  not the window.
+
+### 2026-11-03: Mistral Large 4 stays out (confirmed with an eval)
+- **Why:** `scripts/nim_eval.py`, 14 cases x2 vs Super: 9/28 runs failed
+  (NQC reviews ran 40-60 min), median 1,262 s vs 79 s, recall 62/110 vs
+  64/110, must-catch 27/38 both. It rejects `reasoning_budget` (400);
+  `reasoning_effort: "low"` works but it still ran ~9 tokens/s.
+- **Rejected:** background-only use (no quality gain to pay for the wait).
+
+### 2026-11-03: NIM write access starts as `nim_edit`, staged behind gates (user)
+- **Why:** the review pilot closed negative, so start with mechanical edits
+  only. NIM returns exact-text blocks; Castor checks them, builds the diff,
+  runs `git apply --check`, writes a patch file; Claude reads and applies.
+  Stages after this one (fix rounds, NQC Editor-free tasks, a general edit
+  tool) each need their own spec, eval and pilot. Gates: offline eval
+  (>=90% correct, 0 wrong-but-applies, 0 out-of-scope, refusals refused,
+  >=2 runs), then a 10-edit pilot (>=9 applied as-is).
+- **Rejected:** Castor applying patches or running checks in a worktree;
+  NIM-written unified diffs (fuzzy repair hides misplaced edits); whole-file
+  rewrites; setting the bar after a baseline.
+
+### 2026-11-03: dekko is a declared dependency; Castor builds the map (user)
+- **Why:** the CLI (callers, symbol, outline, context, search, trace) needs
+  a map; a `.dekko/` folder in a project is acceptable. Castor runs its own
+  pinned dekko (`Path(sys.executable).parent / "dekko"`), never PATH's, and
+  `scripts/check_dekko_surface.py` guards the contract. Not used: `dekko
+  sanity` (whole-tree grep ignoring .gitignore and the deny list) and
+  `dekko diff` (needs a rev; eval snapshots have no commits).
+- **Rejected:** existing maps only; waiting for an out-of-tree map option.
+
+### 2026-11-03: must_cover rules for nim_edit
+- **Why:** call sites and the definition must be edited everywhere;
+  grep-only references must be edited inside `files` (all of cwd when
+  absent); references outside `files` are listed in the OK result, not
+  refused, so dated notes can stay unedited and visible. The map and file
+  index are refreshed before every coverage round (a 60 s cache let a new
+  call site slip through). Limitation: dekko does not index module
+  constants, so must_cover cannot be used for them.
+- **Rejected:** every reference everywhere (forces rewriting history or
+  refusing); call sites only (non-call references slipped through).

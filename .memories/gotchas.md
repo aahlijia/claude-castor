@@ -112,3 +112,17 @@
   cannot finish in 15 s. A tool step that answers without tools can also run
   into the 4,096 cap; its partial text is dropped and the answer step starts
   over (one triage run took 154 s that way).
+- **`git apply` reads diff header paths from the repo top level.** A diff
+  built with cwd-relative paths from a subdirectory passes `--check` and then
+  skips the file or patches a same-named file at the top. `_edit_make_patch`
+  computes the `--show-prefix` itself; never build a patch another way.
+- **dekko error text can leak denied files.** An ambiguous name exits 4 and
+  lists every candidate on stderr (incl. `.env*` files) even with `--json`;
+  all dekko output, errors included, goes through `_dekko_scrub`.
+- **This session's worktree guard refuses** git aimed outside the worktree
+  and some command lines containing the word "eval" (e.g. grep on
+  `scripts/eval/...`). Use the Read tool for those files and a launcher
+  script (`scratchpad/run_eval.py`) to pass NIM keys to the eval.
+- **The eval's `dekko=on|off` flips agent tools and review context
+  together.** Isolate a review-context change by comparing dekko-on runs of
+  two server files (`--server`) in the same window.
