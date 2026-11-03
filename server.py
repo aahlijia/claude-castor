@@ -5074,9 +5074,51 @@ def _agent_system(
     )
 
 
+_AMBIGUOUS_RE = re.compile(r"'([^']+)' is ambiguous")
+_CANDIDATE_RE = re.compile(r"^\s+(\S+?):\d+\s")
+_WORD_RE = re.compile(r"[\w./@+-]+")
+
+
+def _dekko_safe_lines(text: str) -> str:
+    """`text` without any line that names a path the agent may not read."""
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not any(_agent_denied(Path(w)) for w in _WORD_RE.findall(line))
+    )
+
+
+def _dekko_ambiguity(text: str) -> str:
+    """Rebuild a dekko "ambiguous" error from its allowed candidates."""
+    name = _AMBIGUOUS_RE.search(text)
+    kept = [
+        line
+        for line in text.splitlines()
+        if (m := _CANDIDATE_RE.match(line)) and _dekko_allowed(m.group(1))
+    ]
+    if not kept:
+        return "no symbol matches"
+    label = name.group(1) if name else "symbol"
+    return f"'{label}' is ambiguous; candidates:\n" + "\n".join(kept)
+
+
+def _dekko_scrub(text: str) -> str:
+    """A "[dekko error: ...]" string safe to show the model.
+
+    dekko's error detail can list candidate symbols from denied files, so
+    an ambiguity is rebuilt from allowed candidates and any other line
+    naming a denied path is dropped.
+    """
+    body = text.removeprefix("[").removesuffix("]")
+    if body.startswith("dekko error: exit 4:"):
+        return f"[{_dekko_ambiguity(body)}]"
+    return f"[{_dekko_safe_lines(body)}]"
+
+
 def _dekko_error(text: str) -> str:
     """Turn "[dekko error: x]" into the tool-error form "[tool error: ...]"."""
-    return f"[tool error: {text.removeprefix('[').removesuffix(']')}]"
+    body = _dekko_scrub(text)
+    return f"[tool error: {body.removeprefix('[').removesuffix(']')}]"
 
 
 def _dekko_allowed(path: Any) -> bool:
@@ -5144,7 +5186,7 @@ def _dekko_callers(
         ["query", "callers", symbol, "--sites", "--json", *_DEKKO_BUDGET_ARGS],
     )
     if not ok:
-        return None, raw
+        return None, _dekko_scrub(raw)
     try:
         found = _dekko_call_sites(json.loads(raw))
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -5277,7 +5319,7 @@ def _dekko_tool(root: Path, name: str, args: dict) -> str:
         sites, text = _dekko_callers(root, values[0])
         return _agent_clip(text) if sites is not None else _dekko_error(text)
     ok, text = _dekko_run(root, _dekko_command(name, values))
-    if not ok and name == "trace" and text.startswith("[dekko error: exit 1"):
+    if not ok and name == "trace" and text.startswith("[dekko error: exit 1:"):
         return "[no call path found]"
     if not ok:
         return _dekko_error(text)
