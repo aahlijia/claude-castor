@@ -386,7 +386,9 @@ CONFIG = {"label": "a", "model": None}
 
 
 def _answer(server, **stats):
-    server._run_nim_edit = lambda *a: ("text", stats)
+    refused = stats.get("outcome") == "refused"
+    text = "[nim_edit: REFUSED]\n- x" if refused else "text"
+    server._run_nim_edit = lambda *a: (text, stats)
 
 
 def test_run_edit_case_refusal_on_patch_case_is_clean_error(tmp_path):
@@ -466,6 +468,71 @@ def test_numstat_paths_lists_both_sides_of_a_rename(tmp_path):
     )
     paths = nim_eval.numstat_paths(diff, tmp_path)
     assert paths == {"old name.md", "new.md"}
+
+
+@pytest.mark.parametrize(
+    ("text", "refused"),
+    [
+        ("[nim_edit: REFUSED]\n- block 1: denied", True),
+        ("[nim_edit: REFUSED after repair round]\n- x", True),
+        ("[Error: task is empty.]", True),
+        ("[Error: cwd '/x' is not a directory.]", True),
+        ("[Error: files is empty; omit it to allow all of cwd]", True),
+        ("[Error: invalid files entry: -x]", True),
+        ("[Error: invalid must_cover symbol: a b]", True),
+        ("[NVIDIA NIM is rate-limited; try again in 30s]", False),
+        ("[NVIDIA NIM request timed out after 60s]", False),
+        ("[NVIDIA NIM is not configured: set NVIDIA_API_KEY ...]", False),
+        ("[Error: must_cover needs the dekko map: crash]", False),
+        ("", False),
+    ],
+)
+def test_edit_refused_counts_only_castor_refusals(text, refused):
+    assert nim_eval.edit_refused(text) is refused
+
+
+def test_run_edit_case_failed_nim_run_is_an_error_row(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    case["expect"] = "refuse"
+    del case["reference_diff"]
+    server._run_nim_edit = lambda *a: (
+        "[NVIDIA NIM request timed out after 60s]",
+        {"outcome": "refused", "patch": None, "steps": 1},
+    )
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert "timed out" in row["error"] and "correct" not in row
+
+
+def test_rescore_turns_an_old_failed_run_into_an_error_row(tmp_path):
+    case = {"name": "e", "role": "edit", "expect": "refuse"}
+    saved = tmp_path / "results.json"
+    row = {
+        "case": "e",
+        "config": "a",
+        "role": "edit",
+        "scoring": 3,
+        "answer": "[NVIDIA NIM is rate-limited; try again in 30s]",
+        "facts": _facts(
+            expect="refuse",
+            refused=True,
+            trees_equal=None,
+            touched_paths=[],
+            reference_paths=[],
+        ),
+        "correct": True,
+        "seconds": 1.0,
+        "steps": 1,
+    }
+    refused = {
+        **row,
+        "case": "r",
+        "answer": "[nim_edit: REFUSED]\n- x",
+    }
+    saved.write_text(json.dumps([row, refused]))
+    nim_eval.rescore(saved, [case, {**case, "name": "r"}])
+    failed, kept = json.loads(saved.read_text())
+    assert "rate-limited" in failed["error"] and "correct" not in failed
+    assert kept["correct"] is True and "error" not in kept
 
 
 def test_summarize_edit_counts_error_rows():
