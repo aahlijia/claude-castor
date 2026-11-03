@@ -596,6 +596,42 @@ def test_rescore_marks_an_old_dekko_off_must_cover_row(tmp_path):
     assert "clean_error" not in kept and "error" not in kept
 
 
+@pytest.fixture
+def nim_stub(tmp_path, monkeypatch):
+    """The real server against test_nim's loopback NIM stub."""
+    import test_nim
+
+    stub = test_nim.Stub()
+    monkeypatch.setenv("CASTOR_NIM_BASE_URL", stub.url)
+    monkeypatch.setenv("NVIDIA_API_KEY", test_nim.KEY)
+    monkeypatch.delenv("NVIDIA_API_KEYS", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    # The eval wraps the parser; undo that for the other tests.
+    server = test_nim.server
+    monkeypatch.setattr(
+        server, "_parse_edit_blocks", server._parse_edit_blocks
+    )
+    monkeypatch.setattr(server, "_eval_capture", False, raising=False)
+    test_nim.server._nim_reset_state()
+    yield stub, test_nim
+    test_nim.server._nim_reset_state()
+    stub.close()
+
+
+def test_run_edit_case_keeps_the_raw_answers(tmp_path, nim_stub):
+    stub, test_nim = nim_stub
+    case, _ = _edit_fixture(tmp_path, "two")
+    bad = "<<<EDIT a.txt\n>>>NEW\ntwo\n>>>END"
+    good = "<<<EDIT a.txt\n<<<OLD\none\n>>>NEW\ntwo\n>>>END"
+    for text in (bad, good):
+        stub.queue.append((200, {}, test_nim._completion(text)))
+    row = nim_eval.run_edit_case(case, CONFIG, test_nim.server)
+    assert row["correct"] and row["repair"]
+    assert row["raw_answers"] == [bad, good]
+    nim_eval.report([row], ["a"])
+
+
 def test_summarize_edit_counts_error_rows():
     rows = [
         {"config": "a", "role": "edit", "case": "x", "error": "boom"},
