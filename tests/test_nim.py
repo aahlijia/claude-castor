@@ -1947,6 +1947,58 @@ def test_agent_run_without_map_uses_grep_tools_only(stub, repo, fake_dekko):
     assert names == ["grep", "read_range", "list_dir"]
 
 
+def _callers_reply(stub, repo):
+    """Run nim_agent where the model calls `callers`; return the reply."""
+    stub.queue.append((200, {}, _tool_call("callers", {"symbol": "f"})))
+    stub.queue.append((200, {}, _completion("done")))
+    _tool(server.nim_agent)("who calls f?", str(repo))
+    return stub.posts()[1][3]["messages"][-1]["content"]
+
+
+_UNKNOWN_CALLERS = "[error: unknown tool 'callers']"
+
+
+def test_dekko_tool_switched_off_is_an_unknown_tool(
+    stub, repo, fake_dekko, monkeypatch
+):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    assert _callers_reply(stub, repo) == _UNKNOWN_CALLERS
+    assert fake_dekko.calls == []
+
+
+def test_dekko_tool_overridden_off_is_an_unknown_tool(stub, repo, fake_dekko):
+    token = server._dekko_override.set(False)
+    try:
+        assert _callers_reply(stub, repo) == _UNKNOWN_CALLERS
+    finally:
+        server._dekko_override.reset(token)
+    assert fake_dekko.calls == []
+
+
+def test_dekko_tool_without_a_map_is_an_unknown_tool(stub, repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    assert _callers_reply(stub, repo) == _UNKNOWN_CALLERS
+    assert fake_dekko.calls == [["map", "--if-stale", "--quiet"]]
+
+
+def test_offered_dekko_tool_runs(stub, repo, fake_dekko):
+    sites = {"results": [], "module_level": []}
+    fake_dekko.queue += [(True, ""), (True, json.dumps(sites))]
+    assert _callers_reply(stub, repo).startswith("callers of f (dekko")
+    assert fake_dekko.calls[1][:3] == ["query", "callers", "f"]
+
+
+def test_run_tool_offers_no_dekko_tool_by_default(repo, fake_dekko):
+    out = server._agent_run_tool(repo, "callers", {"symbol": "f"})
+    assert out == _UNKNOWN_CALLERS and fake_dekko.calls == []
+
+
+def test_dekko_tool_refuses_when_dekko_is_off(repo, fake_dekko, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    out = server._dekko_tool(repo, "symbol", {"name": "f"})
+    assert out == "[error: unknown tool 'symbol']" and fake_dekko.calls == []
+
+
 def test_dekko_tool_failure_is_a_tool_error(repo, fake_dekko):
     fake_dekko.queue += [(False, "[dekko error: exit 5]")]
     assert (

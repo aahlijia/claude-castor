@@ -4645,6 +4645,9 @@ NIM_AGENT_TOOLS = [
         },
     },
 ]
+NIM_AGENT_TOOL_NAMES = frozenset(
+    tool["function"]["name"] for tool in NIM_AGENT_TOOLS
+)
 
 # path:12, path:12-20 or a list such as path:12, 40-45.
 _CITATION_LINES = r":(\d+(?:-\d+)?(?:,\s*\d+(?:-\d+)?)*)"
@@ -4855,8 +4858,25 @@ def _agent_grep(
     return _agent_clip("\n".join(out)) if out else "[no matches]"
 
 
-def _agent_run_tool(root: Path, name: str, args: dict) -> str:
-    """Run one tool call; any failure comes back as text for the model."""
+def _agent_unknown_tool(name: str) -> str:
+    """The reply to a call of a tool this run does not offer."""
+    return f"[error: unknown tool {name!r}]"
+
+
+def _agent_run_tool(
+    root: Path,
+    name: str,
+    args: dict,
+    offered: frozenset[str] = NIM_AGENT_TOOL_NAMES,
+) -> str:
+    """Run one tool call; any failure comes back as text for the model.
+
+    A tool name outside `offered` (the run's tool schemas) gets the
+    unknown-tool reply, so a dekko tool the run did not offer never runs.
+    """
+    if name not in offered:
+        return _agent_unknown_tool(name)
+
     try:
         if name == "grep":
             return _agent_grep(
@@ -4882,7 +4902,7 @@ def _agent_run_tool(root: Path, name: str, args: dict) -> str:
             return _dekko_tool(root, name, args)
     except (OSError, TypeError, ValueError) as exc:
         return f"[tool error: {exc}]"
-    return f"[error: unknown tool {name!r}]"
+    return _agent_unknown_tool(name)
 
 
 # --- dekko ----------------------------------------------------------------
@@ -5380,7 +5400,11 @@ def _dekko_tool(root: Path, name: str, args: dict) -> str:
 
     Output is rendered from dekko's JSON with every record on a denied
     path dropped, so nothing from secrets or .git reaches the model.
+    With dekko off this is an unknown tool and dekko does not run.
     """
+    if not _dekko_enabled():
+        return _agent_unknown_tool(name)
+
     values = _dekko_checked_values(root, name, args)
     if isinstance(values, str):
         return values
@@ -5411,9 +5435,15 @@ def _agent_parse_args(call: dict) -> dict | None:
 
 
 def _agent_step_results(
-    root: Path, calls: list[dict], seen: set[str]
+    root: Path,
+    calls: list[dict],
+    seen: set[str],
+    offered: frozenset[str] = NIM_AGENT_TOOL_NAMES,
 ) -> list[dict]:
-    """Run one step's tool calls, answering every call id the model made."""
+    """Run one step's tool calls, answering every call id the model made.
+
+    `offered` names the tools this run offered; any other name is unknown.
+    """
     messages = []
     for index, call in enumerate(calls):
         name = (call.get("function") or {}).get("name", "")
@@ -5427,7 +5457,7 @@ def _agent_step_results(
             result = "[already ran this exact call; use that result]"
         else:
             seen.add(key)
-            result = _agent_run_tool(root, name, args)
+            result = _agent_run_tool(root, name, args, offered)
         messages.append(
             {"role": "tool", "tool_call_id": call["id"], "content": result}
         )
@@ -5623,12 +5653,8 @@ def _nim_agent_loop(
     """
     stepper = step_model or model
     tools = _agent_tools(root)
-    system = _agent_system(
-        max_steps,
-        NIM_AGENT_CALLS_PER_STEP,
-        [t["function"]["name"] for t in tools],
-        answer,
-    )
+    names = [t["function"]["name"] for t in tools]
+    system = _agent_system(max_steps, NIM_AGENT_CALLS_PER_STEP, names, answer)
     file_map = _agent_file_map(root)
     messages: list[dict] = [
         {
@@ -5673,7 +5699,7 @@ def _nim_agent_loop(
                 "tool_calls": calls,
             }
         )
-        results = _agent_step_results(root, calls, seen)
+        results = _agent_step_results(root, calls, seen, frozenset(names))
         stats["tool_calls"] += len(results)
         used += sum(len(r["content"]) for r in results)
         messages.extend(results)
