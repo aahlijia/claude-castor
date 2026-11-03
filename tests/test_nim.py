@@ -1867,3 +1867,23 @@ def test_ensure_map_reset_clears_cache(fake_dekko, tmp_path):
     server._nim_reset_state()
     assert server._dekko_ensure_map(tmp_path) is True
     assert len(fake_dekko.calls) == 2
+
+
+def test_ensure_map_ttl_counts_from_build_end(monkeypatch, tmp_path):
+    clock = [1000.0]
+    calls = []
+
+    def slow_build(root, args, timeout=10.0):
+        calls.append(args)
+        clock[0] += server.NIM_DEKKO_MAP_TTL * 3
+        return False, "[dekko error: timed out]"
+
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 35))
+    monkeypatch.setattr(server, "_dekko_run", slow_build)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    assert server._dekko_ensure_map(tmp_path) is False
+    clock[0] += 1
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert len(calls) == 1

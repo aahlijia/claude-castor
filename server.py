@@ -4979,7 +4979,7 @@ def _dekko_ensure_map(root: Path) -> bool:
         root, ["map", "--if-stale", "--quiet"], timeout=NIM_DEKKO_MAP_TIMEOUT
     )
     with _dekko_map_lock:
-        _dekko_map_cache[root] = (now, ok)
+        _dekko_map_cache[root] = (time.monotonic(), ok)
     return ok
 
 
