@@ -308,23 +308,6 @@ def test_score_edit_takes_expect_from_the_case_when_absent():
     assert _buckets(result) == ["correct"]
 
 
-def test_unquote_path_handles_c_style_quoting():
-    unquote = nim_eval.unquote_path
-    assert unquote("plain.py") == "plain.py"
-    assert unquote('"my notes.md"') == "my notes.md"
-    assert unquote('"a\\tb\\"c\\\\d"') == 'a\tb"c\\d'
-    assert unquote('"caf\\303\\251.md"') == "café.md"
-
-
-def test_diff_paths_reads_plain_spaced_and_quoted_headers():
-    diff = (
-        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
-        "diff --git a/docs/my notes.md b/docs/my notes.md\n"
-        'diff --git "a/caf\\303\\251.md" "b/caf\\303\\251.md"\n'
-    )
-    assert nim_eval.diff_paths(diff) == {"x.py", "docs/my notes.md", "café.md"}
-
-
 def test_summarize_edit_rows_prints_the_edit_line():
     def row(name, expect, correct, wrong, oos, secs, steps):
         return {
@@ -397,3 +380,107 @@ def test_run_edit_case_scores_different_patch_wrong_applies(tmp_path):
     case, server = _edit_fixture(tmp_path, "three")
     row = nim_eval.run_edit_case(case, {"label": "a", "model": None}, server)
     assert row["wrong_applies"] and not row["correct"]
+
+
+CONFIG = {"label": "a", "model": None}
+
+
+def _answer(server, **stats):
+    server._run_nim_edit = lambda *a: ("text", stats)
+
+
+def test_run_edit_case_refusal_on_patch_case_is_clean_error(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    _answer(server, outcome="refused", patch=None, steps=2)
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert row["clean_error"] and not row["wrong_applies"]
+
+
+def test_run_edit_case_unappliable_patch_is_wrong(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    bad = tmp_path / "bad.diff"
+    bad.write_text(
+        "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n"
+        "@@ -1 +1 @@\n-missing\n+two\n"
+    )
+    _answer(server, outcome="patch", patch=str(bad), steps=2)
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert row["wrong_applies"] and row["facts"]["apply_failed"]
+
+
+def test_run_edit_case_extra_file_is_out_of_scope(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    (tmp_path / "code" / "b.txt").write_text("x\n")
+    extra = tmp_path / "extra.diff"
+    extra.write_text(
+        (tmp_path / "ref.diff").read_text()
+        + "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n"
+        "@@ -1 +1 @@\n-x\n+y\n"
+    )
+    _answer(server, outcome="patch", patch=str(extra), steps=2)
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert row["wrong_applies"] and row["out_of_scope"] == 1
+
+
+def test_run_edit_case_headerless_reference_still_compares(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    (tmp_path / "code" / "b.txt").write_text("x\n")
+    (tmp_path / "ref.diff").write_text(
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n"
+        "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n"
+    )
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert row["wrong_applies"]  # NIM's patch misses b.txt
+
+
+def test_run_edit_case_refuse_case_needs_no_reference(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    del case["reference_diff"]
+    case["expect"] = "refuse"
+    _answer(server, outcome="refused", patch=None, steps=1)
+    assert nim_eval.run_edit_case(case, CONFIG, server)["correct"]
+
+
+def test_run_edit_case_patch_case_without_reference_is_an_error(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    del case["reference_diff"]
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert "reference_diff" in row["error"]
+
+
+def test_run_edit_case_reference_touching_nothing_is_an_error(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    (tmp_path / "ref.diff").write_text("")
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert "touches no files" in row["error"]
+
+
+def test_numstat_paths_lists_both_sides_of_a_rename(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    diff = tmp_path / "r.diff"
+    diff.write_text(
+        "diff --git a/old name.md b/new.md\nsimilarity index 100%\n"
+        "rename from old name.md\nrename to new.md\n"
+    )
+    paths = nim_eval.numstat_paths(diff, tmp_path)
+    assert paths == {"old name.md", "new.md"}
+
+
+def test_summarize_edit_counts_error_rows():
+    rows = [
+        {"config": "a", "role": "edit", "case": "x", "error": "boom"},
+        {
+            "config": "a",
+            "role": "edit",
+            "expect": "patch",
+            "correct": True,
+            "wrong_applies": False,
+            "out_of_scope": 0,
+            "seconds": 5.0,
+            "steps": 2,
+        },
+    ]
+    line = nim_eval.summarize(rows, "a")
+    assert "errors 1" in line and "correct 1/1" in line
