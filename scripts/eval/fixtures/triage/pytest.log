@@ -1,0 +1,181 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.5, pytest-9.2.0, pluggy-1.7.0 -- /home/dev/castor/.venv/bin/python3
+rootdir: /home/dev/castor
+configfile: pyproject.toml
+plugins: anyio-4.13.0
+collecting ... collected 116 items
+
+tests/test_nim.py::test_classify_status[429-rate_limit-True] PASSED      [  0%]
+tests/test_nim.py::test_classify_status[500-upstream-True] PASSED        [  1%]
+tests/test_nim.py::test_classify_status[503-upstream-True] PASSED        [  2%]
+tests/test_nim.py::test_classify_status[529-upstream-True] PASSED        [  3%]
+tests/test_nim.py::test_classify_status[401-auth-False] PASSED           [  4%]
+tests/test_nim.py::test_classify_status[402-billing-False] PASSED        [  5%]
+tests/test_nim.py::test_classify_status[403-permission-False] PASSED     [  6%]
+tests/test_nim.py::test_classify_status[404-not_found-False] PASSED      [  6%]
+tests/test_nim.py::test_classify_status[400-invalid-False] PASSED        [  7%]
+tests/test_nim.py::test_classify_status[422-invalid-False] PASSED        [  8%]
+tests/test_nim.py::test_classify_status[413-context-False] PASSED        [  9%]
+tests/test_nim.py::test_classify_status[418-other-False] PASSED          [ 10%]
+tests/test_nim.py::test_classify_context_window_on_400 PASSED            [ 11%]
+tests/test_nim.py::test_parse_retry_after PASSED                         [ 12%]
+tests/test_nim.py::test_error_detail_shapes PASSED                       [ 12%]
+tests/test_nim.py::test_sliding_window_limiter PASSED                    [ 13%]
+tests/test_nim.py::test_admit_fails_fast_when_wait_too_long PASSED       [ 14%]
+tests/test_nim.py::test_prompt_success_sends_expected_request PASSED     [ 15%]
+tests/test_nim.py::test_plain_call_caps_nemotron_reasoning_at_half_the_cap PASSED [ 16%]
+tests/test_nim.py::test_raw_skips_system_message PASSED                  [ 17%]
+tests/test_nim.py::test_model_resolution_order PASSED                    [ 18%]
+tests/test_nim.py::test_files_are_inlined PASSED                         [ 18%]
+tests/test_nim.py::test_missing_key PASSED                               [ 19%]
+tests/test_nim.py::test_alternate_key_env_var PASSED                     [ 20%]
+tests/test_nim.py::test_cache_hit_skips_second_request PASSED            [ 21%]
+tests/test_nim.py::test_cache_key_varies_with_model PASSED               [ 22%]
+tests/test_nim.py::test_bracket_prefixed_answer_is_a_success PASSED      [ 23%]
+tests/test_nim.py::test_think_blocks_stripped PASSED                     [ 24%]
+tests/test_nim.py::test_truncation_note PASSED                           [ 25%]
+tests/test_nim.py::test_empty_content_is_error PASSED                    [ 25%]
+tests/test_nim.py::test_input_budget_enforced PASSED                     [ 26%]
+tests/test_nim.py::test_bad_temperature[-0.1] PASSED                     [ 27%]
+tests/test_nim.py::test_bad_temperature[2.5] PASSED                      [ 28%]
+tests/test_nim.py::test_429_then_success_retries PASSED                  [ 29%]
+tests/test_nim.py::test_persistent_429_gives_up_after_max_attempts PASSED [ 30%]
+tests/test_nim.py::test_500_retried_then_success PASSED                  [ 31%]
+tests/test_nim.py::test_fatal_status_not_retried[401-API key rejected] PASSED [ 31%]
+tests/test_nim.py::test_fatal_status_not_retried[402-credits or quota exhausted] PASSED [ 32%]
+tests/test_nim.py::test_fatal_status_not_retried[403-access denied] PASSED [ 33%]
+tests/test_nim.py::test_fatal_status_not_retried[404-nim_models] PASSED  [ 34%]
+tests/test_nim.py::test_fatal_status_not_retried[400-invalid request] PASSED [ 35%]
+tests/test_nim.py::test_error_responses_are_not_cached_or_sessioned PASSED [ 36%]
+tests/test_nim.py::test_api_key_is_redacted_from_errors PASSED           [ 37%]
+tests/test_nim.py::test_429_sets_cooldown_that_fails_fast PASSED         [ 37%]
+tests/test_nim.py::test_network_error_is_reported PASSED                 [ 38%]
+tests/test_nim.py::test_non_https_base_url_refused PASSED                [ 39%]
+tests/test_nim.py::test_session_requires_cwd PASSED                      [ 40%]
+tests/test_nim.py::test_session_replays_history PASSED                   [ 41%]
+tests/test_nim.py::test_continue_session_uses_default PASSED             [ 42%]
+tests/test_nim.py::test_session_compaction_uses_nim_not_agy PASSED       [ 43%]
+tests/test_nim.py::test_review_uses_supplied_diff PASSED                 [ 43%]
+tests/test_nim.py::test_security_review_uses_security_prompt PASSED      [ 44%]
+tests/test_nim.py::test_review_empty_diff PASSED                         [ 45%]
+tests/test_nim.py::test_explain_error_inlines_files PASSED               [ 46%]
+tests/test_nim.py::test_summarize_parses_json PASSED                     [ 47%]
+tests/test_nim.py::test_summarize_falls_back_on_prose PASSED             [ 48%]
+tests/test_nim.py::test_summarize_rejects_escape_from_cwd PASSED         [ 49%]
+tests/test_nim.py::test_summarize_missing_target PASSED                  [ 50%]
+tests/test_nim.py::test_models_lists_and_filters PASSED                  [ 50%]
+tests/test_nim.py::test_status_ready PASSED                              [ 51%]
+tests/test_nim.py::test_status_not_configured PASSED                     [ 52%]
+tests/test_nim.py::test_status_bad_key PASSED                            [ 53%]
+tests/test_nim.py::test_status_skip_verify_spends_no_completion PASSED   [ 54%]
+tests/test_nim.py::test_nim_start_and_poll PASSED                        [ 55%]
+tests/test_nim.py::test_all_nim_tools_registered PASSED                  [ 56%]
+tests/test_nim.py::test_keys_parsed_deduplicated_in_order PASSED         [ 56%]
+tests/test_nim.py::test_requests_rotate_across_keys PASSED               [ 57%]
+tests/test_nim.py::test_429_fails_over_to_other_key_immediately PASSED   [ 58%]
+tests/test_nim.py::test_all_keys_limited_fails_fast PASSED               [ 59%]
+tests/test_nim.py::test_rejected_key_is_retired_when_another_remains PASSED [ 60%]
+tests/test_nim.py::test_last_key_is_never_retired PASSED                 [ 61%]
+tests/test_nim.py::test_status_reports_each_key_without_leaking PASSED   [ 62%]
+tests/test_nim.py::test_status_ready_if_one_key_works PASSED             [ 62%]
+tests/test_nim.py::test_agent_tools_are_confined_and_skip_secrets PASSED [ 63%]
+tests/test_nim.py::test_agent_symlink_out_of_project_is_refused PASSED   [ 64%]
+tests/test_nim.py::test_agent_grep_searches_a_named_log_but_skips_logs_in_a_walk PASSED [ 65%]
+tests/test_nim.py::test_agent_grep_context_shows_lines_after_each_match PASSED [ 66%]
+tests/test_nim.py::test_agent_grep_reports_the_total_when_capped PASSED  [ 67%]
+tests/test_nim.py::test_agent_file_map_lists_tracked_files_with_line_counts PASSED [ 68%]
+tests/test_nim.py::test_agent_skips_engine_assets_unless_named PASSED    [ 68%]
+tests/test_nim.py::test_agent_system_prompt_offers_batching_and_the_file_map PASSED [ 69%]
+tests/test_nim.py::test_agent_tool_edge_cases PASSED                     [ 70%]
+tests/test_nim.py::test_agent_loop_runs_tool_then_answers PASSED         [ 71%]
+tests/test_nim.py::test_citations_check_lists_and_extensionless_files PASSED [ 72%]
+tests/test_nim.py::test_agent_step_cap_forces_an_answer_without_tools PASSED [ 73%]
+tests/test_nim.py::test_agent_answer_step_gets_a_larger_token_budget PASSED [ 74%]
+tests/test_nim.py::test_agent_out_of_tokens_mid_loop_moves_to_the_answer[] PASSED [ 75%]
+tests/test_nim.py::test_agent_out_of_tokens_mid_loop_moves_to_the_answer[Now I have enough. Critical] PASSED [ 75%]
+tests/test_nim.py::test_agent_caps_nemotron_reasoning_per_step PASSED    [ 76%]
+tests/test_nim.py::test_agent_sends_no_reasoning_budget_to_other_models PASSED [ 77%]
+tests/test_nim.py::test_agent_ignoring_the_cap_gives_a_clear_error PASSED [ 78%]
+tests/test_nim.py::test_agent_repeated_call_is_not_rerun PASSED          [ 79%]
+tests/test_nim.py::test_agent_answers_every_call_and_bad_arguments PASSED [ 80%]
+tests/test_nim.py::test_agent_validates_inputs PASSED                    [ 81%]
+tests/test_nim.py::test_agent_http_error_is_returned PASSED              [ 81%]
+tests/test_nim.py::test_agent_model_env_override PASSED                  [ 82%]
+tests/test_nim.py::test_agent_start_and_poll PASSED                      [ 83%]
+tests/test_nim.py::test_scout_builds_task_and_default_budget PASSED      [ 84%]
+tests/test_nim.py::test_review_reads_diff_file_server_side PASSED        [ 85%]
+tests/test_nim.py::test_review_uses_range_then_working_tree PASSED       [ 86%]
+tests/test_nim.py::test_git_diff_rejects_non_revisions[--output=/tmp/x] PASSED [ 87%]
+tests/test_nim.py::test_git_diff_rejects_non_revisions[a b] PASSED       [ 87%]
+tests/test_nim.py::test_git_diff_rejects_non_revisions[$(x)] PASSED      [ 88%]
+tests/test_nim.py::test_git_diff_passes_range_to_git PASSED              [ 89%]
+tests/test_nim.py::test_review_refuses_empty_oversize_and_missing PASSED [ 90%]
+tests/test_nim.py::test_review_refuses_a_diff_file_that_is_not_a_diff PASSED [ 91%]
+tests/test_nim.py::test_triage_requires_log_inside_cwd PASSED            [ 92%]
+tests/test_nim.py::test_role_end_to_end_through_the_loop PASSED          [ 93%]
+tests/test_nim.py::test_role_start_tools_queue_the_same_task PASSED      [ 93%]
+tests/test_nim.py::test_role_start_tools_report_bad_input_at_once PASSED [ 94%]
+tests/test_nim.py::test_agent_tells_the_model_its_budget_and_warns_before_the_last_step PASSED [ 95%]
+.dev/triage-demo/test_demo.py::test_default_model_is_old FAILED          [ 96%]
+.dev/triage-demo/test_demo.py::test_parse_config FAILED                  [ 97%]
+.dev/triage-demo/test_demo.py::test_fine[0] PASSED                       [ 98%]
+.dev/triage-demo/test_demo.py::test_fine[1] PASSED                       [ 99%]
+.dev/triage-demo/test_demo.py::test_fine[2] PASSED                       [100%]
+
+=================================== FAILURES ===================================
+__________________________ test_default_model_is_old ___________________________
+
+    def test_default_model_is_old():
+>       assert server.NIM_DEFAULT_MODEL == "meta/llama-3.3-70b-instruct"
+E       AssertionError: assert 'nvidia/nemot...tra-550b-a55b' == 'meta/llama-3.3-70b-instruct'
+E         
+E         - meta/llama-3.3-70b-instruct
+E         + nvidia/nemotron-3-ultra-550b-a55b
+
+.dev/triage-demo/test_demo.py:7: AssertionError
+______________________________ test_parse_config _______________________________
+
+    def test_parse_config():
+>       json.loads("{'bad': json}")
+
+.dev/triage-demo/test_demo.py:11: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/anaconda3/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/anaconda3/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x104c47a10>, s = "{'bad': json}"
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+/opt/anaconda3/lib/python3.13/json/decoder.py:361: JSONDecodeError
+=============================== warnings summary ===============================
+.venv/lib/python3.13/site-packages/anyio/pytest_plugin.py:14
+  /home/dev/castor/.venv/lib/python3.13/site-packages/anyio/pytest_plugin.py:14: PytestRemovedIn10Warning: _pytest.python.CallSpec2 has been renamed to CallSpec.
+  The CallSpec2 alias will be removed in pytest 10.
+  Update imports to use CallSpec instead.
+  See https://docs.pytest.org/en/stable/deprecations.html#callspec2-renamed
+    from _pytest.python import CallSpec2
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED .dev/triage-demo/test_demo.py::test_default_model_is_old - AssertionEr...
+FAILED .dev/triage-demo/test_demo.py::test_parse_config - json.decoder.JSONDe...
+=================== 2 failed, 114 passed, 1 warning in 3.39s ===================

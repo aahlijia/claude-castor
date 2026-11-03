@@ -261,6 +261,15 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
   ```
   `tests/test_nim.py` exercises the NIM backend against a local stub server (no
   network, no real key). The agy path has no automated tests.
+- Before changing a NIM role prompt, the agent loop or a default model, score
+  it: `uv run --with httpx --with fastmcp python scripts/nim_eval.py
+  scripts/eval/cases.json [private cases] --config label=model[,step=model]`
+  (needs `NVIDIA_API_KEYS`; spends free-tier requests). It reports lead
+  precision, recall of known findings, must-catch hits, time and steps.
+  `--rescore results.json` re-scores saved answers after editing cases. A
+  match needs the right file and lines and one of the finding's keywords;
+  line proximity alone overstated hits. Cases for private repos stay outside
+  this repo (the NQC set is `~/.cache/claude-castor/eval/nqc-cases.json`).
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands `server.py` depends on. After an intended agy
   upgrade, update `server.py`, then refresh with `--update-snapshot`.

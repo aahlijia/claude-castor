@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/nim_eval.py`:** scores the agent roles against cases with known
+  answers (lead precision, recall, must-catch findings, time, steps) across
+  model configurations. `scripts/eval/cases.json` holds cases built from this
+  repo; keep cases for private code outside the repo.
 - **Background role tools:** `nim_scout_start`, `nim_first_pass_review_start`
   and `nim_triage_log_start` queue a role on the job pool (collect with
   `gemini_poll`). The diff or log is checked when the job starts, so bad input

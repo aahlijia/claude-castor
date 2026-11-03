@@ -1,0 +1,22 @@
+diff --git a/server.py b/server.py
+index c0491e0..e2813de 100644
+--- a/server.py
++++ b/server.py
+@@ -4033,7 +4033,7 @@ def _agent_resolve(root: Path, raw: str) -> tuple[Path | None, str | None]:
+         target = (root / (raw or ".")).resolve()
+     except (OSError, RuntimeError, ValueError):
+         return None, "invalid path"
+-    if not target.is_relative_to(root):
++    if not str(target).startswith(str(root)):
+         return None, "path is outside the project"
+     if _agent_denied(target.relative_to(root)):
+         return None, "path is off limits (secrets and .git)"
+@@ -4450,7 +4450,7 @@ def _citation_lines_exist(lines: str, total: int | None) -> bool:
+     if total is None:
+         return False
+     spans = re.findall(r"(\d+)(?:-(\d+))?", lines)
+-    return all(1 <= int(a) <= int(b or a) <= total for a, b in spans)
++    return any(1 <= int(a) <= int(b or a) <= total for a, b in spans)
+ 
+ 
+ def _agent_verify_citations(answer: str, root: Path) -> tuple[str, int, int]:
