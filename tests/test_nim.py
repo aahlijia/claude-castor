@@ -159,12 +159,11 @@ def fake_dekko(tmp_path, monkeypatch):
     """Pretend dekko is installed; `_dekko_run` pops queued results."""
 
     class Fake:
-        queue: list = []
-        calls: list = []
+        def __init__(self):
+            self.queue = []  # (ok, text) results, popped in order
+            self.calls = []  # the argv of every dekko run
 
     fake = Fake()
-    fake.queue = []
-    fake.calls = []
 
     def run(root, args, timeout=10.0):
         fake.calls.append(args)
@@ -3395,9 +3394,7 @@ def test_statement_end_balances_brackets_outside_strings():
     assert server._edit_statement_end(["f("] * 40, 1) == 20
 
 
-def test_nim_edit_must_cover_dekko_failure_is_an_error(
-    stub, repo, fake_dekko
-):
+def test_nim_edit_must_cover_dekko_failure_is_an_error(stub, repo, fake_dekko):
     _cover_repo(repo)
     boom = (False, "[dekko error: boom]")
     fake_dekko.queue += [(True, ""), (True, ""), boom, (True, ""), boom]
