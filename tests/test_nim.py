@@ -1404,3 +1404,92 @@ def test_grep_outside_git_falls_back_to_a_pruned_walk(tmp_path):
     server._nim_reset_state()
     assert server._agent_index(root) is None
     assert server._agent_grep(root, "TARGET", ".", None) == "a.cs:1:TARGET"
+
+
+# --- triage context ----------------------------------------------------------
+
+
+def _runner_log():
+    rows = ["start run", "NOT ASSESSED  room A: no bag", "  cause: no owner"]
+    for i in range(30):
+        rows += [
+            f"step {i}",
+            "Traceback (most recent call last):",
+            '  File "<string>", line 1, in <module>',
+            f"    print({i})",
+            "EOFError: EOF when reading a line",
+        ]
+    rows += [f"filler {i}" for i in range(60)]
+    rows += ["NOT ASSESSED  room B: no bag", "--- verdicts ---"]
+    rows += ["PASS  standard", "total 2, fail 0, not assessed 1"]
+    return "\n".join(rows) + "\n"
+
+
+def test_triage_context_counts_collapses_and_keeps_the_tail(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text(_runner_log())
+    lines = log.read_text().splitlines()
+    ctx = server._triage_context(log, "run.log")
+    assert "Traceback: 30" in ctx and "NOT ASSESSED: 2" in ctx
+    assert "FAIL: 0" in ctx and "ERROR: 0" in ctx
+    first = lines.index("Traceback (most recent call last):") + 1
+    last = len(lines) - lines[::-1].index("Traceback (most recent call last):")
+    assert (
+        f"run.log:{first} - Traceback (most recent call last): "
+        f"(repeats 30 times, last at line {last})"
+    ) in ctx
+    assert ctx.count("EOFError") >= 1 and "    3: cause: no owner" in ctx
+    assert "run.log:2 - NOT ASSESSED  room A" in ctx
+    room_b = lines.index("NOT ASSESSED  room B: no bag") + 1
+    assert f"run.log:{room_b} - NOT ASSESSED  room B" in ctx
+    assert f"{len(lines)}: total 2, fail 0, not assessed 1" in ctx
+
+
+def test_triage_collapses_a_row_repeated_in_the_verdict_table(tmp_path):
+    log = tmp_path / "v.log"
+    log.write_text(
+        "NOT ASSESSED  room A\nplace one\n"
+        + "".join(f"pad {i}\n" for i in range(60))
+        + "--- verdicts ---\nNOT ASSESSED  room A\n"
+    )
+    ctx = server._triage_context(log, "v.log")
+    assert "v.log:1 - NOT ASSESSED  room A (repeats 2 times, last at " in ctx
+
+
+def test_triage_context_with_no_markers_has_zero_counts_and_the_ends(
+    tmp_path,
+):
+    log = tmp_path / "ok.log"
+    log.write_text("".join(f"line {i} error in path\n" for i in range(100)))
+    ctx = server._triage_context(log, "ok.log")
+    assert all(f"{name}: 0" in ctx for name, _ in server.NIM_TRIAGE_MARKERS)
+    assert "== matching lines\n(none)" in ctx
+    assert "1: line 0" in ctx and "100: line 99" in ctx
+    assert "11: line 10" not in ctx
+
+
+def test_triage_keeps_distinct_failures_apart():
+    lines = ["FAIL test_3", "x", "FAIL test_4", "x", "12:00:01 FAIL test_3"]
+    groups = server._collapse_repeats(lines, [1, 3, 5], lambda n: 0)
+    assert groups == [(1, 5, 2), (3, 3, 1)]
+
+
+def test_triage_run_carries_context_and_uses_at_most_three_requests(
+    stub, repo
+):
+    (repo / "run.log").write_text(_runner_log())
+    for pattern in ("x", "y"):
+        stub.queue.append((200, {}, _tool_call("grep", {"pattern": pattern})))
+    stub.queue.append((200, {}, _completion("inconclusive")))
+    out = _tool(server.nim_triage_log)(str(repo), "run.log")
+    posts = stub.posts()
+    assert len(posts) <= 3 and "inconclusive" in out
+    task = posts[0][3]["messages"][1]["content"]
+    assert "[CONTEXT]" in task and "Traceback: 30" in task
+
+
+def test_triage_refuses_a_log_over_the_size_cap(captured, repo, monkeypatch):
+    (repo / "big.log").write_text("x" * 100)
+    monkeypatch.setattr(server, "NIM_TRIAGE_MAX_LOG_BYTES", 10)
+    out = _tool(server.nim_triage_log)(str(repo), "big.log")
+    assert "split it first" in out and not captured
