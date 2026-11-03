@@ -1174,3 +1174,167 @@ def test_agent_tells_the_model_its_budget_and_warns_before_the_last_step(
     assert posts[2]["messages"][-1]["content"].endswith(
         server.NIM_AGENT_FINAL_NUDGE
     )
+
+
+# --- step model, records, review context, quotes ---------------------------
+
+
+def test_step_model_runs_tools_and_main_model_answers(stub, repo):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
+    stub.queue.append((200, {}, _completion("early draft from the fast one")))
+    stub.queue.append((200, {}, _completion("final answer")))
+    text, stats = server._run_nim_agent(
+        "t", str(repo), "vendor/strong", 5, None, "vendor/fast"
+    )
+    models = [p[3]["model"] for p in stub.posts()]
+    assert models == ["vendor/fast", "vendor/fast", "vendor/strong"]
+    assert "tools" not in stub.posts()[2][3]
+    assert text.startswith("final answer")
+    assert "models vendor/fast (steps), vendor/strong" in text
+    assert [r["model"] for r in stats["requests"]] == models
+
+
+def test_step_model_env_default(stub, repo, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_AGENT_STEP_MODEL", "vendor/fast")
+    stub.queue.append((200, {}, _completion("draft")))
+    stub.queue.append((200, {}, _completion("answer")))
+    _tool(server.nim_agent)("t", str(repo), model="vendor/strong")
+    assert [p[3]["model"] for p in stub.posts()] == [
+        "vendor/fast",
+        "vendor/strong",
+    ]
+
+
+def _usage_entries(tmp_path):
+    folder = tmp_path / "cache" / "claude-castor" / server.NIM_USAGE_DIR
+    return [
+        json.loads(line)
+        for path in sorted(folder.glob("*.jsonl"))
+        for line in path.read_text().splitlines()
+    ]
+
+
+def test_usage_ledger_records_requests_without_prompt_text(stub, tmp_path):
+    body = _completion("hi")
+    body["usage"] = {"prompt_tokens": 11, "completion_tokens": 3}
+    stub.queue.append((200, {}, body))
+    _tool(server.nim_prompt)("secret prompt words", use_cache=False)
+    (entry,) = _usage_entries(tmp_path)
+    assert entry["ok"] is True and entry["model"] == server.NIM_DEFAULT_MODEL
+    assert entry["prompt_tokens"] == 11 and entry["completion_tokens"] == 3
+    folder = tmp_path / "cache" / "claude-castor" / server.NIM_USAGE_DIR
+    assert "secret prompt" not in "".join(
+        p.read_text() for p in folder.iterdir()
+    )
+
+
+def test_records_can_be_turned_off(stub, tmp_path, monkeypatch, repo):
+    monkeypatch.setenv("CASTOR_NIM_TRACES", "0")
+    stub.queue.append((200, {}, _completion("a")))
+    _tool(server.nim_agent)("t", str(repo))
+    assert not (tmp_path / "cache" / "claude-castor").exists()
+
+
+def test_agent_run_leaves_a_trace_and_nim_usage_sums_it(stub, tmp_path, repo):
+    stub.queue.append((200, {}, _tool_call("list_dir", {"path": "src"})))
+    stub.queue.append((200, {}, _completion("see src/a.py:2")))
+    _tool(server.nim_agent)("trace me", str(repo))
+    folder = tmp_path / "cache" / "claude-castor" / server.NIM_TRACES_DIR
+    (path,) = folder.glob("*.json")
+    trace = json.loads(path.read_text())
+    assert trace["ok"] and trace["task_head"] == "trace me"
+    assert trace["requests"][0]["calls"][0]["name"] == "list_dir"
+    assert trace["citations"] == [1, 1]
+    report = _tool(server.nim_usage)()
+    assert "2 requests" in report and "agent runs 1 (1 ok" in report
+
+
+def test_nim_usage_with_no_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert "No NIM usage" in _tool(server.nim_usage)(days=1)
+
+
+def test_review_context_numbers_lines_and_lists_uses(captured, repo, tmp_path):
+    (repo / "src" / "lib.py").write_text(
+        "".join(f"x{n} = {n}\n" for n in range(1, 41))
+        + "def helper(v):\n    return v + 1\n"
+    )
+    (repo / "src" / "use.py").write_text("from lib import helper\nhelper(2)\n")
+    diff = tmp_path / "c.diff"
+    diff.write_text(
+        "diff --git a/src/lib.py b/src/lib.py\n--- a/src/lib.py\n"
+        "+++ b/src/lib.py\n@@ -41,2 +41,2 @@\n def helper(v):\n"
+        "-    return v\n+    return v + 1\n"
+    )
+    _tool(server.nim_first_pass_review)(str(repo), diff_file=str(diff))
+    task = captured[0]["task"]
+    assert "[CONTEXT]" in task and "== src/lib.py lines 21-42 of 42" in task
+    assert "42:     return v + 1" in task and "20: x20" not in task
+    assert "uses of helper:" in task and "src/use.py:2:helper(2)" in task
+
+
+def test_diff_symbols_reads_definitions_and_hunk_headers():
+    diff = (
+        "@@ -1,4 +1,4 @@ def outer(a):\n"
+        "-    a = 1\n"
+        "+    public static int Clamp(int v) {\n"
+        " run_job() {\n"
+        "+  x = 1\n"
+        " def unrelated():\n"
+    )
+    assert server._diff_symbols(diff) == ["outer", "Clamp", "run_job"]
+
+
+def test_quotes_are_checked_against_the_cited_lines(repo):
+    answer = (
+        "- src/a.py:2 - `TARGET = 1` - right line\n"
+        "- src/a.py:3 - `TARGET = 1` - near enough\n"
+        "- src/a.py:1 - `three` - off by two, within slack\n"
+        "- src/a.py:2 - `nowhere in it` - invented\n"
+        "- no citation `TARGET = 1` here"
+    )
+    out, matched, checked = server._agent_check_quotes(answer, repo)
+    assert (matched, checked) == (3, 4)
+    assert "`nowhere in it` [quote not in file]" in out
+    far = "- src/a.py:2 - `three` - fine\n- big.txt:1 - `line 90` - far"
+    (repo / "big.txt").write_text("\n".join(f"line {i}" for i in range(100)))
+    out, matched, checked = server._agent_check_quotes(far, repo)
+    assert "`line 90` [quote is at line 91]" in out and checked == 2
+
+
+def test_quote_results_appear_in_the_footer(stub, repo):
+    stub.queue.append((200, {}, _completion("- src/a.py:2 - `TARGET = 1`")))
+    out = _tool(server.nim_agent)("t", str(repo))
+    assert "citations verified 1/1; quotes matched 1/1]" in out
+
+
+def test_quote_check_pairs_backticks_and_accepts_elisions(repo):
+    answer = (
+        "- src/a.py:2 - sets `1` only when `TARGET = 1` runs\n"
+        "- src/a.py:1 - `one ... three` - shortened\n"
+        "- src/a.py:1 - `one ... missing` - half invented"
+    )
+    out, matched, checked = server._agent_check_quotes(answer, repo)
+    assert (matched, checked) == (2, 3)
+    assert "[quote not in file]" in out.splitlines()[2]
+    assert "only when `TARGET = 1` runs" in out.splitlines()[0]
+
+
+def test_bare_file_names_resolve_when_unique(tmp_path):
+    root = tmp_path / "b"
+    (root / "Tools" / "playtest").mkdir(parents=True)
+    (root / "Tools" / "playtest" / "run.sh").write_text("a\nb\nfail here\n")
+    (root / "x").mkdir()
+    (root / "x" / "dup.py").write_text("1\n")
+    (root / "y").mkdir()
+    (root / "y" / "dup.py").write_text("1\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    root = root.resolve()
+    out, verified, total = server._agent_verify_citations(
+        "run.sh:3 and dup.py:1", root
+    )
+    assert (verified, total) == (1, 2) and "dup.py:1 [unverified]" in out
+    out, matched, checked = server._agent_check_quotes(
+        "- run.sh:3 - `fail here`", root
+    )
+    assert (matched, checked) == (1, 1)
