@@ -1,0 +1,228 @@
+[
+ {
+  "name": "castor-planted-bugs",
+  "role": "review",
+  "repo": "../..",
+  "commit": "b5b32a5",
+  "paths": [
+   "server.py",
+   "tests",
+   "CLAUDE.md"
+  ],
+  "apply": "fixtures/planted-bugs.diff",
+  "diff_file": "fixtures/planted-bugs.diff",
+  "focus": "Paths the agent reads must stay inside the project root.",
+  "expected": [
+   {
+    "id": "prefix-containment",
+    "must": true,
+    "window": 3,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4036,
+       4036
+      ]
+     }
+    ],
+    "keywords": [
+     "prefix",
+     "startswith",
+     "sibling",
+     "outside",
+     "contain",
+     "traversal"
+    ]
+   },
+   {
+    "id": "any-instead-of-all",
+    "must": true,
+    "window": 3,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4453,
+       4453
+      ]
+     }
+    ],
+    "keywords": [
+     "any(",
+     "any()",
+     "`any`",
+     "all(",
+     "all()",
+     "any instead",
+     " any "
+    ]
+   }
+  ]
+ },
+ {
+  "name": "castor-scout-paths",
+  "role": "scout",
+  "repo": "../..",
+  "commit": "b5b32a5",
+  "paths": [
+   "server.py",
+   "tests",
+   "CLAUDE.md"
+  ],
+  "question": "Where does the NIM agent decide that a path is outside the project or off limits, and where is that check applied to grep, read_range and list_dir?",
+  "expected": [
+   {
+    "id": "agent-denied",
+    "must": true,
+    "window": 5,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4014,
+       4023
+      ]
+     }
+    ]
+   },
+   {
+    "id": "agent-resolve",
+    "must": true,
+    "window": 5,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4026,
+       4040
+      ]
+     }
+    ]
+   },
+   {
+    "id": "grep-readable",
+    "window": 5,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4114,
+       4121
+      ]
+     }
+    ]
+   },
+   {
+    "id": "list-dir",
+    "window": 5,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4050,
+       4067
+      ]
+     }
+    ]
+   },
+   {
+    "id": "read-range",
+    "window": 5,
+    "locations": [
+     {
+      "file": "server.py",
+      "lines": [
+       4070,
+       4078
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "castor-triage-pytest",
+  "role": "triage",
+  "dir": "fixtures/triage",
+  "log": "pytest.log",
+  "question": "How many tests passed and failed, and what is the one warning?",
+  "expected": [
+   {
+    "id": "model-assert",
+    "must": true,
+    "window": 2,
+    "locations": [
+     {
+      "file": "pytest.log",
+      "lines": [
+       119,
+       135
+      ]
+     },
+     {
+      "file": "pytest.log",
+      "lines": [
+       179,
+       179
+      ]
+     }
+    ]
+   },
+   {
+    "id": "json-decode",
+    "must": true,
+    "window": 2,
+    "locations": [
+     {
+      "file": "pytest.log",
+      "lines": [
+       120,
+       120
+      ]
+     },
+     {
+      "file": "pytest.log",
+      "lines": [
+       136,
+       168
+      ]
+     },
+     {
+      "file": "pytest.log",
+      "lines": [
+       180,
+       180
+      ]
+     }
+    ]
+   },
+   {
+    "id": "warning",
+    "window": 2,
+    "locations": [
+     {
+      "file": "pytest.log",
+      "lines": [
+       170,
+       174
+      ]
+     }
+    ]
+   },
+   {
+    "id": "summary-counts",
+    "window": 1,
+    "locations": [
+     {
+      "file": "pytest.log",
+      "lines": [
+       181,
+       181
+      ]
+     }
+    ]
+   }
+  ]
+ }
+]
