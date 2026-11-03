@@ -331,8 +331,10 @@ agent step is one NIM request, so prefer a handful of focused tasks to one huge
 one, and use `nim_agent_start` (or a role's `_start` variant, such as
 `nim_triage_log_start`) to fan out or to keep working while it runs. Every
 `path:line` is checked; one tagged `[unverified]` is a hallucination, so
-discard it. The check only proves the line exists: a "citations verified 9/9"
-answer has still pointed at the wrong branch of a function.
+discard it. Findings and scout ranges also quote the code; Castor tags a
+quote that isn't at the cited line `[quote is at line N]` or
+`[quote not in file]`, so treat those leads as wrong or mislocated. A
+matched quote proves the location, not the claim.
 
 Rules of thumb:
 

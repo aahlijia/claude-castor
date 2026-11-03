@@ -354,6 +354,7 @@ third party.
 | `nim_agent` / `nim_agent_start` | Read-only investigation: the model gets `grep`, `read_range` and `list_dir` (run locally, confined to `cwd`, secrets and `.git` off limits) and cited `path:line` are verified; `_start` runs it in the background |
 | `nim_scout` / `nim_first_pass_review` / `nim_triage_log` | Roles on the agent loop: the lines a task needs, a first-pass review of a diff read server-side (file, range or `git diff HEAD`), and a log boiled down to its failures. Each has a `_start` variant for the background |
 | `nim_models` | List served models (optional `query` filter) |
+| `nim_usage` | Requests, failures, tokens and agent runs per day and per model, from Castor's local records (no network call) |
 | `nim_status` | Key, default model, limits, rate-limit state (`verify=False` skips the live check) |
 
 Caching, sessions and background jobs work as they do for agy. Sessions are
@@ -370,7 +371,9 @@ All optional, set as environment variables on the MCP server:
 | `NVIDIA_API_KEYS` | — | Several keys, comma-separated. Requests rotate across them; each key has its own rate limit and cooldown, a 429 moves on to the next key, and a rejected key (401/402) is skipped while another remains |
 | `CASTOR_NIM_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Model used when a call names none; see `nim_models` |
 | `CASTOR_NIM_AGENT_MODEL` | `CASTOR_NIM_MODEL` | Model for `nim_agent` loops; pick a fast one (see `nim_models`) |
+| `CASTOR_NIM_AGENT_STEP_MODEL` | the agent model | Model for the agent's tool steps (picking the next lookup); the agent model still writes the answer |
 | `CASTOR_NIM_AGENT_ANSWER_TOKENS` | `16384` | Token cap for the agent's final answer, which reasons over everything it read |
+| `CASTOR_NIM_TRACES` | `1` | `0` turns off the local usage log and agent traces under `~/.cache/claude-castor/` (kept 30 days) |
 | `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
 | `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
 | `CASTOR_NIM_CONCURRENCY` | `4` | Simultaneous in-flight requests |

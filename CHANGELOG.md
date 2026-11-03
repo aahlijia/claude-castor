@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Review context built by Castor.** `nim_first_pass_review` now sends the
+  numbered new-file lines around every hunk and where the functions the diff
+  touches are used, so the model starts with what it used to spend most of its
+  steps finding, and cites real line numbers.
+- **Quote-checked citations.** Review findings and scout ranges carry a short
+  exact quote; Castor checks it is within 3 lines of the citation and tags it
+  `[quote is at line N]` or `[quote not in file]` otherwise. The footer reports
+  `quotes matched x/y`.
+- **Separate step model:** `CASTOR_NIM_AGENT_STEP_MODEL` runs the agent's tool
+  steps on a faster model while the agent model writes the answer.
+- **`nim_usage` and local records.** Every NIM chat request is logged locally
+  (model, outcome, seconds, tokens; no prompt text) and every agent run leaves a
+  trace under `~/.cache/claude-castor/`; `nim_usage` summarizes them.
+  `CASTOR_NIM_TRACES=0` turns both off.
 - **`scripts/nim_eval.py`:** scores the agent roles against cases with known
   answers (lead precision, recall, must-catch findings, time, steps) across
   model configurations. `scripts/eval/cases.json` holds cases built from this
@@ -63,6 +77,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fastmcp`).
 - `_compact_session` / `_append_turn` accept a pluggable summarizer and
   `_run_job` a pluggable runner; agy behavior is unchanged.
+- `nim_first_pass_review` defaults to 8 steps (was 20): with Castor's context
+  the model needs few lookups, and it spends every step it is given.
+- The agent's answer request may wait 360 s (other requests keep
+  `CASTOR_NIM_TIMEOUT`); long reviews had timed out twice at 180 s.
+- A bare file name in a citation (`mansion.sh:12`) is checked against the one
+  project file with that name instead of being tagged `[unverified]`.
 - Plain NIM calls (`nim_prompt`, `nim_review`, `nim_summarize` and the rest)
   cap Nemotron's thinking at half of `max_tokens` (at most 6,144), so it can
   no longer spend the whole completion cap thinking and return nothing.

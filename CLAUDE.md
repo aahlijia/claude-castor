@@ -150,17 +150,30 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
 | `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll` |
 | `nim_models` | `(query=None)` | List served model ids |
+| `nim_usage` | `(days=7)` | Per-day and per-model requests, failures, tokens and agent runs from local records |
 | `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
 
 `nim_agent` (`_nim_agent_loop`) is confined to `cwd` (symlinks resolved before
 the containment check; `.env*`, key files and `.git` are off limits), reads at
 most 120 lines per call, caps each tool result, and never lets the model edit or
-run anything. Each step is one NIM request (default 12 steps, max 30;
-`CASTOR_NIM_AGENT_MODEL` overrides the model). `_agent_verify_citations` tags
-any `path:line` that does not exist as `[unverified]`. The last step, or a
+run anything. Each step is one NIM request (default 12 steps, max 30; reviews
+8; `CASTOR_NIM_AGENT_MODEL` overrides the model).
+`CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another
+model while the agent model answers (scored no better, so unset by default).
+`_agent_verify_citations` tags any `path:line` that does not exist as
+`[unverified]` (a bare file name is checked against the one project file with
+that name), and `_agent_check_quotes` checks each cited line's backticked
+quote, tagging `[quote is at line N]` or `[quote not in file]`.
+`nim_first_pass_review` gets `_review_context`: numbered new-file lines
+around each hunk plus grep hits for the functions the diff touches.
+`_run_nim_agent` returns stats and writes a trace to
+`~/.cache/claude-castor/nim-traces/`; `_nim_request` logs every chat request
+to `nim-usage/` (no prompt text) for `nim_usage`; `CASTOR_NIM_TRACES=0` turns
+both off. The last step, or a
 tool step that runs out of tokens, goes to `_agent_answer`: the transcript
 flattened into one user message (Nemotron keeps calling tools otherwise), with
-a 16k token cap (`CASTOR_NIM_AGENT_ANSWER_TOKENS`). Nemotron models get a
+a 16k token cap (`CASTOR_NIM_AGENT_ANSWER_TOKENS`) and a 360 s timeout
+(`NIM_AGENT_ANSWER_TIMEOUT`; other requests keep `CASTOR_NIM_TIMEOUT`). Nemotron models get a
 `reasoning_budget` of 1024 per tool step and 6144 for the answer
 (`_nim_thinking_cap`); plain NIM calls (`_run_nim`) cap it at half of
 `max_tokens`, at most 6144. Walks and the file list skip engine assets
