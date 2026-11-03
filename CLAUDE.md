@@ -150,6 +150,8 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
 | `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
 | `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll` |
+| `nim_edit` | `(task, cwd, files=None, must_cover=None, model=None, max_steps=None)` | Mechanical edit as a checked patch under `~/.cache/claude-castor/nim-patches/`; NIM never writes files. Blocks must match exactly once inside `cwd` and `files`; `must_cover` (needs dekko) requires every call site and the definition edited; one repair round, then a refusal or `git apply --check`. Read the diff, then `git apply <patch>` |
+| `nim_edit_start` | same | Background `nim_edit`; input is checked at start; poll with `gemini_poll` |
 | `nim_models` | `(query=None)` | List served model ids |
 | `nim_usage` | `(days=7)` | Per-day and per-model requests, failures, tokens and agent runs from local records |
 | `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
@@ -158,7 +160,8 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 the containment check; `.env*`, key files and `.git` are off limits), reads at
 most 120 lines per call, caps each tool result, and never lets the model edit or
 run anything. Each step is one NIM request (default 12 steps, max 30; reviews
-8). Agent roles default to `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super);
+8). `nim_edit` reuses the loop with an edit-block answer rule and returns
+patches Castor checks (`_run_nim_edit`). Agent roles default to `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super);
 `CASTOR_NIM_AGENT_MODEL` overrides it, and a set `CASTOR_NIM_MODEL` is
 followed. `CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another
 model while the agent model answers (scored no better, so unset by default).
