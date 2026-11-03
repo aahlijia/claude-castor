@@ -1840,3 +1840,30 @@ def test_dekko_run_reports_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
     ok, text = server._dekko_run(tmp_path, ["query", "symbol", "x"])
     assert ok is False and "timed out" in text
+
+
+def test_ensure_map_runs_once_per_ttl(fake_dekko, tmp_path):
+    fake_dekko.queue += [(True, "")]
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert fake_dekko.calls == [["map", "--if-stale", "--quiet"]]
+
+
+def test_ensure_map_failure_is_cached(fake_dekko, tmp_path):
+    fake_dekko.queue += [(False, "[dekko error: timed out]")]
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert len(fake_dekko.calls) == 1
+
+
+def test_ensure_map_disabled_runs_nothing(monkeypatch, fake_dekko, tmp_path):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert fake_dekko.calls == []
+
+
+def test_ensure_map_reset_clears_cache(fake_dekko, tmp_path):
+    assert server._dekko_ensure_map(tmp_path) is True
+    server._nim_reset_state()
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(fake_dekko.calls) == 2
