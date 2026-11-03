@@ -3127,6 +3127,113 @@ def test_nim_edit_must_cover_passes_when_every_site_is_edited(
     )
 
 
+def _coverage_errors(repo, fake_dekko, blocks, sites, definition):
+    """Apply `blocks` in memory and check old_name's coverage."""
+    callers = {
+        "results": [
+            {"path": path, "id": f"{path}::go", "sites": [line]}
+            for path, line in sites
+        ]
+    }
+    symbol = {"path": definition[0], "line": definition[1]}
+    fake_dekko.queue += [
+        (True, ""),
+        (True, json.dumps(callers)),
+        (True, json.dumps(symbol)),
+    ]
+    changes, errors = server._edit_apply_in_memory(blocks, repo, None)
+    assert errors == []
+    return server._edit_check_coverage(changes, repo, ["old_name"])[0]
+
+
+_LIB = ("src/lib.py", "def old_name():", "def new_name():")
+
+
+def test_coverage_refuses_a_wide_block_that_keeps_the_call(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "w.py").write_text(
+        "def go():\n    x = 1\n    return old_name()\n"
+    )
+    wide = _blk(
+        2,
+        "src/w.py",
+        "    x = 1\n    return old_name()",
+        "    x = 2\n    return old_name()",
+    )
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [_blk(1, *_LIB), wide],
+        [("src/w.py", 3)],
+        ("src/lib.py", 1),
+    )
+    assert errors == ["call site src/w.py:3 of old_name not edited"]
+
+
+def test_coverage_counts_an_argument_added_inside_a_call(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "w.py").write_text(
+        "def go():\n    return old_name(\n        1,\n    )\n"
+    )
+    added = _blk(
+        2, "src/w.py", "        1,\n    )", "        1,\n        2,\n    )"
+    )
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [_blk(1, *_LIB), added],
+        [("src/w.py", 2)],
+        ("src/lib.py", 1),
+    )
+    assert errors == []
+
+
+def test_coverage_counts_a_single_line_rename(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "w.py").write_text("def go():\n    return old_name()\n")
+    rename = _blk(2, "src/w.py", "old_name()", "new_name()")
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [_blk(1, *_LIB), rename],
+        [("src/w.py", 2)],
+        ("src/lib.py", 1),
+    )
+    assert errors == []
+
+
+def test_coverage_counts_a_later_line_of_a_signature(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text(
+        "def old_name(\n    a,\n    b,\n):\n    return a\n"
+    )
+    (repo / "src" / "w.py").write_text(
+        "def go():\n    return old_name(1, 2)\n"
+    )
+    signature = _blk(1, "src/lib.py", "    b,\n):", "    b: int,\n):")
+    call = _blk(2, "src/w.py", "old_name(1, 2)", "old_name(1, b=2)")
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [signature, call],
+        [("src/w.py", 2)],
+        ("src/lib.py", 1),
+    )
+    assert errors == []
+
+
+def test_statement_end_balances_brackets_outside_strings():
+    lines = [
+        "x = f(",
+        '    ")",',
+        "    [1, 2],",
+        ")",
+        "y = 1",
+    ]
+    assert server._edit_statement_end(lines, 1) == 4
+    assert server._edit_statement_end(lines, 5) == 5
+    assert server._edit_statement_end(["f("] * 40, 1) == 20
+
+
 def test_nim_edit_must_cover_dekko_failure_is_an_error(
     stub, repo, fake_dekko
 ):
