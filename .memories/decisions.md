@@ -190,3 +190,16 @@
 ### 2026-11-02: Unity skip dirs are NIM-agent-only
 - **Why:** the design put `Library`, `Temp`, `obj` in the shared `SKIP_DIRS`,
   but it also ruled out agy-path changes. They live in `NIM_AGENT_SKIP_DIRS`.
+
+### 2026-11-03: dekko agent tools stay on by default (0b gate passed)
+- **Why:** `scripts/nim_eval.py`, Nemotron 3.5 Super, scout/review/triage cases
+  (3 castor + 5 NQC), 2 runs each, configs interleaved in the same window.
+  dekko on vs off: recall 23/62 vs 23/62, must-catch 14/20 vs 13/20, lead
+  precision 57% vs 51%, quotes matched 61/70 vs 52/69, median 52 s vs 65 s,
+  6.2 steps both. The gate (recall and must-catch do not drop; median steps
+  or seconds fall) holds on time. Results:
+  `~/.cache/claude-castor/eval/results-20261103-075502.json`.
+- **Caveat:** two runs per config; NQC review hits move between runs (e.g.
+  M6-nrm-sign found once with dekko off, not with it on). Speed is
+  load-dependent; both configs shared the hour.
+- **Rejected:** shipping dekko off by default (no measured loss to justify it).
