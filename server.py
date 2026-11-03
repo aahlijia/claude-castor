@@ -6816,3 +6816,115 @@ def _triage_ends(lines: list[str], label: str) -> str:
 
 if __name__ == "__main__":
     mcp.run()
+
+
+# ---------------------------------------------------------------------------
+# NIM edit
+#
+# nim_edit asks a NIM model for exact-text edit blocks; Castor checks each
+# block against the file and turns the result into a patch. This section
+# starts with the block parser.
+# ---------------------------------------------------------------------------
+
+EDIT_MARKER = "<<<EDIT"
+OLD_MARKER = "<<<OLD"
+NEW_MARKER = ">>>NEW"
+END_MARKER = ">>>END"
+_EDIT_MARKERS = (EDIT_MARKER, OLD_MARKER, NEW_MARKER, END_MARKER)
+
+
+@dataclass(frozen=True)
+class EditBlock:
+    """One exact-text edit: replace `old` with `new` in the file `path`."""
+
+    index: int
+    path: str
+    old: str
+    new: str
+
+
+def _edit_marker_at(line: str) -> str | None:
+    """The marker a line is, or None. A marker is the whole line."""
+    line = line.removesuffix("\r")
+    if line in _EDIT_MARKERS:
+        return line
+    if line.startswith(EDIT_MARKER + " "):
+        return EDIT_MARKER
+
+    return None
+
+
+def _edit_next_marker(lines: list[str], start: int) -> tuple[int, str | None]:
+    """Index and marker of the first marker line at or after `start`."""
+    for i in range(start, len(lines)):
+        marker = _edit_marker_at(lines[i])
+        if marker:
+            return i, marker
+
+    return len(lines), None
+
+
+def _parse_edit_block(
+    lines: list[str], start: int, index: int
+) -> tuple[EditBlock | None, str | None, int]:
+    """Parse the block whose <<<EDIT line is lines[start].
+
+    Returns (block, error, resume): the block or an error message, and the
+    line index where scanning for the next block resumes.
+    """
+    path = lines[start].removesuffix("\r")[len(EDIT_MARKER) :].strip()
+    if not path:
+        return None, f"block {index}: missing path", start + 1
+
+    pos = start + 1
+    parts: list[str] = []  # gap before <<<OLD, old text, new text
+    for want in (OLD_MARKER, NEW_MARKER, END_MARKER):
+        at, found = _edit_next_marker(lines, pos)
+        if found != want:
+            error = f"block {index}: missing {want}"
+            return None, error, at if found == EDIT_MARKER else at + 1
+        parts.append(_edit_join(lines, pos, at))
+        pos = at + 1
+
+    return EditBlock(index, path, parts[1], parts[2]), None, pos
+
+
+def _edit_join(lines: list[str], start: int, stop: int) -> str:
+    """Lines [start, stop) joined with newlines; "" when there are none."""
+    return "\n".join(line.removesuffix("\r") for line in lines[start:stop])
+
+
+def _parse_edit_blocks(answer: str) -> tuple[list[EditBlock], list[str]]:
+    """Parse a model answer into edit blocks and parse errors.
+
+    A block is `<<<EDIT <path>`, `<<<OLD`, the old text, `>>>NEW`, the new
+    text, `>>>END`. Markers count only as whole lines; text outside blocks
+    is ignored. A block with an error is dropped and parsing goes on at
+    the next `<<<EDIT`. Block numbers count every `<<<EDIT` from 1.
+
+    Args:
+        answer: The model's answer text.
+
+    Returns:
+        (blocks in order, error strings like "block 2: missing >>>NEW").
+    """
+    lines = answer.split("\n")
+    blocks: list[EditBlock] = []
+    errors: list[str] = []
+    index = 0
+    pos = 0
+    while True:
+        pos, marker = _edit_next_marker(lines, pos)
+        if marker is None:
+            return blocks, errors
+
+        if marker != EDIT_MARKER:
+            pos += 1
+            continue
+
+        index += 1
+        block, error, pos = _parse_edit_block(lines, pos, index)
+        if block:
+            blocks.append(block)
+        if error:
+            errors.append(error)

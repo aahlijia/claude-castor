@@ -2337,3 +2337,51 @@ def test_review_uses_reads_each_file_once(repo, fake_dekko, monkeypatch):
     assert reads == ["src/a.py"]
     assert out.count("src/a.py:") == server.NIM_REVIEW_USES_PER_SYMBOL
     assert "(7 more)" in out
+
+
+def test_parse_edit_blocks_reads_two_blocks():
+    answer = (
+        "Here you go\n<<<EDIT src/a.py\n<<<OLD\nTARGET = 1\n>>>NEW\n"
+        "TARGET = 2\n>>>END\n<<<EDIT b.md\n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+    )
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == []
+    assert blocks[0] == server.EditBlock(
+        1, "src/a.py", "TARGET = 1", "TARGET = 2"
+    )
+    assert blocks[1].path == "b.md"
+
+
+def test_parse_edit_blocks_reports_missing_marker():
+    _, errors = server._parse_edit_blocks("<<<EDIT a.py\n<<<OLD\nx\n>>>END\n")
+    assert errors == ["block 1: missing >>>NEW"]
+
+
+def test_marker_text_inside_a_line_is_code():
+    answer = "<<<EDIT a.py\n<<<OLD\ns = '>>>END'\n>>>NEW\ns = ''\n>>>END\n"
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == [] and blocks[0].old == "s = '>>>END'"
+
+
+def test_empty_new_text_deletes():
+    blocks, _ = server._parse_edit_blocks(
+        "<<<EDIT a.py\n<<<OLD\nx\n>>>NEW\n>>>END\n"
+    )
+    assert blocks[0].new == ""
+
+
+def test_parse_edit_blocks_reports_missing_end_at_eof():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py\n<<<OLD\nx\n>>>NEW\ny\n"
+    )
+    assert blocks == []
+    assert errors == ["block 1: missing >>>END"]
+
+
+def test_parse_edit_blocks_reports_missing_path():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT \n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+        "<<<EDIT a.py\n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+    )
+    assert errors == ["block 1: missing path"]
+    assert [b.index for b in blocks] == [2]
