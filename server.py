@@ -5049,7 +5049,6 @@ _DEKKO_TOOL_ARGS = {
     for t in DEKKO_AGENT_TOOLS
 }
 _DEKKO_BUDGET_ARGS = ["--no-regen", "--budget", str(NIM_DEKKO_BUDGET)]
-_PATH_BEFORE_LINE_RE = re.compile(r"[\w./@+-]+(?=:\d)")
 _GREP_HIT_RE = re.compile(r"^(.+?):(\d+):")
 
 
@@ -5080,14 +5079,9 @@ def _dekko_error(text: str) -> str:
     return f"[tool error: {text.removeprefix('[').removesuffix(']')}]"
 
 
-def _dekko_drop_denied(text: str) -> str:
-    """Drop output lines that name a path the agent may not read."""
-    kept = []
-    for line in text.splitlines():
-        tokens = _PATH_BEFORE_LINE_RE.findall(line)
-        if not any(_agent_denied(Path(token)) for token in tokens):
-            kept.append(line)
-    return "\n".join(kept)
+def _dekko_allowed(path: Any) -> bool:
+    """True when dekko may show `path` (a relative path string)."""
+    return bool(path) and not _agent_denied(Path(str(path)))
 
 
 def _dekko_definition(root: Path, symbol: str) -> tuple[str, int] | None:
@@ -5102,13 +5096,22 @@ def _dekko_definition(root: Path, symbol: str) -> tuple[str, int] | None:
         return None
 
 
-def _dekko_call_sites(results: list) -> list[tuple[str, int, str]]:
-    """(path, line, caller name) for every site in dekko's callers JSON."""
+def _dekko_call_sites(data: dict) -> list[tuple[str, int, str]]:
+    """(path, line, caller name) for each allowed site in callers JSON."""
     sites = []
-    for result in results:
-        caller = str(result.get("id", "")).split("::", 1)[-1]
+    for result in data.get("results") or []:
         path = str(result.get("path", ""))
-        sites += [(path, int(n), caller) for n in result.get("sites") or []]
+        caller = str(result.get("id", "")).split("::", 1)[-1]
+        if _dekko_allowed(path):
+            sites += [
+                (path, int(n), caller) for n in result.get("sites") or []
+            ]
+    for entry in data.get("module_level") or []:
+        path = str(entry.get("path", ""))
+        if _dekko_allowed(path):
+            sites += [
+                (path, int(n), "<module>") for n in entry.get("lines") or []
+            ]
     return sites
 
 
@@ -5143,7 +5146,7 @@ def _dekko_callers(
     if not ok:
         return None, raw
     try:
-        found = _dekko_call_sites(json.loads(raw)["results"])
+        found = _dekko_call_sites(json.loads(raw))
     except (ValueError, TypeError, KeyError, AttributeError):
         return None, "[dekko error: unreadable callers output]"
     sites = [(path, line) for path, line, _ in found]
@@ -5160,34 +5163,128 @@ def _dekko_callers(
     return sites, "\n".join(lines)
 
 
+def _dekko_row(item: dict) -> str:
+    """One compact `path:line kind signature` row for a symbol record."""
+    row = (
+        f"{item.get('path')}:{item.get('line')} {item.get('kind', '')} "
+        f"{item.get('signature', '')}"
+    ).rstrip()
+    doc = item.get("doc")
+    return f"{row} - {doc}" if doc else row
+
+
+def _dekko_rows(items: list) -> str:
+    """Rows for the allowed records in `items`; denied ones are dropped."""
+    rows = [_dekko_row(i) for i in items if _dekko_allowed(i.get("path"))]
+    return "\n".join(rows) if rows else "[error: denied]"
+
+
+def _render_symbol(data: Any) -> str:
+    return _dekko_rows(data if isinstance(data, list) else [data])
+
+
+def _render_search(data: dict) -> str:
+    hits = data.get("hits") or []
+    return _dekko_rows(hits) if hits else "[no matches]"
+
+
+def _render_outline(data: dict) -> str:
+    lines = []
+    for entry in data.get("files") or []:
+        if not _dekko_allowed(entry.get("path")):
+            continue
+        lines.append(f"{entry['path']} [{entry.get('language', '')}]")
+        lines.extend(
+            f"  {sym.get('line')} {sym.get('kind', '')} "
+            f"{sym.get('signature', '')}"
+            for sym in entry.get("symbols") or []
+        )
+    return "\n".join(lines) or "[no symbols]"
+
+
+def _render_context(data: dict) -> str:
+    target = data.get("target") or {}
+    if not _dekko_allowed(target.get("path")):
+        return "[error: denied]"
+    lines = [_dekko_row(target)]
+    imports = [i.get("source", "") for i in data.get("imports") or []]
+    if imports:
+        lines.append("imports: " + ", ".join(imports))
+    lines.extend(
+        f"{item.get('direction')}: {_dekko_row(item)}"
+        for item in data.get("neighbors") or []
+        if _dekko_allowed(item.get("path"))
+    )
+    if data.get("source"):
+        lines.append("source:\n" + data["source"])
+    return "\n".join(lines)
+
+
+def _render_trace(data: dict) -> str:
+    lines = [
+        " -> ".join(_dekko_row(n) for n in path)
+        for path in data.get("paths") or []
+        if all(_dekko_allowed(n.get("path")) for n in path)
+    ]
+    return "\n".join(lines) or "[no call path found]"
+
+
+_DEKKO_RENDERERS = {
+    "symbol": _render_symbol,
+    "search": _render_search,
+    "outline": _render_outline,
+    "context": _render_context,
+    "trace": _render_trace,
+}
+
+
 def _dekko_command(name: str, values: list[str]) -> list[str]:
     """The dekko argv for tool `name` with its argument values."""
     if name == "outline":
-        return ["outline", *values, *_DEKKO_BUDGET_ARGS]
+        return ["outline", *values, "--json", *_DEKKO_BUDGET_ARGS]
     if name == "trace":
-        return ["trace", *values, "--no-regen"]
+        return ["trace", *values, "--json", "--no-regen"]
     verb = ["query", "symbol"] if name == "symbol" else [name]
     flags = ["--with-source"] if name == "context" else []
-    return [*verb, *values, *flags, *_DEKKO_BUDGET_ARGS]
+    return [*verb, *values, *flags, "--json", *_DEKKO_BUDGET_ARGS]
 
 
-def _dekko_tool(root: Path, name: str, args: dict) -> str:
-    """Run one dekko agent tool; failures come back as "[tool error: ...]"."""
+def _dekko_checked_values(root: Path, name: str, args: dict) -> list | str:
+    """The tool's argument values, or an "[error: ...]" string."""
     keys = _DEKKO_TOOL_ARGS[name]
     values = [str(args.get(key) or "").strip() for key in keys]
     if not all(values):
         return f"[error: {name} needs {', '.join(keys)}]"
+    if any(v.startswith("-") for v in values):
+        return '[error: argument must not start with "-"]'
     if name == "outline":
         _, error = _agent_resolve(root, values[0])
         if error:
             return f"[error: {error}]"
+    return values
+
+
+def _dekko_tool(root: Path, name: str, args: dict) -> str:
+    """Run one dekko agent tool; failures come back as "[tool error: ...]".
+
+    Output is rendered from dekko's JSON with every record on a denied
+    path dropped, so nothing from secrets or .git reaches the model.
+    """
+    values = _dekko_checked_values(root, name, args)
+    if isinstance(values, str):
+        return values
     if name == "callers":
         sites, text = _dekko_callers(root, values[0])
         return _agent_clip(text) if sites is not None else _dekko_error(text)
     ok, text = _dekko_run(root, _dekko_command(name, values))
+    if not ok and name == "trace" and text.startswith("[dekko error: exit 1"):
+        return "[no call path found]"
     if not ok:
         return _dekko_error(text)
-    return _agent_clip(_dekko_drop_denied(text))
+    try:
+        return _agent_clip(_DEKKO_RENDERERS[name](json.loads(text)))
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return "[tool error: dekko output was unreadable]"
 
 
 def _agent_parse_args(call: dict) -> dict | None:
