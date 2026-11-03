@@ -370,7 +370,7 @@ All optional, set as environment variables on the MCP server:
 | `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required unless `NVIDIA_API_KEYS` is set) |
 | `NVIDIA_API_KEYS` | — | Several keys, comma-separated. Requests rotate across them; each key has its own rate limit and cooldown, a 429 moves on to the next key, and a rejected key (401/402) is skipped while another remains |
 | `CASTOR_NIM_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Model used when a call names none; see `nim_models` |
-| `CASTOR_NIM_AGENT_MODEL` | `CASTOR_NIM_MODEL` | Model for `nim_agent` loops; pick a fast one (see `nim_models`) |
+| `CASTOR_NIM_AGENT_MODEL` | `nvidia/nemotron-3.5-super-vl-120b-a12b` (or `CASTOR_NIM_MODEL` when that is set) | Model for `nim_agent` and the roles; scored as accurate as Nemotron 3 Ultra there and about 2.5 times faster |
 | `CASTOR_NIM_AGENT_STEP_MODEL` | the agent model | Model for the agent's tool steps (picking the next lookup); the agent model still writes the answer |
 | `CASTOR_NIM_AGENT_ANSWER_TOKENS` | `16384` | Token cap for the agent's final answer, which reasons over everything it read |
 | `CASTOR_NIM_TRACES` | `1` | `0` turns off the local usage log and agent traces under `~/.cache/claude-castor/` (kept 30 days) |

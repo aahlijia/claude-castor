@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fastmcp`).
 - `_compact_session` / `_append_turn` accept a pluggable summarizer and
   `_run_job` a pluggable runner; agy behavior is unchanged.
+- Agent roles default to `nvidia/nemotron-3.5-super-vl-120b-a12b`. On the
+  eval set it matched Nemotron 3 Ultra's accuracy (same review precision on real
+  diffs, full marks on scout and triage) at about 2.5 times the speed. A set
+  `CASTOR_NIM_MODEL` is still followed, and `CASTOR_NIM_AGENT_MODEL` overrides
+  both.
 - `nim_first_pass_review` defaults to 8 steps (was 20): with Castor's context
   the model needs few lookups, and it spends every step it is given.
 - The agent's answer request may wait 360 s (other requests keep
