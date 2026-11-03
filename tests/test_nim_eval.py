@@ -163,7 +163,7 @@ def test_parse_config_reads_dekko():
         nim_eval.parse_config("s=m,dekko=maybe")
 
 
-def _fake_server(seen: dict):
+def _fake_server(seen: dict) -> SimpleNamespace:
     override = contextvars.ContextVar("o", default=None)
 
     def scout_task(_question):
