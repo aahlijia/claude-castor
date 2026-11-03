@@ -57,6 +57,10 @@ LEAD_PREFIX_RE = re.compile(r"^[\s>#*_`\-\d.)]*")
 FOOTER_RE = re.compile(r"\[nim_agent: (\d+) steps")
 QUOTES_RE = re.compile(r"quotes matched (\d+)/(\d+)")
 DEFAULT_WINDOW = 10
+# Stamped on every result row. Bump it whenever score() or score_plain()
+# changes, so a saved file scored the old way is flagged and re-scored.
+# 1: keyword-gated location matching. 2: plain roles scored by keyword.
+SCORING_VERSION = 2
 ROLE_STEPS = {"review": "NIM_REVIEW_STEPS", "scout": "NIM_SCOUT_STEPS"}
 # Plain tool calls: no agent loop, scored by keywords over the whole answer.
 PLAIN_ROLES = ("explain", "summarize")
@@ -153,6 +157,7 @@ def run_plain(case: dict, config: dict, server: ModuleType) -> dict:
         )
     result = score_plain(case, text)
     result.update(
+        scoring=SCORING_VERSION,
         case=case["name"],
         role=case["role"],
         config=config["label"],
@@ -232,6 +237,7 @@ def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     seconds = round(time.monotonic() - started, 1)
     result = score(case, text)
     result.update(
+        scoring=SCORING_VERSION,
         case=case["name"],
         role=case["role"],
         config=config["label"],
@@ -353,15 +359,34 @@ def summarize(results: list[dict], label: str) -> str:
 
 
 def rescore(path: Path, cases: list[dict]) -> None:
-    """Score saved answers again (after editing the cases) and report."""
+    """Score saved answers again, write them back in place, and report.
+
+    Run it after editing the cases or the scorer; rows whose case is not
+    given keep their old scores.
+    """
     by_name = {c["name"]: c for c in cases}
     results = json.loads(path.read_text())
+    stale = stale_rows(results)
+    if stale:
+        print(
+            f"warning: {stale} of {len(results)} rows in {path.name} were "
+            f"scored by an older scorer (current {SCORING_VERSION}); "
+            "re-scoring",
+            file=sys.stderr,
+        )
     for r in results:
         case = by_name.get(r.get("case"))
         if case and "answer" in r:
             scorer = score_plain if case["role"] in PLAIN_ROLES else score
             r.update(scorer(case, r["answer"]), role=case["role"])
+            r["scoring"] = SCORING_VERSION
+    path.write_text(json.dumps(results, indent=1))
     report(results, sorted({r["config"] for r in results}))
+
+
+def stale_rows(results: list[dict]) -> int:
+    """How many rows lack the current SCORING_VERSION."""
+    return sum(r.get("scoring") != SCORING_VERSION for r in results)
 
 
 def report(results: list[dict], labels: list[str]) -> None:

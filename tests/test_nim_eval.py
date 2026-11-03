@@ -1,6 +1,7 @@
 """Tests for the scoring in scripts/nim_eval.py (no network)."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,3 +120,28 @@ def test_report_leaves_precision_out_for_plain_roles():
     }
     line = nim_eval.summarize([row], "a")
     assert "precision -" in line and "recall 1/1" in line
+
+
+def test_rescore_flags_old_files_and_writes_the_version(tmp_path, capsys):
+    saved = tmp_path / "results.json"
+    row = {"case": "c", "config": "a", "answer": "- server.py:41 - prefix"}
+    saved.write_text(
+        json.dumps(
+            [
+                {
+                    **row,
+                    "seconds": 1.0,
+                    "quotes": [0, 0],
+                    "steps": 1,
+                    "failed": False,
+                }
+            ]
+        )
+    )
+    nim_eval.rescore(saved, [CASE])
+    assert "older scorer" in capsys.readouterr().err
+    rows = json.loads(saved.read_text())
+    assert rows[0]["scoring"] == nim_eval.SCORING_VERSION
+    assert rows[0]["hit"] == ["bug"]
+    nim_eval.rescore(saved, [CASE])
+    assert "older scorer" not in capsys.readouterr().err
