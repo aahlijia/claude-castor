@@ -1,0 +1,5 @@
+agy CLI surface drift detected in tracked flags/subcommands:
+  REMOVED subcommand: 'models' no longer in --help
+  REMOVED subcommand: 'agents' no longer in --help
+
+If this is expected (a deliberate agy upgrade), update server.py accordingly, then re-run with --update-snapshot.

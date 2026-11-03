@@ -224,5 +224,303 @@
     ]
    }
   ]
+ },
+ {
+  "name": "explain-retry-none",
+  "role": "explain",
+  "error_file": "fixtures/explain/traceback.txt",
+  "files": [
+   "fixtures/explain/retry.py"
+  ],
+  "expected": [
+   {
+    "id": "missing-retry-after",
+    "must": true,
+    "keywords": [
+     "no retry-after",
+     "without a retry-after",
+     "missing retry-after",
+     "retry-after header is",
+     "retry-after header was",
+     "header is absent",
+     "header is missing",
+     "headers={}",
+     "empty headers",
+     "returns none when",
+     "returned none"
+    ]
+   },
+   {
+    "id": "guard-fix",
+    "keywords": [
+     "if retry_after",
+     "retry_after is not none",
+     "retry_after or",
+     "is none",
+     "guard"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "explain-pytest-prefix",
+  "role": "explain",
+  "error_file": "fixtures/explain/pytest-fail.txt",
+  "files": [
+   "fixtures/explain/collapse.py",
+   "fixtures/explain/test_collapse.py"
+  ],
+  "expected": [
+   {
+    "id": "prefix-not-stripped",
+    "must": true,
+    "keywords": [
+     "log_prefix_re",
+     "prefix regex",
+     "never used",
+     "not used",
+     "unused",
+     "isn't used",
+     "is not applied",
+     "never applied",
+     "not stripped",
+     "doesn't strip",
+     "does not strip"
+    ]
+   },
+   {
+    "id": "timestamp-line",
+    "keywords": [
+     "12:00:01",
+     "timestamp"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "explain-agy-heading",
+  "role": "explain",
+  "error_file": "fixtures/explain/drift.txt",
+  "files": [
+   "../check_agy_surface.py",
+   "fixtures/explain/agy-help.txt"
+  ],
+  "expected": [
+   {
+    "id": "heading-renamed",
+    "must": true,
+    "keywords": [
+     "available subcommands:",
+     "\"available subcommands\"",
+     "`available subcommands`",
+     "marker",
+     "heading",
+     "header",
+     "\"commands:\"",
+     "`commands:`"
+    ]
+   },
+   {
+    "id": "still-present",
+    "keywords": [
+     "still listed",
+     "still present",
+     "still there",
+     "still in the help",
+     "not actually removed",
+     "false positive",
+     "still appear"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "summarize-gemini-md",
+  "role": "summarize",
+  "repo": "../..",
+  "commit": "d903e78",
+  "paths": [
+   "GEMINI.md",
+   "CLAUDE.md",
+   "scripts/nim_eval.py"
+  ],
+  "target": "GEMINI.md",
+  "expected": [
+   {
+    "id": "context-first",
+    "keywords": [
+     "self-contained",
+     "task context",
+     "no memory"
+    ]
+   },
+   {
+    "id": "tiers",
+    "must": true,
+    "keywords": [
+     "three access",
+     "access tier",
+     "sandbox=true",
+     "trust=true",
+     "read-only, sandbox"
+    ]
+   },
+   {
+    "id": "sessions",
+    "keywords": [
+     "continue_session",
+     "session name",
+     "named session",
+     "session=\""
+    ]
+   },
+   {
+    "id": "cache",
+    "keywords": [
+     "identical prompt",
+     "unchanged code",
+     "git head",
+     "use_cache"
+    ]
+   },
+   {
+    "id": "nim-not-agent",
+    "must": true,
+    "keywords": [
+     "not an agent",
+     "cannot read",
+     "only sees",
+     "no filesystem",
+     "cannot explore"
+    ]
+   },
+   {
+    "id": "background",
+    "keywords": [
+     "gemini_start",
+     "gemini_poll"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "summarize-claude-md",
+  "role": "summarize",
+  "repo": "../..",
+  "commit": "d903e78",
+  "paths": [
+   "GEMINI.md",
+   "CLAUDE.md",
+   "scripts/nim_eval.py"
+  ],
+  "target": "CLAUDE.md",
+  "expected": [
+   {
+    "id": "agy-replaces-gemini",
+    "must": true,
+    "keywords": [
+     "gemini cli",
+     "retired",
+     "replaces"
+    ]
+   },
+   {
+    "id": "setup",
+    "keywords": [
+     "claude mcp add",
+     "install",
+     "sign in",
+     "sign-in"
+    ]
+   },
+   {
+    "id": "nim-key",
+    "must": true,
+    "keywords": [
+     "nvidia_api_key",
+     "api key"
+    ]
+   },
+   {
+    "id": "jobs-cap",
+    "keywords": [
+     "4 workers",
+     "four workers",
+     "50 jobs",
+     "capped at 4"
+    ]
+   },
+   {
+    "id": "castor-sessions",
+    "keywords": [
+     "transcript",
+     "replay"
+    ]
+   },
+   {
+    "id": "dev-checks",
+    "keywords": [
+     "ruff",
+     "pytest"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "summarize-nim-eval",
+  "role": "summarize",
+  "repo": "../..",
+  "commit": "d903e78",
+  "paths": [
+   "GEMINI.md",
+   "CLAUDE.md",
+   "scripts/nim_eval.py"
+  ],
+  "target": "scripts/nim_eval.py",
+  "expected": [
+   {
+    "id": "snapshots",
+    "must": true,
+    "keywords": [
+     "git archive",
+     "snapshot"
+    ]
+   },
+   {
+    "id": "keyword-match",
+    "must": true,
+    "keywords": [
+     "keyword"
+    ]
+   },
+   {
+    "id": "metrics",
+    "keywords": [
+     "precision",
+     "recall"
+    ]
+   },
+   {
+    "id": "must-catch",
+    "keywords": [
+     "must-catch",
+     "must catch"
+    ]
+   },
+   {
+    "id": "rescore",
+    "keywords": [
+     "rescore",
+     "re-score"
+    ]
+   },
+   {
+    "id": "configs",
+    "keywords": [
+     "--config",
+     "configuration"
+    ]
+   }
+  ]
  }
 ]

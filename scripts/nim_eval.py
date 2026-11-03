@@ -1,10 +1,11 @@
-"""Score Castor's NIM agent roles against cases with known answers.
+"""Score Castor's NIM roles and plain tools against cases with known answers.
 
-Each case names a role (review, scout or triage), where its code comes
-from, and the findings, ranges or log lines a good answer cites. The
-script runs every case under every model configuration, matches the
-answer's path:line citations against the expected ones, and prints lead
-precision, recall, must-catch hits, time and steps per configuration.
+Each case names a role (review, scout or triage for the agent; explain or
+summarize for plain calls), where its code comes from, and the findings,
+ranges, log lines or key points a good answer holds. The script runs every
+case under every model configuration. Agent answers are scored by their
+path:line citations (lead precision, recall, must-catch hits); plain
+answers by keywords alone (recall of known causes or key points).
 
     uv run --with httpx --with fastmcp python scripts/nim_eval.py \\
         scripts/eval/cases.json \\
@@ -17,16 +18,22 @@ for private repos outside this repo (for example under that cache dir).
 Results are written as JSON beside the snapshots.
 
 Case fields (JSON list of objects):
-    name, role                 "review" | "scout" | "triage"
+    name, role                 "review" | "scout" | "triage" | "explain"
+                               | "summarize"
     repo, commit, paths        snapshot source (paths limit the archive)
     apply                      optional diff applied to the snapshot
     dir                        or a fixture directory instead of a repo
     diff_file, focus           review inputs
     question                   scout input (and optional for triage)
     log                        triage input, relative to the case's code
+    error_file, files          explain inputs: a file holding the error
+                               text, and source files to inline
+    target                     summarize input, relative to the case's code
     expected                   [{id, locations: [{file, lines: [a, b]}],
-                                 keywords, window, must}]
-Relative paths are resolved against the cases file.
+                                 keywords, window, must}]; plain roles use
+                                 keywords only
+Relative paths are resolved against the cases file. The response cache is
+off during a run, so repeated runs are independent.
 """
 
 import argparse
@@ -51,6 +58,8 @@ FOOTER_RE = re.compile(r"\[nim_agent: (\d+) steps")
 QUOTES_RE = re.compile(r"quotes matched (\d+)/(\d+)")
 DEFAULT_WINDOW = 10
 ROLE_STEPS = {"review": "NIM_REVIEW_STEPS", "scout": "NIM_SCOUT_STEPS"}
+# Plain tool calls: no agent loop, scored by keywords over the whole answer.
+PLAIN_ROLES = ("explain", "summarize")
 
 
 def load_server(path: Path) -> ModuleType:
@@ -127,8 +136,80 @@ def build_task(
     return task, error or ""
 
 
+def run_plain(case: dict, config: dict, server: ModuleType) -> dict:
+    """Run one explain or summarize case through its tool and score it."""
+    base = Path(case["_base"])
+    started = time.monotonic()
+    if case["role"] == "explain":
+        error = (base / case["error_file"]).read_text()
+        files = [str((base / f).resolve()) for f in case.get("files", [])]
+        text = server._dispatch_nim(
+            _explain_prompt(server, error), files=files, model=config["model"]
+        )
+    else:
+        cwd = snapshot(case, server)
+        text = _tool_fn(server.nim_summarize)(
+            str(cwd), case["target"], config["model"]
+        )
+    result = score_plain(case, text)
+    result.update(
+        case=case["name"],
+        role=case["role"],
+        config=config["label"],
+        seconds=round(time.monotonic() - started, 1),
+        steps=None,
+        quotes=[0, 0],
+        failed=text.startswith("["),
+        answer=text,
+    )
+    return result
+
+
+def _tool_fn(tool: Any) -> Any:
+    """Unwrap an @mcp.tool() object to its plain function."""
+    return getattr(tool, "fn", tool)
+
+
+def _explain_prompt(server: ModuleType, error: str) -> str:
+    """The prompt nim_explain_error builds, captured without a request."""
+    captured: dict[str, str] = {}
+    real = server._dispatch_nim
+
+    def capture(prompt: str, **_: Any) -> str:
+        captured["prompt"] = prompt
+        return ""
+
+    server._dispatch_nim = capture
+    try:
+        _tool_fn(server.nim_explain_error)(error)
+    finally:
+        server._dispatch_nim = real
+    return captured["prompt"]
+
+
+def score_plain(case: dict, text: str) -> dict:
+    """Which expected items the answer names, by keyword alone."""
+    lower = text.lower()
+    hit = {
+        e["id"]
+        for e in case["expected"]
+        if any(k.lower() in lower for k in e.get("keywords", []))
+    }
+    musts = {e["id"] for e in case["expected"] if e.get("must")}
+    return {
+        "leads": 0,
+        "matched": 0,
+        "hit": sorted(hit),
+        "known": len(case["expected"]),
+        "must_hit": sorted(hit & musts),
+        "musts": len(musts),
+    }
+
+
 def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one case under one configuration and score it."""
+    if case["role"] in PLAIN_ROLES:
+        return run_plain(case, config, server)
     cwd = snapshot(case, server)
     task, error = build_task(case, cwd, server)
     if task is None:
@@ -152,6 +233,7 @@ def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     result = score(case, text)
     result.update(
         case=case["name"],
+        role=case["role"],
         config=config["label"],
         seconds=seconds,
         steps=stats.get("steps") or footer_steps(text),
@@ -238,12 +320,16 @@ def score(case: dict, text: str) -> dict:
 
 
 def summarize(results: list[dict], label: str) -> str:
-    """One table row for a configuration across its runs."""
+    """One table row for a configuration across its runs.
+
+    Precision covers agent roles only; plain roles have no leads.
+    """
     rows = [r for r in results if r["config"] == label and "leads" in r]
     if not rows:
         return f"{label:<24} no completed runs"
-    leads_n = sum(r["leads"] for r in rows)
-    matched = sum(r["matched"] for r in rows)
+    cited = [r for r in rows if r.get("role") not in PLAIN_ROLES]
+    leads_n = sum(r["leads"] for r in cited)
+    matched = sum(r["matched"] for r in cited)
     hit = sum(len(r["hit"]) for r in rows)
     known = sum(r["known"] for r in rows)
     must = sum(len(r["must_hit"]) for r in rows)
@@ -254,10 +340,13 @@ def summarize(results: list[dict], label: str) -> str:
     steps = [r["steps"] for r in rows if r["steps"]]
     mean_steps = sum(steps) / len(steps) if steps else 0
     failed = sum(r["failed"] for r in rows)
-    precision = matched / leads_n if leads_n else 0
+    precision = (
+        f"precision {matched}/{leads_n} ({matched / leads_n:.0%})  "
+        if cited and leads_n
+        else ("precision -  " if not cited else "precision 0/0  ")
+    )
     return (
-        f"{label:<24} runs {len(rows):>2}  failed {failed}  "
-        f"precision {matched}/{leads_n} ({precision:.0%})  "
+        f"{label:<24} runs {len(rows):>2}  failed {failed}  {precision}"
         f"recall {hit}/{known}  must {must}/{musts}  "
         f"quotes {q_ok}/{q_all}  {secs:>4.0f}s  {mean_steps:.1f} steps"
     )
@@ -270,7 +359,8 @@ def rescore(path: Path, cases: list[dict]) -> None:
     for r in results:
         case = by_name.get(r.get("case"))
         if case and "answer" in r:
-            r.update(score(case, r["answer"]))
+            scorer = score_plain if case["role"] in PLAIN_ROLES else score
+            r.update(scorer(case, r["answer"]), role=case["role"])
     report(results, sorted({r["config"] for r in results}))
 
 
@@ -323,6 +413,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = load_server(args.server.resolve())
+    server._cache_get = lambda _key: None  # every run asks NIM afresh
     cases = []
     for path in args.cases:
         for case in json.loads(path.read_text()):
@@ -337,7 +428,8 @@ def main() -> None:
         {"label": "default", "model": None}
     ]
     for case in cases:  # extract snapshots before the parallel runs
-        snapshot(case, server)
+        if "repo" in case or "dir" in case:
+            snapshot(case, server)
     work = [
         (case, config)
         for config in configs
