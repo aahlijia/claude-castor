@@ -1,8 +1,12 @@
 """Tests for the scoring in scripts/nim_eval.py (no network)."""
 
+import contextvars
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -145,3 +149,91 @@ def test_rescore_flags_old_files_and_writes_the_version(tmp_path, capsys):
     assert rows[0]["hit"] == ["bug"]
     nim_eval.rescore(saved, [CASE])
     assert "older scorer" not in capsys.readouterr().err
+
+
+def test_parse_config_reads_dekko():
+    assert nim_eval.parse_config("s=nvidia/x,dekko=off") == {
+        "label": "s",
+        "model": "nvidia/x",
+        "dekko": False,
+    }
+    assert nim_eval.parse_config("s=m,dekko=on")["dekko"] is True
+    assert "dekko" not in nim_eval.parse_config("s=m")
+    with pytest.raises(ValueError):
+        nim_eval.parse_config("s=m,dekko=maybe")
+
+
+def _fake_server(seen: dict):
+    override = contextvars.ContextVar("o", default=None)
+
+    def scout_task(_question):
+        seen["at_task"] = override.get()
+        return "task"
+
+    def run_agent(*_a):
+        seen["at_run"] = override.get()
+        return "- a.py:1 - x", {"steps": 1}
+
+    def ensure_map(root):
+        seen["map"] = root
+        return True
+
+    return SimpleNamespace(
+        _dekko_override=override,
+        _dekko_ensure_map=ensure_map,
+        _scout_task=scout_task,
+        _run_nim_agent=run_agent,
+    )
+
+
+def _dir_case(tmp_path):
+    return {
+        "name": "c",
+        "role": "scout",
+        "question": "q",
+        "dir": ".",
+        "_base": str(tmp_path),
+        "expected": [],
+    }
+
+
+def test_run_case_scopes_the_dekko_override(tmp_path):
+    seen: dict = {}
+    server = _fake_server(seen)
+    config = {"label": "on", "model": None, "dekko": True}
+    result = nim_eval.run_case(_dir_case(tmp_path), config, server)
+    assert seen["at_task"] is True and seen["at_run"] is True
+    assert seen["map"] == tmp_path.resolve()
+    assert result["dekko"] is True
+    assert server._dekko_override.get() is None  # reset afterwards
+
+
+def test_run_case_leaves_override_unset_without_dekko_key(tmp_path):
+    seen: dict = {}
+    server = _fake_server(seen)
+    config = {"label": "d", "model": None}
+    result = nim_eval.run_case(_dir_case(tmp_path), config, server)
+    assert seen["at_run"] is None and "map" not in seen
+    assert result["dekko"] is None
+
+
+def test_run_case_off_sets_false_without_building_map(tmp_path):
+    seen: dict = {}
+    server = _fake_server(seen)
+    config = {"label": "off", "model": None, "dekko": False}
+    nim_eval.run_case(_dir_case(tmp_path), config, server)
+    assert seen["at_run"] is False and "map" not in seen
+
+
+def test_select_cases_filters_by_name_and_role():
+    cases = [
+        {"name": "a", "role": "scout"},
+        {"name": "b", "role": "review"},
+        {"name": "c", "role": "triage"},
+    ]
+    assert nim_eval.select_cases(cases, [], []) == cases
+    by_name = nim_eval.select_cases(cases, ["a", "b"], [])
+    assert [c["name"] for c in by_name] == ["a", "b"]
+    by_role = nim_eval.select_cases(cases, [], ["review", "triage"])
+    assert [c["name"] for c in by_role] == ["b", "c"]
+    assert nim_eval.select_cases(cases, ["a"], ["review"]) == []
