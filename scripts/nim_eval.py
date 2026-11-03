@@ -76,7 +76,8 @@ DEFAULT_WINDOW = 10
 # 1: keyword-gated location matching. 2: plain roles scored by keyword.
 # 3: edit role scored by patch against reference diff. 4: an edit run
 # without a patch counts as refused only on a Castor refusal (see
-# edit_refused); any other failure is an error row.
+# edit_refused); any other failure is an error row. A must_cover case
+# under dekko=off is "needs dekko", left out of the correct K/N count.
 SCORING_VERSION = 4
 ROLE_STEPS = {
     "review": "NIM_REVIEW_STEPS",
@@ -474,8 +475,31 @@ def _edit_error(case: dict, config: dict, message: str) -> dict:
     }
 
 
+def needs_dekko(case: dict, dekko: bool | None) -> bool:
+    """True for a must_cover case under a dekko=off configuration."""
+    return dekko is False and bool(case.get("must_cover"))
+
+
+def _needs_dekko_row(case: dict, config: dict) -> dict:
+    """The row for a case that cannot run without dekko (no request)."""
+    return {
+        "case": case["name"],
+        "config": config["label"],
+        "dekko": config.get("dekko"),
+        "role": "edit",
+        "needs_dekko": True,
+        "scoring": SCORING_VERSION,
+    }
+
+
 def run_edit_case(case: dict, config: dict, server: ModuleType) -> dict:
-    """Run one nim_edit case on a copy of its snapshot and score the patch."""
+    """Run one nim_edit case on a copy of its snapshot and score the patch.
+
+    A must_cover case under dekko=off is not run: nim_edit would refuse
+    it for want of the dekko map, so it gets a "needs dekko" row.
+    """
+    if needs_dekko(case, config.get("dekko")):
+        return _needs_dekko_row(case, config)
     with dekko_scope(config, server):
         source = snapshot(case, server)
         tmp = Path(tempfile.mkdtemp(prefix="nim-edit-eval-"))
@@ -697,9 +721,13 @@ def summarize(results: list[dict], label: str) -> str:
 def summarize_edit(rows: list[dict], label: str) -> str:
     """One table row for a configuration's edit runs (errors counted)."""
     errors = sum("error" in r for r in rows)
-    rows = [r for r in rows if "error" not in r]
+    needs = sum(bool(r.get("needs_dekko")) for r in rows)
+    rows = [r for r in rows if "error" not in r and not r.get("needs_dekko")]
     if not rows:
-        return f"{label:<24} edit no completed runs  errors {errors}"
+        return (
+            f"{label:<24} edit no completed runs  errors {errors}  "
+            f"needs_dekko {needs}"
+        )
     patch = [r for r in rows if r.get("expect", "patch") != "refuse"]
     refuse = [r for r in rows if r.get("expect") == "refuse"]
     right = sum(r["correct"] for r in patch)
@@ -713,7 +741,7 @@ def summarize_edit(rows: list[dict], label: str) -> str:
         f"refusals refused {sum(r['correct'] for r in refuse)}/{len(refuse)}  "
         f"{statistics.median(r['seconds'] for r in rows):>4.0f}s  "
         f"{statistics.median(steps) if steps else 0:.1f} steps  "
-        f"errors {errors}"
+        f"errors {errors}  needs_dekko {needs}"
     )
 
 
@@ -779,11 +807,17 @@ def _rescore_edit(row: dict, case: dict) -> None:
     """Score a saved edit row again; a failed run becomes an error row.
 
     Rows from scorer 3 and older set facts["refused"] for any run without
-    a patch, so a refusal is re-read from the answer text.
+    a patch, so a refusal is re-read from the answer text. A must_cover
+    case run under dekko=off becomes a "needs dekko" row.
     """
-    if "facts" not in row:
+    if needs_dekko(case, row.get("dekko")):
+        for key in EDIT_SCORE_KEYS:
+            row.pop(key, None)
+        row.pop("error", None)
+        row["needs_dekko"] = True
+    elif "facts" not in row:
         return
-    if row["facts"]["refused"] and not edit_refused(row["answer"]):
+    elif row["facts"]["refused"] and not edit_refused(row["answer"]):
         _as_error_row(row, row["answer"])
     else:
         row.update(score_edit(case, row["facts"]), role="edit")
@@ -798,6 +832,9 @@ def stale_rows(results: list[dict]) -> int:
 def report(results: list[dict], labels: list[str]) -> None:
     """Print one line per run, then one summary row per configuration."""
     for r in results:
+        if r.get("needs_dekko"):
+            print(f"{r['config']:<24} {r['case']:<22} edit needs dekko")
+            continue
         if "error" in r:
             print(f"{r['config']:<24} {r['case']:<22} ERROR {r['error']}")
             continue
