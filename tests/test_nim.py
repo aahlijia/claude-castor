@@ -2466,6 +2466,20 @@ def test_parse_edit_blocks_accepts_trailing_whitespace_on_markers():
     assert blocks == [server.EditBlock(1, "a.py", "x ", "y")]
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "<<<EDIT a.py\n<<<OLD\nx\n<<<NEW\ny\n<<<END\n",
+        ">>>EDIT a.py\n>>>OLD\nx\n>>>NEW\ny\n>>>END\n",
+        "<<<EDIT a.py\n>>>OLD\nx\n<<<NEW\ny\n>>>END\n",
+    ],
+)
+def test_parse_edit_blocks_accepts_either_arrow_on_markers(answer):
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == []
+    assert blocks == [server.EditBlock(1, "a.py", "x", "y")]
+
+
 def test_parse_edit_blocks_leading_space_is_not_a_marker():
     blocks, errors = server._parse_edit_blocks(
         "<<<EDIT a.py\n<<<OLD\nx\n >>>NEW\ny\n>>>END\n"
