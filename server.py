@@ -7214,13 +7214,15 @@ def _edit_line_changes(
 
     The block is widened to whole lines on both sides, then the old and
     new lines are diffed, so a line inside the block that comes out the
-    same is not counted as changed.
+    same is not counted as changed. Lines are compared without a trailing
+    CR: deleting a CRLF file's last line takes the CRLF before it, and
+    that does not change the line above.
     """
     head = text.rfind("\n", 0, start) + 1
     tail = text.find("\n", end)
     tail = len(text) if tail == -1 else tail
-    old_lines = text[head:tail].split("\n")
-    new_lines = (text[head:start] + new + text[end:tail]).split("\n")
+    old_lines = _edit_bare_lines(text[head:tail])
+    new_lines = _edit_bare_lines(text[head:start] + new + text[end:tail])
     first = text.count("\n", 0, head) + 1
     matcher = difflib.SequenceMatcher(None, old_lines, new_lines, False)
     for tag, i1, i2, _, _ in matcher.get_opcodes():
@@ -7230,6 +7232,11 @@ def _edit_line_changes(
             into.inserts.add(first + i1)
         else:
             into.changed.update(range(first + i1, first + i2))
+
+
+def _edit_bare_lines(text: str) -> list[str]:
+    """`text` split on LF, each line without a trailing CR."""
+    return [line.removesuffix("\r") for line in text.split("\n")]
 
 
 def _edit_delete_range(text: str, start: int, end: int) -> tuple[int, int]:

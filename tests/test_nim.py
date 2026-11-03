@@ -2756,6 +2756,22 @@ def test_delete_block_takes_the_whole_line(repo, data, old, expect):
     assert _after_delete(repo, data, old) == expect
 
 
+@pytest.mark.parametrize("eol", ["\r\n", "\n"])
+def test_deleting_a_last_line_marks_only_that_line(repo, eol):
+    data = f"keep old_name(){eol}last".encode()
+    (repo / "src" / "d.py").write_bytes(data)
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.py", "last")], repo, None
+    )
+    edit = changes[repo / "src" / "d.py"]
+    assert errors == [] and edit.new == "keep old_name()"
+    assert sorted(edit.touched.changed) == [2]
+    assert edit.touched.inserts == set()
+    assert not server._edit_covered(
+        {"src/d.py": edit}, "src/d.py", 1, "call site"
+    )
+
+
 def test_delete_span_and_overlap_use_the_extended_range(repo):
     (repo / "src" / "d.md").write_text("a\nb\nc\n")
     changes, errors = server._edit_apply_in_memory(
