@@ -171,3 +171,22 @@
 - **Rejected:** 4 steps on precision alone (two runs is noise-level, and a
   missed must is the costlier error); re-running until it passes.
 
+
+### 2026-11-02: Log triage follows the log's own verdict when it has one
+- **Why:** the real NQC hallway log has 258 harness Tracebacks but its table
+  says `fail 0`; the design's marker rule ("failed" on any hard marker) called
+  it failed. Now the log's verdict or totals decide; otherwise "failed" on hard
+  markers, "inconclusive" when only NOT ASSESSED matched. Both live runs gave
+  "inconclusive" with all 7 NOT ASSESSED rows.
+- **Rejected:** the design's marker-only verdict.
+
+### 2026-11-02: Summarize parts are 120k chars on their own thread pool
+- **Why:** at the design's 240k chars, each part's summary covered only its
+  first third. Parts run on a 4-worker pool of their own so a full job pool
+  can't block them. Summary requests get 6,144 tokens with 1,024 thinking (at
+  4,096 the JSON was cut off).
+- **Rejected:** 240k parts; running parts on the shared job pool.
+
+### 2026-11-02: Unity skip dirs are NIM-agent-only
+- **Why:** the design put `Library`, `Temp`, `obj` in the shared `SKIP_DIRS`,
+  but it also ruled out agy-path changes. They live in `NIM_AGENT_SKIP_DIRS`.
