@@ -1,0 +1,26 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1fb1531..19a708e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,8 +4,8 @@ All notable changes to this project are documented in this file.
+ 
+ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+-## [Unreleased]
++## [0.2.0] - 2026-06-08
+ 
+ ### Changed
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 5a829c4..4075c60 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [project]
+ name = "claude-castor"
+-version = "0.1.0"
++version = "0.2.0"
+ requires-python = ">=3.10"
+ dependencies = [
+     "fastmcp",

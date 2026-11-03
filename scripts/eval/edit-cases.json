@@ -1,0 +1,236 @@
+[
+ {
+  "name": "wrap-long-line",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "d903e7810fd384494543b427169c0cc4a93a524f",
+  "paths": [
+   "server.py",
+   "tests",
+   "scripts/nim_eval.py"
+  ],
+  "task": "In tests/test_nim.py, test_summarize_splits_a_big_file_and_merges has a line past 79 columns:\n    out = json.loads(_tool(server.nim_summarize)(str(tmp_path), \"DECISIONS.md\"))\nSplit it into these two lines, same indentation:\n    summarize = _tool(server.nim_summarize)\n    out = json.loads(summarize(str(tmp_path), \"DECISIONS.md\"))\nChange nothing else.",
+  "files": [
+   "tests/test_nim.py"
+  ],
+  "reference_diff": "edit/wrap-long-line.diff",
+  "check": "uv run --with pytest --with httpx --with fastmcp pytest tests -q"
+ },
+ {
+  "name": "first-pass-docs",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "a2ccaff5b001179005b8d061792215cd2468d095",
+  "paths": [
+   "GEMINI.md",
+   "commands/castor/first-pass.md",
+   "server.py"
+  ],
+  "task": "Mark nim_first_pass_review as a low-yield extra in three files. Change nothing else.\n\n1. GEMINI.md, in the agent-mode table (header `| Task | Use |`, the one that lists `nim_scout`): delete this row:\n| First-pass review of a diff, with surrounding code | `nim_first_pass_review` (`/castor:first-pass`); pass `rev_range` or `diff_file`, never paste the diff |\nThen, after the blank line that follows that table and before the paragraph that starts \"Keep the judgment calls\", insert this paragraph followed by one blank line:\n**`nim_first_pass_review` (`/castor:first-pass`) is weak; don't build on it.**\nIn a five-review pilot on a Unity project (2026-11-02), 5 of its 25 leads held\nup, all of them repeats of what the Claude review found, 12 were wrong, and it\ncaught none of the three known findings (it called one real bug correct). Use\nit at most as an occasional extra on a small diff, never as a step a review or\npipeline waits on, and never in place of reading the diff yourself.\n\n2. commands/castor/first-pass.md: after its last line, add a blank line and then this paragraph as one line:\nExpect a low hit rate. In a five-review pilot on a Unity project, about 1 lead in 5 held up, all repeats of what the Claude review found, and it missed every known real finding. Say so when you report its results, and don't make it a step that other work waits on.\n\n3. server.py, in the nim_first_pass_review docstring: after the line `    over about 1,500 lines are refused; review those in parts.` and the blank line below it, insert these three lines followed by one blank line, so they sit just before `    Args:`:\n    Expect a low hit rate: in a five-review pilot about 1 lead in 5 held\n    up and it missed every known real finding. Use it as an occasional\n    extra, never as a step a review or pipeline waits on.",
+  "files": [
+   "GEMINI.md",
+   "commands/castor/first-pass.md",
+   "server.py"
+  ],
+  "reference_diff": "edit/first-pass-docs.diff",
+  "check": ""
+ },
+ {
+  "name": "version-bump",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "65ee5e8aa10ce2db39c52e551914dab303d743f5",
+  "paths": [
+   "CHANGELOG.md",
+   "pyproject.toml"
+  ],
+  "task": "Bump the version for the 0.2.0 release. In pyproject.toml change `version = \"0.1.0\"` to `version = \"0.2.0\"`. In CHANGELOG.md rename the heading `## [Unreleased]` to `## [0.2.0] - 2026-06-08`; leave the `[Unreleased]:` link at the bottom of the file as it is. Change nothing else.",
+  "files": [
+   "pyproject.toml",
+   "CHANGELOG.md"
+  ],
+  "reference_diff": "edit/version-bump.diff",
+  "check": ""
+ },
+ {
+  "name": "rename-clip",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py",
+   "tests",
+   "scripts/nim_eval.py"
+  ],
+  "task": "Rename the function `_agent_clip` to `_agent_truncate` in server.py: its definition and all four call sites. Keep lines within 79 columns and ruff-formatted: after the rename two calls pass 79 columns. In `_agent_read_range`, put the f-string argument of `return _agent_truncate(` on its own line, indented four more spaces, with `)` on the next line. In `_dekko_tool`, wrap the `_agent_truncate(text) if sites is not None else _dekko_error(text)` expression in parentheses: `return (`, the expression on its own line indented four more spaces, then `)`. Change nothing else.",
+  "files": [
+   "server.py"
+  ],
+  "must_cover": [
+   "_agent_clip"
+  ],
+  "reference_diff": "edit/rename-clip.diff",
+  "check": "uv run --with pytest --with httpx --with fastmcp pytest tests -q"
+ },
+ {
+  "name": "rename-constant",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py",
+   "tests",
+   "scripts/nim_eval.py",
+   "CLAUDE.md"
+  ],
+  "task": "Rename the module constant `NIM_MAX_WAIT` to `NIM_CALL_MAX_WAIT` everywhere it appears as a whole word: in server.py its definition, its use in `_nim_max_wait` and the mention in that function's docstring; in tests/test_nim.py the four `monkeypatch.setattr(server, \"NIM_MAX_WAIT\", 0.05)` strings; in CLAUDE.md the mention in the Resilience paragraph. Leave `NIM_JOB_MAX_WAIT` and `_nim_max_wait` as they are. Keep lines within 79 columns and ruff-formatted (no server.py line needs re-wrapping); do not re-wrap the CLAUDE.md line. Change nothing else.",
+  "files": [
+   "server.py",
+   "tests/test_nim.py",
+   "CLAUDE.md"
+  ],
+  "reference_diff": "edit/rename-constant.diff",
+  "check": "uv run --with pytest --with httpx --with fastmcp pytest tests -q"
+ },
+ {
+  "name": "param-with-callers",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py",
+   "tests",
+   "scripts/nim_eval.py"
+  ],
+  "task": "In server.py, give `_review_uses` a third parameter `limit: int`, so the signature is `def _review_uses(root: Path, diff: str, limit: int) -> str:`. In its body replace `rows[:NIM_REVIEW_USES_PER_SYMBOL]` with `rows[:limit]`. Pass `NIM_REVIEW_USES_PER_SYMBOL` as the third argument at every call site (there is one, in `_review_context`). Leave the docstring as it is. Keep lines within 79 columns and ruff-formatted: the `parts = [...]` line in `_review_context` then passes 79 columns, so put each list element on its own line, indented four more spaces, with a trailing comma, and `]` on its own line. Change nothing else.",
+  "files": [
+   "server.py"
+  ],
+  "must_cover": [
+   "_review_uses"
+  ],
+  "reference_diff": "edit/param-with-callers.diff",
+  "check": "uv run --with pytest --with httpx --with fastmcp pytest tests -q"
+ },
+ {
+  "name": "rename-test-helper",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py",
+   "tests",
+   "scripts/nim_eval.py"
+  ],
+  "task": "In tests/test_nim.py, rename the helper function `_tool_call` to `_tool_call_reply`: its definition and all twelve calls. Do not touch the `\"tool_calls\"` keys or any other name that contains `tool_call`. Keep lines within 79 columns: after the rename five calls of the form `stub.queue.append((200, {}, _tool_call_reply(...)))` pass 79 columns. Wrap each of those five the way ruff format does:\n    stub.queue.append(\n        (200, {}, _tool_call_reply(...))\n    )\nkeeping the original indentation for `stub.queue.append(` and `)`, and four more spaces for the tuple line. Change nothing else.",
+  "files": [
+   "tests/test_nim.py"
+  ],
+  "must_cover": [
+   "_tool_call"
+  ],
+  "reference_diff": "edit/rename-test-helper.diff",
+  "check": "uv run --with pytest --with httpx --with fastmcp pytest tests -q"
+ },
+ {
+  "name": "claude-md-config",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "CLAUDE.md",
+   "scripts/nim_eval.py"
+  ],
+  "task": "CLAUDE.md's Development section gives the eval script's config syntax as `--config label=model[,step=model]`, but scripts/nim_eval.py also accepts `dekko=on|off`. Change it to `--config label=model[,step=model][,dekko=on|off]` on the same line. Do not re-wrap the paragraph. Change nothing else.",
+  "files": [
+   "CLAUDE.md"
+  ],
+  "reference_diff": "edit/claude-md-config.diff",
+  "check": ""
+ },
+ {
+  "name": "docstring-fix",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py"
+  ],
+  "task": "In server.py, `_dispatch_nim_agent`'s docstring says it only verifies citations, but `_run_nim_agent` runs two checks. Replace the summary line\n    \"\"\"Run a read-only NIM investigation of `cwd` and verify its citations.\nwith\n    \"\"\"Run a read-only NIM investigation of `cwd` and check what it cites.\nand after the blank line below it insert this paragraph followed by one blank line, so it sits just before `    Returns:`:\n    Every `path:line` the answer cites is checked to exist\n    (_agent_verify_citations), and each cited line's backticked quote is\n    checked against the file (_agent_check_quotes).\nLeave the Returns section as it is. Change nothing else.",
+  "files": [
+   "server.py"
+  ],
+  "reference_diff": "edit/docstring-fix.diff",
+  "check": "python3 -m py_compile server.py"
+ },
+ {
+  "name": "constant-and-mention",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py",
+   "tests",
+   "scripts/nim_eval.py",
+   "CLAUDE.md",
+   "README.md"
+  ],
+  "task": "Lower the default client-side NIM rate limit from 40 to 35 requests per minute. In server.py change `NIM_DEFAULT_RPM = 40` to `NIM_DEFAULT_RPM = 35` (keep its comment). Update the two doc mentions of the old default: in CLAUDE.md, `default 40/60s` becomes `default 35/60s`; in README.md's Configuration table, the `CASTOR_NIM_RPM` row's default `40` becomes `35`. Other 40s in these files are unrelated. Change nothing else.",
+  "files": [
+   "server.py",
+   "CLAUDE.md",
+   "README.md"
+  ],
+  "reference_diff": "edit/constant-and-mention.diff",
+  "check": "uv run --with pytest --with httpx --with fastmcp pytest tests -q"
+ },
+ {
+  "name": "gemini-md-row",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "GEMINI.md"
+  ],
+  "task": "In GEMINI.md's Quick Reference table (header `| Situation | What to do |`), add this row directly after the `| Offload inline-able work to NVIDIA NIM | ...` row:\n| Rename or change a signature across files | `nim_edit` with `cwd`, `files` + `must_cover`; read the diff, then `git apply` it |\nChange nothing else.",
+  "files": [
+   "GEMINI.md"
+  ],
+  "reference_diff": "edit/gemini-md-row.diff",
+  "check": ""
+ },
+ {
+  "name": "refuse-missing",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py"
+  ],
+  "task": "Rename the function `_agent_nonexistent` to `_agent_absent` in server.py: its definition and every call site. Change nothing else.",
+  "files": [
+   "server.py"
+  ],
+  "must_cover": [
+   "_agent_nonexistent"
+  ],
+  "check": "",
+  "expect": "refuse"
+ },
+ {
+  "name": "refuse-scope",
+  "role": "edit",
+  "repo": "../..",
+  "commit": "5e567af4cea68392ca6830cbb882cba1896ff2cd",
+  "paths": [
+   "server.py",
+   "README.md"
+  ],
+  "task": "In README.md's Installation section, step 4 (\"Run the installer\"), change the command `python install.py` to `python3 install.py`. Change nothing else.",
+  "files": [
+   "server.py"
+  ],
+  "check": "",
+  "expect": "refuse"
+ }
+]
