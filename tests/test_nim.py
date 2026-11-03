@@ -1936,12 +1936,6 @@ def test_callers_merges_grep_only_sites(repo, fake_dekko):
     assert "src/b.py:2:f()" not in text
 
 
-def test_dekko_tool_drops_denied_paths(repo, fake_dekko):
-    fake_dekko.queue += [(True, ".env:1 SECRET\nsrc/a.py:2 TARGET\n")]
-    text = server._dekko_tool(repo, "symbol", {"name": "TARGET"})
-    assert ".env" not in text and "src/a.py:2" in text
-
-
 def test_agent_run_without_map_uses_grep_tools_only(stub, repo, fake_dekko):
     fake_dekko.queue += [(False, "[dekko error: crash]")]
     stub.queue.append((200, {}, _completion("nothing at src/a.py:2")))
@@ -1956,3 +1950,253 @@ def test_dekko_tool_failure_is_a_tool_error(repo, fake_dekko):
         server._dekko_tool(repo, "outline", {"path": "src/a.py"})
         == "[tool error: dekko error: exit 5]"
     )
+
+
+# Real `dekko ... --json` shapes (1.9.35), trimmed, from a repo with
+# src/a.py (target), src/mod.py (module-level call), and two denied files:
+# src/.env_helpers.py (leaky) and .ssh/tool.py (sshy), both calling target.
+_LEAKY = {
+    "id": "src/.env_helpers.py::leaky",
+    "path": "src/.env_helpers.py",
+    "line": 3,
+    "kind": "function",
+    "signature": "leaky()",
+    "doc": None,
+}
+_SSHY = {
+    "id": ".ssh/tool.py::sshy",
+    "path": ".ssh/tool.py",
+    "line": 3,
+    "kind": "function",
+    "signature": "sshy()",
+    "doc": None,
+}
+_TARGET = {
+    "id": "src/a.py::target",
+    "path": "src/a.py",
+    "line": 1,
+    "kind": "function",
+    "signature": "target()",
+    "doc": None,
+}
+_SECRET_SRC = 'def leaky():\n    SECRET_TOKEN = "abc123"\n    return target()'
+_REAL = {
+    "context_leaky": {
+        "label": "src/.env_helpers.py:leaky",
+        "target": _LEAKY,
+        "file": "src/.env_helpers.py",
+        "imports": [{"name": "target", "source": "src.a.target"}],
+        "neighbors": [{"hop": 1, "direction": "callee", **_TARGET}],
+        "module_callers": [],
+        "source": _SECRET_SRC,
+    },
+    "context_target": {
+        "label": "src/a.py:target",
+        "target": _TARGET,
+        "file": "src/a.py",
+        "imports": [],
+        "neighbors": [
+            {"hop": 1, "direction": "caller", **_SSHY},
+            {"hop": 1, "direction": "caller", **_LEAKY},
+            {
+                "hop": 1,
+                "direction": "caller",
+                "id": "src/mod.py::<module>",
+                "path": "src/mod.py",
+                "line": 3,
+                "kind": "module",
+                "signature": "<anonymous> (src/mod.py)",
+                "doc": None,
+            },
+        ],
+        "module_callers": ["src/mod.py"],
+        "source": "def target():\n    return 1",
+    },
+    "symbol_leaky": {**_LEAKY, "language": "python", "end_line": 5},
+    "symbol_target": {**_TARGET, "language": "python", "end_line": 2},
+    "search_leaky": {"query": "leaky", "hits": [{**_LEAKY, "score": 0.85}]},
+    "outline_src": {
+        "target": "src",
+        "files": [
+            {
+                "path": "src/.env_helpers.py",
+                "language": "python",
+                "symbols": [
+                    {"line": 3, "kind": "function", "signature": "leaky()"}
+                ],
+            },
+            {
+                "path": "src/a.py",
+                "language": "python",
+                "symbols": [
+                    {"line": 1, "kind": "function", "signature": "target()"}
+                ],
+            },
+        ],
+    },
+    "trace_denied": {
+        "from": ".ssh/tool.py::sshy",
+        "to": "src/a.py::target",
+        "paths": [[_SSHY, _TARGET]],
+    },
+    "callers_target": {
+        "action": "callers",
+        "target": "src/a.py::target",
+        "results": [
+            {**_SSHY, "sites": [5]},
+            {**_LEAKY, "sites": [5]},
+        ],
+        "module_level": [
+            {"path": "src/mod.py", "lines": [3]},
+            {"path": ".ssh/tool.py", "lines": [9]},
+        ],
+    },
+}
+_DENIED_WORDS = ("env_helpers", ".ssh", "SECRET_TOKEN", "leaky", "sshy")
+
+
+@pytest.fixture
+def deny_repo(tmp_path):
+    root = tmp_path / "deny"
+    (root / "src").mkdir(parents=True)
+    (root / ".ssh").mkdir()
+    (root / "src" / "a.py").write_text("def target():\n    return 1\n")
+    (root / "src" / "mod.py").write_text(
+        "from src.a import target\n\ntarget()\n"
+    )
+    (root / "src" / ".env_helpers.py").write_text("target()  # SECRET_TOKEN\n")
+    (root / ".ssh" / "tool.py").write_text("target()  # sshy\n")
+    return root.resolve()
+
+
+def _json(key):
+    return (True, json.dumps(_REAL[key]))
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "key", "expect"),
+    [
+        ("context", {"symbol": "target"}, "context_target", "src/mod.py:3"),
+        ("symbol", {"name": "target"}, "symbol_target", "src/a.py:1"),
+        ("outline", {"path": "src"}, "outline_src", "target()"),
+    ],
+)
+def test_dekko_tool_renders_without_denied_files(
+    deny_repo, fake_dekko, name, args, key, expect
+):
+    fake_dekko.queue += [_json(key)]
+    text = server._dekko_tool(deny_repo, name, args)
+    assert expect in text
+    assert not [w for w in _DENIED_WORDS if w in text]
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "key"),
+    [
+        ("context", {"symbol": "leaky"}, "context_leaky"),
+        ("symbol", {"name": "leaky"}, "symbol_leaky"),
+        ("search", {"text": "leaky"}, "search_leaky"),
+    ],
+)
+def test_dekko_tool_denied_target_returns_only_an_error(
+    deny_repo, fake_dekko, name, args, key
+):
+    fake_dekko.queue += [_json(key)]
+    assert server._dekko_tool(deny_repo, name, args) == "[error: denied]"
+
+
+def test_dekko_trace_through_denied_files_shows_no_path(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("trace_denied")]
+    text = server._dekko_tool(
+        deny_repo, "trace", {"source": "sshy", "target": "target"}
+    )
+    assert text == "[no call path found]"
+
+
+def test_dekko_trace_exit_one_is_no_path(deny_repo, fake_dekko):
+    fake_dekko.queue += [(False, '[dekko error: exit 1: {"paths": []}]')]
+    text = server._dekko_tool(
+        deny_repo, "trace", {"source": "a", "target": "b"}
+    )
+    assert text == "[no call path found]"
+
+
+def test_callers_drops_denied_and_keeps_module_level(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("callers_target"), _json("symbol_target")]
+    text = server._dekko_tool(deny_repo, "callers", {"symbol": "target"})
+    assert "src/mod.py:3 in <module>" in text
+    assert "(dekko, 1 sites)" in text
+    assert not [w for w in _DENIED_WORDS if w in text]
+    assert "src/mod.py:3:target()" not in text  # known site, not grep-only
+    assert "src/a.py:1:" not in text  # the definition line is excluded
+    assert "src/mod.py:1:from src.a import target" in text
+
+
+def test_callers_sites_include_module_level(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("callers_target")]
+    sites, _ = server._dekko_callers(deny_repo, "target")
+    assert sites == [("src/mod.py", 3)]
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("callers", {"symbol": "--root"}),
+        ("symbol", {"name": "-x"}),
+        ("outline", {"path": "-h"}),
+        ("context", {"symbol": "--json"}),
+        ("search", {"text": "-q"}),
+        ("trace", {"source": "a", "target": "--no-regen"}),
+    ],
+)
+def test_dekko_tool_rejects_option_like_arguments(
+    deny_repo, fake_dekko, name, args
+):
+    text = server._dekko_tool(deny_repo, name, args)
+    assert text == '[error: argument must not start with "-"]'
+    assert fake_dekko.calls == []
+
+
+def test_dekko_tool_argv(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("symbol_target")] * 6
+    for name, args in [
+        ("symbol", {"name": "target"}),
+        ("outline", {"path": "src/a.py"}),
+        ("context", {"symbol": "target"}),
+        ("search", {"text": "target"}),
+        ("trace", {"source": "a", "target": "b"}),
+    ]:
+        server._dekko_tool(deny_repo, name, args)
+    budget = ["--budget", "1200"]
+    assert fake_dekko.calls == [
+        ["query", "symbol", "target", "--json", "--no-regen", *budget],
+        ["outline", "src/a.py", "--json", "--no-regen", *budget],
+        [
+            "context",
+            "target",
+            "--with-source",
+            "--json",
+            "--no-regen",
+            *budget,
+        ],
+        ["search", "target", "--json", "--no-regen", *budget],
+        ["trace", "a", "b", "--json", "--no-regen"],
+    ]
+
+
+def test_callers_argv_and_definition_query(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("callers_target"), _json("symbol_target")]
+    server._dekko_tool(deny_repo, "callers", {"symbol": "target"})
+    budget = ["--budget", "1200"]
+    assert fake_dekko.calls == [
+        [
+            "query",
+            "callers",
+            "target",
+            "--sites",
+            "--json",
+            "--no-regen",
+            *budget,
+        ],
+        ["query", "symbol", "target", "--json", "--no-regen", *budget],
+    ]
