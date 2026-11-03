@@ -2527,6 +2527,72 @@ def test_apply_refuses_new_files_binary_and_bad_utf8(repo):
     ]
 
 
+def test_apply_span_excludes_leading_and_trailing_terminators(repo):
+    def span(name, data, old):
+        (repo / "src" / name).write_bytes(data)
+        changes, errors = server._edit_apply_in_memory(
+            [_blk(1, f"src/{name}", old, "X")], repo, None
+        )
+        assert errors == []
+        return changes[repo / "src" / name].spans
+
+    assert span("s1.py", b"one\nTARGET = 1\nthree\n", "\nTARGET") == [(2, 2)]
+    assert span("s2.py", b"one\r\nTARGET = 1\r\nthree\r\n", "\nTARGET") == [
+        (2, 2)
+    ]
+    assert span("s3.py", b"one\nTARGET = 1\nthree\n", "TARGET = 1\n") == [
+        (2, 2)
+    ]
+    assert span("s4.py", b"one\ntwo\nthree\n", "two\nthree\n") == [(2, 3)]
+    assert span("s6.py", b"one\ntwo", "\n") == [(1, 1)]
+
+
+def test_apply_rejects_identical_old_and_new(repo):
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", "three", "three")], repo, None
+    )
+    assert errors == ["block 1: old and new text are identical"]
+
+
+def test_apply_mixed_endings_convert_whole_block_to_crlf(repo):
+    (repo / "src" / "m.py").write_bytes(b"a\nb\r\nc\r\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/m.py", "b\nc", "b\nx\nc")], repo, None
+    )
+    assert errors == []
+    assert changes[repo / "src" / "m.py"].new.encode() == b"a\nb\r\nx\r\nc\r\n"
+
+
+def test_apply_reports_a_file_that_cannot_be_read_per_block(repo):
+    (repo / "src" / "bad.txt").write_bytes(b"caf\xe9\n")
+    _, errors = server._edit_apply_in_memory(
+        [
+            _blk(1, "src/bad.txt", "x", "y"),
+            _blk(2, "src/bad.txt", "x", "z"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == ["block 1: not UTF-8", "block 2: not UTF-8"]
+
+
+def test_apply_file_scope_is_exact(repo):
+    (repo / "src" / "a.py.bak").write_text("TARGET = 1\n")
+    blocks = [
+        _blk(1, "src/a.py", "TARGET = 1", "x"),
+        _blk(2, "src/a.py.bak", "TARGET = 1", "x"),
+    ]
+    changes, errors = server._edit_apply_in_memory(
+        blocks, repo, ["./src/a.py"]
+    )
+    assert errors == ["block 2: outside scope"]
+    assert list(changes) == [repo / "src" / "a.py"]
+    changes, errors = server._edit_apply_in_memory(
+        blocks[:1], repo, ["./src/a.py"]
+    )
+    assert errors == [] and list(changes) == [repo / "src" / "a.py"]
+
+
 def test_main_guard_is_the_last_top_level_statement():
     import ast
 
