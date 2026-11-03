@@ -1338,3 +1338,15 @@ def test_bare_file_names_resolve_when_unique(tmp_path):
         "- run.sh:3 - `fail here`", root
     )
     assert (matched, checked) == (1, 1)
+
+
+def test_agent_default_model_follows_a_changed_main_model(
+    stub, repo, monkeypatch
+):
+    stub.queue.append((200, {}, _completion("a")))
+    _tool(server.nim_agent)("t", str(repo))
+    assert stub.posts()[0][3]["model"] == server.NIM_AGENT_DEFAULT_MODEL
+    monkeypatch.setenv("CASTOR_NIM_MODEL", "local/self-hosted")
+    stub.queue.append((200, {}, _completion("b")))
+    _tool(server.nim_agent)("t", str(repo))
+    assert stub.posts()[1][3]["model"] == "local/self-hosted"

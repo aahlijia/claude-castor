@@ -157,8 +157,9 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 the containment check; `.env*`, key files and `.git` are off limits), reads at
 most 120 lines per call, caps each tool result, and never lets the model edit or
 run anything. Each step is one NIM request (default 12 steps, max 30; reviews
-8; `CASTOR_NIM_AGENT_MODEL` overrides the model).
-`CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another
+8). Agent roles default to `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super);
+`CASTOR_NIM_AGENT_MODEL` overrides it, and a set `CASTOR_NIM_MODEL` is
+followed. `CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another
 model while the agent model answers (scored no better, so unset by default).
 `_agent_verify_citations` tags any `path:line` that does not exist as
 `[unverified]` (a bare file name is checked against the one project file with

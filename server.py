@@ -4010,6 +4010,10 @@ NIM_AGENT_ANSWER_MAX_TOKENS = 16384
 # for 4,000 tokens (80 s) and an answer outran the 180 s timeout. Tool steps
 # only pick the next lookup; the answer keeps room, since cutting it to 2,048
 # or 0 made the review claim false bugs. Sent only to Nemotron models.
+# Scored with scripts/nim_eval.py (2026-11-02): as accurate as Nemotron 3
+# Ultra on the agent roles (same review precision on real diffs, full marks
+# on scout and triage cases) and about 2.5 times faster per run.
+NIM_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 NIM_AGENT_STEP_THINKING = 1024
 NIM_AGENT_ANSWER_THINKING = 6144
 # At about 60 tokens/s, 6,144 thinking tokens plus a review ran past the
@@ -4798,10 +4802,15 @@ def _quote_line(quote: str, text: list[str], spans: list[tuple]) -> int:
 
 
 def _nim_agent_model() -> str:
-    """Model for agent loops (CASTOR_NIM_AGENT_MODEL, else the default)."""
+    """Model for agent loops.
+
+    CASTOR_NIM_AGENT_MODEL wins; a changed CASTOR_NIM_MODEL (a self-hosted
+    endpoint, say) is followed as before; otherwise NIM_AGENT_DEFAULT_MODEL.
+    """
     return (
         os.environ.get("CASTOR_NIM_AGENT_MODEL", "").strip()
-        or _nim_default_model()
+        or os.environ.get("CASTOR_NIM_MODEL", "").strip()
+        or NIM_AGENT_DEFAULT_MODEL
     )
 
 
@@ -4940,8 +4949,9 @@ def nim_agent(
     [unverified]. Treat the answer as leads to confirm, not evidence.
 
     Each step is one NIM request, so a long run spends free-tier quota.
-    Slow models (GLM-5.3-Flash, gpt-oss-20b) are impractical here; the
-    default and nvidia/nemotron-3.5-lightning-30b-a3b respond in seconds.
+    Slow models (GLM-5.3-Flash, gpt-oss-20b, Mistral Large 4 on the free
+    tier) are impractical here. The default, Nemotron 3.5 Super, takes
+    seconds per step.
 
     Args:
         task: What to find out, with enough context to act without asking
