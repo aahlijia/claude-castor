@@ -7431,12 +7431,18 @@ class _EditJob:
 
 @dataclass
 class _EditCheck:
-    """One answer after parsing, applying in memory and coverage."""
+    """One answer after parsing, applying in memory and coverage.
+
+    `outside` holds grep-only references of must_cover symbols that lie
+    outside `files`: (path, line, text), left alone and listed in the
+    result instead of refused.
+    """
 
     answer: str
     blocks: list[EditBlock]
     changes: dict[Path, FileEdit]
     errors: list[str]
+    outside: list[tuple[str, int, str]] = field(default_factory=list)
 
 
 def _edit_args_error(
@@ -7562,66 +7568,107 @@ def _edit_report_problem(
     return None
 
 
+def _edit_uses(
+    report: _CallerReport,
+) -> list[tuple[str, tuple[str, int], str]]:
+    """(kind, (path, line), text) for the definition, sites and references."""
+    uses = [("definition", report.definition or ("", 0), "")]
+    uses += [("call site", site, "") for site in report.sites]
+    uses += [("reference", (p, n), text) for p, n, text in report.extra]
+    return uses
+
+
+def _edit_path_in_scope(root: Path, scope: list[str] | None, rel: str) -> bool:
+    """True when the root-relative `rel` lies inside `scope` (None: all)."""
+    if scope is None:
+        return True
+
+    return _edit_in_scope((root / rel).resolve(), root, scope)
+
+
+_EditUse = tuple[str, int, str]
+
+
 def _edit_uncovered(
     report: _CallerReport,
     symbol: str,
     spans: dict[str, list[tuple[int, int]]],
-) -> list[str]:
-    """One error per definition, call site or reference left unedited."""
-    wanted = [("definition", report.definition)]
-    wanted += [("call site", site) for site in report.sites]
-    wanted += [("reference", (path, line)) for path, line, _ in report.extra]
+    root: Path,
+    scope: list[str] | None,
+) -> tuple[list[str], list[_EditUse]]:
+    """(errors, outside) for the uses of `symbol` left unedited.
+
+    The definition and call sites must be edited wherever they are; a
+    grep-only reference only inside `scope`. References outside it are
+    returned as (path, line, text) instead of refused.
+    """
     errors = []
+    outside = []
     seen: set[tuple[str, int]] = set()
-    for kind, (path, line) in wanted:
+    for kind, (path, line), text in _edit_uses(report):
         if (path, line) in seen or _edit_covered(spans, path, line):
             continue
         seen.add((path, line))
-        errors.append(f"{kind} {path}:{line} of {symbol} not edited")
+        if kind == "reference" and not _edit_path_in_scope(root, scope, path):
+            outside.append((path, line, text))
+        else:
+            errors.append(f"{kind} {path}:{line} of {symbol} not edited")
 
-    return errors
+    return errors, outside
 
 
 def _edit_symbol_coverage(
-    root: Path, symbol: str, spans: dict[str, list[tuple[int, int]]]
-) -> list[str]:
-    """Errors for the uses of `symbol` that no block's span covers."""
+    root: Path,
+    symbol: str,
+    spans: dict[str, list[tuple[int, int]]],
+    scope: list[str] | None,
+) -> tuple[list[str], list[_EditUse]]:
+    """(errors, references outside scope) for the uses of `symbol`."""
     report, _ = _dekko_caller_report(root, symbol)
     problem = _edit_report_problem(report, symbol)
     if problem is not None or report is None:
-        return [problem or f"must_cover: no report for {symbol}"]
+        return [problem or f"must_cover: no report for {symbol}"], []
 
-    return _edit_uncovered(report, symbol, spans)
+    return _edit_uncovered(report, symbol, spans, root, scope)
 
 
 def _edit_check_coverage(
-    changes: dict[Path, FileEdit], root: Path, must_cover: list[str]
-) -> list[str]:
+    changes: dict[Path, FileEdit],
+    root: Path,
+    must_cover: list[str],
+    scope: list[str] | None = None,
+) -> tuple[list[str], list[_EditUse]]:
     """Every use of each symbol must lie inside an edited span.
 
     Uses are dekko's call sites, the definition, and grep hits dekko does
-    not list (a reference such as `x or f`, a string, a doc mention). The
-    map and the grep's file index are rebuilt first (`fresh`), so a use
-    added since the last agent run is not missed. A dekko failure is an
-    error, never a pass.
+    not list (a reference such as `x or f`, a string, a doc mention).
+    Call sites and the definition count everywhere; a reference only
+    inside `scope`. The map and the grep's file index are rebuilt first
+    (`fresh`), so a use added since the last agent run is not missed. A
+    dekko failure is an error, never a pass.
 
     Args:
         changes: The in-memory edits, keyed by resolved path.
         root: Resolved project root.
         must_cover: Symbols whose uses must all be edited.
+        scope: The `files` fence, or None for all of root.
 
     Returns:
-        Errors like "call site server.py:3441 of _nim_admit not edited".
+        (errors like "call site server.py:3441 of _nim_admit not edited",
+        sorted (path, line, text) of references outside `scope`).
     """
     if not _dekko_ensure_map(root, fresh=True):
-        return ["must_cover: dekko could not refresh the map"]
+        return ["must_cover: dekko could not refresh the map"], []
 
     _agent_index(root, fresh=True)  # the reference grep sees new files
     spans = {edit.relative: edit.spans for edit in changes.values()}
     errors: list[str] = []
+    outside: set[_EditUse] = set()
     for symbol in must_cover:
-        errors += _edit_symbol_coverage(root, symbol, spans)
-    return errors
+        found, left = _edit_symbol_coverage(root, symbol, spans, scope)
+        errors += found
+        outside.update(left)
+    return errors, sorted(outside)
 
 
 def _edit_check_answer(answer: str, job: _EditJob) -> _EditCheck:
@@ -7632,10 +7679,14 @@ def _edit_check_answer(answer: str, job: _EditJob) -> _EditCheck:
 
     changes, applied = _edit_apply_in_memory(blocks, job.root, job.scope)
     errors += applied
+    outside: list[_EditUse] = []
     if job.cover and blocks and not applied:
-        errors += _edit_check_coverage(changes, job.root, job.cover)
+        found, outside = _edit_check_coverage(
+            changes, job.root, job.cover, job.scope
+        )
+        errors += found
 
-    return _EditCheck(answer, blocks, changes, errors)
+    return _EditCheck(answer, blocks, changes, errors, outside)
 
 
 def _edit_merge_stats(stats: dict, extra: dict) -> None:
@@ -7732,14 +7783,31 @@ def _edit_success(
     )
     base = _repo_fingerprint(str(root)) or "none"
     checked = "git apply --check passed" if git_checked else NIM_EDIT_UNCHECKED
-    return f"{head}\npatch: {patch}\nbase: {base}\nchecked: {checked}\n"
+    text = f"{head}\npatch: {patch}\nbase: {base}\nchecked: {checked}\n"
+    return text + _edit_outside_lines(check.outside)
+
+
+def _edit_outside_lines(outside: list[_EditUse]) -> str:
+    """The result's list of references left alone outside `files`."""
+    if not outside:
+        return ""
+
+    rows = [
+        f"- {path}:{line}: {text.strip()[:NIM_AGENT_LINE_CHARS]}\n"
+        for path, line, text in outside
+    ]
+    return "unedited references outside files:\n" + "".join(rows)
 
 
 def _edit_outcome(
     job: _EditJob, check: _EditCheck, repaired: bool, stats: dict
 ) -> str:
     """Refuse on any error; otherwise build, check and write the patch."""
-    stats.update(blocks=len(check.blocks), files=len(check.changes))
+    stats.update(
+        blocks=len(check.blocks),
+        files=len(check.changes),
+        unedited_references=len(check.outside),
+    )
     if check.errors:
         stats["errors"] = check.errors
         return _edit_refusal(check.errors, repaired)
@@ -7769,6 +7837,7 @@ def _edit_base_stats() -> dict[str, Any]:
         "repair": False,
         "outcome": "refused",
         "patch": None,
+        "unedited_references": 0,
     }
 
 
@@ -7852,8 +7921,12 @@ def nim_edit(
     caller, a constant and its mentions in the docs, table rows, import
     fixes. The model reads the repo with the nim_agent tools and answers
     with exact-text edit blocks. Castor checks each block (inside cwd and
-    `files`, old text found exactly once, no overlaps) and that every call
-    site and the definition of each `must_cover` symbol was edited, gives
+    `files`, old text found exactly once, no overlaps) and the uses of
+    each `must_cover` symbol: its call sites and definition must be edited
+    wherever they are, and other grep hits (references, strings, doc
+    mentions) wherever `files` allows (all of cwd without it). References
+    outside `files` do not refuse; the OK result lists them after the
+    `checked:` line so you can see what the patch left alone. Castor gives
     the model one repair round, then builds a unified diff and runs
     `git apply --check`. NIM never writes files; Castor writes only the
     patch, under its cache dir.
@@ -7871,7 +7944,8 @@ def nim_edit(
         files: Optional fence: files or directories, relative to cwd, the
             edit may touch. Omit it to allow all of cwd.
         must_cover: Optional symbols whose call sites and definition must
-            all be edited (the old name in a rename). Needs dekko.
+            all be edited (the old name in a rename), plus every other
+            mention inside `files`. Needs dekko.
         model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
             Super).
         max_steps: Request budget, 1 to 30 (default 12); a repair round

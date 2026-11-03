@@ -3246,3 +3246,68 @@ def test_nim_edit_patch_path_is_absolute_with_a_relative_cache(
     path = Path(out.split("\n")[1].removeprefix("patch: "))
     assert path.is_absolute() and path.is_file()
     assert path.is_relative_to(tmp_path.resolve() / "relcache")
+
+
+def _notes_repo(repo):
+    _cover_repo(repo)
+    (repo / "notes").mkdir()
+    (repo / "notes" / "plan.md").write_text(
+        "# Plan\n    We renamed old_name last week.  \n"
+    )
+
+
+def test_nim_edit_lists_references_outside_files(stub, repo, fake_dekko):
+    _notes_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    _answers(stub, _FULL_COVER)
+    out, stats = server._run_nim_edit(
+        "rename", str(repo), files=["src"], must_cover=["old_name"]
+    )
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: OK, 2 files, 3 blocks, repair round: no]"
+    assert lines[4:6] == [
+        "unedited references outside files:",
+        "- notes/plan.md:2: We renamed old_name last week.",
+    ]
+    assert lines[6].startswith("diff --git ")
+    (patch,) = _patches()
+    assert patch.read_text() == "\n".join(lines[6:])
+    assert stats["unedited_references"] == 1
+    assert stats["outcome"] == "patch"
+
+
+def test_nim_edit_refuses_an_unedited_reference_without_files(
+    stub, repo, fake_dekko
+):
+    _notes_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    _answers(stub, _FULL_COVER, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- reference notes/plan.md:2 of old_name not edited",
+    ]
+
+
+def test_nim_edit_refuses_a_call_site_outside_files(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    answer = _edit_answer(("src/lib.py", "def old_name():", "def new():"))
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)(
+        "rename", str(repo), files=["src/lib.py"], must_cover=["old_name"]
+    )
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- call site src/use.py:2 of old_name not edited",
+        "- call site src/use.py:6 of old_name not edited",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_reports_zero_unedited_references_by_default(stub, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
+    assert "unedited references" not in out
+    assert stats["unedited_references"] == 0
