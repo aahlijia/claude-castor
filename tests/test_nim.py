@@ -2724,6 +2724,69 @@ def test_apply_file_scope_is_exact(repo):
     assert errors == [] and list(changes) == [repo / "src" / "a.py"]
 
 
+def _delete(index, path, old):
+    return server.EditBlock(index, path, old, "", deletes=True)
+
+
+def _after_delete(repo, data, old):
+    (repo / "src" / "d.md").write_bytes(data)
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", old)], repo, None
+    )
+    assert errors == []
+    return changes[repo / "src" / "d.md"].new.encode()
+
+
+@pytest.mark.parametrize(
+    ("data", "old", "expect"),
+    [
+        (
+            b"| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n",
+            "| 1 | 2 |",
+            b"| a | b |\n|---|---|\n| 3 | 4 |\n",
+        ),
+        (b"x\ny\n", "y", b"x\n"),
+        (b"x\ny", "y", b"x"),
+        (b"a\r\nb\r\nc\r\n", "b", b"a\r\nc\r\n"),
+        (b"a\r\nb", "b", b"a"),
+        (b"only\n", "only", b""),
+        (b"keep me\n", "me", b"keep \n"),  # not line-aligned: substring
+    ],
+)
+def test_delete_block_takes_the_whole_line(repo, data, old, expect):
+    assert _after_delete(repo, data, old) == expect
+
+
+def test_delete_span_and_overlap_use_the_extended_range(repo):
+    (repo / "src" / "d.md").write_text("a\nb\nc\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "b")], repo, None
+    )
+    assert errors == [] and changes[repo / "src" / "d.md"].spans == [(2, 2)]
+    _, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "b"), _blk(2, "src/d.md", "\nc", "\nC")],
+        repo,
+        None,
+    )
+    assert errors == ["block 2: overlaps block 1 in src/d.md"]
+
+
+def test_zero_line_new_deletes_and_one_empty_line_blanks(repo):
+    zero, _ = server._parse_edit_blocks(
+        "<<<EDIT src/d.md\n<<<OLD\nb\n>>>NEW\n>>>END\n"
+    )
+    blank, _ = server._parse_edit_blocks(
+        "<<<EDIT src/d.md\n<<<OLD\nb\n>>>NEW\n\n>>>END\n"
+    )
+    assert zero[0].deletes and not blank[0].deletes
+    (repo / "src" / "d.md").write_text("a\nb\nc\n")
+    results = []
+    for blocks in (zero, blank):
+        changes, _ = server._edit_apply_in_memory(blocks, repo, None)
+        results.append(changes[repo / "src" / "d.md"].new)
+    assert results == ["a\nc\n", "a\n\nc\n"]
+
+
 def _patch_repo(tmp_path, files):
     root = tmp_path / "gitrepo"
     root.mkdir()
@@ -2763,6 +2826,18 @@ def test_diff_round_trips_through_git_apply(tmp_path, monkeypatch):
     )
     edit = changes[root / "src" / "a.py"]
     assert (root / "src" / "a.py").read_text() == edit.new
+
+
+def test_delete_patch_passes_git_apply(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"t.md": b"| h |\n|---|\n| 1 |\n| 2 |\n"},
+        [_delete(1, "t.md", "| 1 |")],
+    )
+    added = [x for x in diff.splitlines() if x.startswith("+")]
+    assert "-| 1 |\n" in diff and added == ["+++ b/t.md"]
+    assert (root / "t.md").read_text() == "| h |\n|---|\n| 2 |\n"
 
 
 def test_diff_keeps_a_missing_final_newline(tmp_path, monkeypatch):

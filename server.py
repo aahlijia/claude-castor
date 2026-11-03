@@ -6927,12 +6927,17 @@ _EDIT_MARKERS = (EDIT_MARKER, OLD_MARKER, NEW_MARKER, END_MARKER)
 
 @dataclass(frozen=True)
 class EditBlock:
-    """One exact-text edit: replace `old` with `new` in the file `path`."""
+    """One exact-text edit: replace `old` with `new` in the file `path`.
+
+    `deletes` is True when the `>>>NEW` section had no lines at all (not
+    one empty line): the old text's whole lines go, terminators included.
+    """
 
     index: int
     path: str
     old: str
     new: str
+    deletes: bool = False
 
 
 def _edit_marker_at(line: str) -> str | None:
@@ -6977,15 +6982,18 @@ def _parse_edit_block(
     if found == OLD_MARKER:  # text between <<<EDIT and <<<OLD is ignored
         pos = at + 1
     parts: list[str] = []  # old text, new text
+    sizes: list[int] = []  # their line counts
     for want in (NEW_MARKER, END_MARKER):
         at, found = _edit_next_marker(lines, pos)
         if found != want:
             error = f"block {index}: missing {want}"
             return None, error, at if found == EDIT_MARKER else at + 1
         parts.append(_edit_join(lines, pos, at))
+        sizes.append(at - pos)
         pos = at + 1
 
-    return EditBlock(index, path, parts[0], parts[1]), None, pos
+    block = EditBlock(index, path, parts[0], parts[1], sizes[1] == 0)
+    return block, None, pos
 
 
 def _edit_join(lines: list[str], start: int, stop: int) -> str:
@@ -7184,6 +7192,8 @@ def _edit_locate(
 
     start = hits[0]
     end = start + len(old)
+    if block.deletes:
+        start, end = _edit_delete_range(text, start, end)
     for other_start, other_end, other_index in taken:
         if start < other_end and other_start < end:
             return None, f"overlaps block {other_index} in {rel}"
@@ -7215,6 +7225,29 @@ def _edit_line_changes(
             into.inserts.add(first + i1)
         else:
             into.changed.update(range(first + i1, first + i2))
+
+
+def _edit_delete_range(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a line-aligned delete of text[start:end] to whole lines.
+
+    Line-aligned means it starts a line and ends right before a line
+    terminator or at the end of the file. It then also takes the LF or
+    CRLF after it, or at the end of a file with no final terminator the
+    one before it, so no blank line is left. Any other range is returned
+    as is (a plain substring delete).
+    """
+    starts_line = start == 0 or text[start - 1] == "\n"
+    after = (
+        2 if text.startswith("\r\n", end) else int(text[end : end + 1] == "\n")
+    )
+    if not starts_line or (after == 0 and end != len(text)):
+        return start, end
+
+    if after:
+        return start, end + after
+
+    before = 2 if text[:start].endswith("\r\n") else int(start > 0)
+    return start - before, end
 
 
 def _edit_splice(text: str, parts: list[tuple[int, int, str]]) -> str:
