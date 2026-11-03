@@ -2551,7 +2551,8 @@ def test_apply_rejects_missing_and_duplicate_old_text(repo):
     )
     assert errors == [
         "block 3: old text not found in src/a.py",
-        "block 4: old text matches 2 times in src/d.py",
+        "block 4: old text matches 2 times in src/d.py (lines 1, 2; "
+        "add a line that tells them apart)",
         "block 5: old text is empty",
     ]
     assert changes == {}
@@ -2562,7 +2563,54 @@ def test_apply_counts_overlapping_occurrences(repo):
     _, errors = server._edit_apply_in_memory(
         [_blk(1, "src/d.py", "aa", "b")], repo, None
     )
-    assert errors == ["block 1: old text matches 2 times in src/d.py"]
+    assert errors == [
+        "block 1: old text matches 2 times in src/d.py (lines 1, 1; "
+        "add a line that tells them apart)"
+    ]
+
+
+def test_apply_lists_at_most_eight_duplicate_lines(repo):
+    (repo / "src" / "d.py").write_text("x\n" * 10)
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "x", "y")], repo, None
+    )
+    assert errors == [
+        "block 1: old text matches 10 times in src/d.py (lines 1, 2, 3, 4, "
+        "5, 6, 7, 8, ...; add a line that tells them apart)"
+    ]
+
+
+def test_apply_partial_line_quotes_the_full_line(repo):
+    (repo / "src" / "d.py").write_text("a = 1\nTreat each as a lead.\nz\n")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "Treat each as", "Treat each")], repo, None
+    )
+    assert errors == [
+        "block 1: old text must be whole lines (copy each line in full); "
+        "line 2 in full: `Treat each as a lead.`"
+    ]
+
+
+def test_apply_missing_old_text_points_at_its_first_line(repo):
+    (repo / "src" / "d.py").write_text("def f():\n    return 1\n")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "def f():\n    return 2", "y")], repo, None
+    )
+    assert errors == [
+        "block 1: old text not found in src/d.py (its first line is at "
+        "line 1; a later line differs, re-read lines 1-2)"
+    ]
+
+
+def test_apply_missing_old_text_names_the_closest_line(repo):
+    (repo / "src" / "d.py").write_text("a = 1\n    total = compute(x, y)\n")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "    total = compute(x, z)", "q")], repo, None
+    )
+    assert errors == [
+        "block 1: old text not found in src/d.py (closest is line 2: "
+        "`    total = compute(x, y)`)"
+    ]
 
 
 def test_apply_rejects_out_of_scope_denied_and_escaping_paths(repo):
@@ -2599,7 +2647,8 @@ def test_apply_refuses_old_text_that_is_not_whole_lines(repo, old):
     changes, errors = server._edit_apply_in_memory(
         [_blk(1, "src/a.py", old, "x")], repo, None
     )
-    assert changes == {} and errors == [f"block 1: {_WHOLE_LINES}"]
+    assert changes == {} and len(errors) == 1
+    assert errors[0].startswith(f"block 1: {_WHOLE_LINES}")
 
 
 @pytest.mark.parametrize(
@@ -2842,7 +2891,8 @@ def test_a_delete_that_is_not_whole_lines_is_refused(repo):
     changes, errors = server._edit_apply_in_memory(
         [_delete(1, "src/d.md", "me")], repo, None
     )
-    assert changes == {} and errors == [f"block 1: {_WHOLE_LINES}"]
+    assert changes == {} and len(errors) == 1
+    assert errors[0].startswith(f"block 1: {_WHOLE_LINES}")
 
 
 def test_zero_line_new_deletes_and_one_empty_line_blanks(repo):
@@ -3253,7 +3303,8 @@ def test_nim_edit_refuses_after_failed_repair(stub, repo):
     out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
     assert out.split("\n") == [
         "[nim_edit: REFUSED after repair round]",
-        "- block 1: old text not found in src/a.py",
+        "- block 1: old text not found in src/a.py "
+        "(closest is line 2: `TARGET = 1`)",
     ]
     assert len(stub.posts()) == 2
     assert _patches() == []
@@ -3770,7 +3821,8 @@ def test_nim_edit_failed_repair_run_refuses(stub, repo):
     lines = out.split("\n")
     assert lines[:2] == [
         "[nim_edit: REFUSED after repair round]",
-        "- block 1: old text not found in src/a.py",
+        "- block 1: old text not found in src/a.py "
+        "(closest is line 2: `TARGET = 1`)",
     ]
     assert len(lines) == 3 and lines[2].startswith("- repair run failed: [")
     assert _patches() == []

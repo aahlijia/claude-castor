@@ -7157,6 +7157,70 @@ def _edit_find_all(text: str, needle: str) -> list[int]:
     return found
 
 
+# Repair hints for a block whose old text matched more than once or not at
+# all: they tell the model where to look in its repair round.
+EDIT_HINT_MAX_LINES = 8
+EDIT_HINT_MIN_CHARS = 8
+EDIT_HINT_CUTOFF = 0.8
+EDIT_HINT_QUOTE = 100
+EDIT_HINT_FULL = 400  # a cut-short line is quoted whole so it can be copied
+
+
+def _edit_line_at(text: str, offset: int) -> int:
+    """1-based line number holding `offset`."""
+    return text.count("\n", 0, offset) + 1
+
+
+def _edit_hits_hint(text: str, hits: list[int]) -> str:
+    """The lines where a duplicated old text starts, for the repair round."""
+    lines = [str(_edit_line_at(text, at)) for at in hits[:EDIT_HINT_MAX_LINES]]
+    if len(hits) > EDIT_HINT_MAX_LINES:
+        lines.append("...")
+    return f"lines {', '.join(lines)}; add a line that tells them apart"
+
+
+def _edit_missing_hint(text: str, old: str) -> str:
+    """Where an old text that is not in the file probably went wrong.
+
+    Points at its first line when that line is in the file (a later line
+    differs), else at the file line closest to it; "" when neither helps.
+    """
+    old_lines = [line.rstrip("\r") for line in old.split("\n")]
+    first = next((line for line in old_lines if line.strip()), "")
+    if len(first.strip()) < EDIT_HINT_MIN_CHARS:
+        return ""
+
+    file_lines = [line.rstrip("\r") for line in text.split("\n")]
+    starts = [i + 1 for i, line in enumerate(file_lines) if line == first]
+    if starts:
+        at = starts[0]
+        listed = ", ".join(str(n) for n in starts[:EDIT_HINT_MAX_LINES])
+        return (
+            f" (its first line is at line {listed}; a later line differs, "
+            f"re-read lines {at}-{at + len(old_lines) - 1})"
+        )
+
+    close = difflib.get_close_matches(
+        first, file_lines, n=1, cutoff=EDIT_HINT_CUTOFF
+    )
+    if not close:
+        return ""
+
+    line = file_lines.index(close[0]) + 1
+    return f" (closest is line {line}: `{close[0][:EDIT_HINT_QUOTE]}`)"
+
+
+def _edit_partial_hint(text: str, start: int, end: int) -> str:
+    """Quote the line(s) a mid-line match cut short, for the repair round."""
+    lines = text.split("\n")
+    numbers = sorted({_edit_line_at(text, start), _edit_line_at(text, end)})
+    quoted = [
+        f"line {n} in full: `{lines[n - 1].rstrip(chr(13))[:EDIT_HINT_FULL]}`"
+        for n in numbers
+    ]
+    return "; " + "; ".join(quoted)
+
+
 def _edit_span(text: str, start: int, old: str) -> tuple[int, int]:
     """1-based inclusive line range of `old` matched at offset `start`.
 
@@ -7198,15 +7262,22 @@ def _edit_locate(
 
     hits = _edit_find_all(text, old)
     if not hits:
-        return None, f"old text not found in {rel}"
+        hint = _edit_missing_hint(text, old)
+        return None, f"old text not found in {rel}{hint}"
 
     if len(hits) > 1:
-        return None, f"old text matches {len(hits)} times in {rel}"
+        return None, (
+            f"old text matches {len(hits)} times in {rel} "
+            f"({_edit_hits_hint(text, hits)})"
+        )
 
     start = hits[0]
     end = start + len(old)
     if not _edit_whole_lines(text, start, end):
-        return None, "old text must be whole lines (copy each line in full)"
+        return None, (
+            "old text must be whole lines (copy each line in full)"
+            f"{_edit_partial_hint(text, start, end)}"
+        )
 
     if block.deletes:
         start, end = _edit_delete_range(text, start, end)
