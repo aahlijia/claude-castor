@@ -175,7 +175,11 @@ both off. The last step, or a
 tool step that runs out of tokens, goes to `_agent_answer`: the transcript
 flattened into one user message (Nemotron keeps calling tools otherwise), with
 a 16k token cap (`CASTOR_NIM_AGENT_ANSWER_TOKENS`) and a 360 s timeout
-(`NIM_AGENT_ANSWER_TIMEOUT`; other requests keep `CASTOR_NIM_TIMEOUT`). Nemotron models get a
+(`NIM_AGENT_ANSWER_TIMEOUT`; other requests keep `CASTOR_NIM_TIMEOUT`). Chat
+requests stream (`_nim_send_stream` / `_NimStream` rebuild the plain response
+shape; `CASTOR_NIM_STREAM=0` turns it off), so these are idle gaps between
+chunks (default 60 s), with a 900 s wall cap; a stalled answer returns its
+partial text with a note, a stalled tool step fails as a timeout. Nemotron models get a
 `reasoning_budget` of 1024 per tool step and 6144 for the answer
 (`_nim_thinking_cap`); plain NIM calls (`_run_nim`) cap it at half of
 `max_tokens`, at most 6144. Walks and the file list skip engine assets

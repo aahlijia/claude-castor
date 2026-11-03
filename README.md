@@ -379,7 +379,8 @@ All optional, set as environment variables on the MCP server:
 | `CASTOR_NIM_CONCURRENCY` | `4` per key, at most `12` | Simultaneous in-flight requests; background jobs wait up to 300 s for a slot, foreground calls 30 s |
 | `CASTOR_NIM_MAX_INPUT_CHARS` | `300000` | Prompt size budget (~75k tokens); larger prompts are rejected up front |
 | `CASTOR_NIM_MAX_TOKENS` | `4096` | Completion cap per request |
-| `CASTOR_NIM_TIMEOUT` | `180` | Seconds to wait for a response |
+| `CASTOR_NIM_TIMEOUT` | `60` | Seconds with no new streamed data before Castor gives up on a reply (a stalled answer keeps its partial text); with streaming off, seconds for the whole reply (default `180`) |
+| `CASTOR_NIM_STREAM` | `1` | `0` turns off streaming, for an OpenAI-compatible endpoint without server-sent events |
 
 NVIDIA sets the real free-tier limits and they change; the defaults above are
 conservative guesses, so tune them to what your account shows.

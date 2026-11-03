@@ -15,6 +15,7 @@ from collections import Counter
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -2704,7 +2705,12 @@ NIM_MAX_CONCURRENCY = 12
 NIM_DEFAULT_MAX_INPUT_CHARS = 300_000  # ~75k tokens of prompt
 NIM_DEFAULT_MAX_TOKENS = 4096  # completion cap per request
 NIM_DEFAULT_TEMPERATURE = 0.2
-NIM_REQUEST_TIMEOUT = 180.0  # seconds; non-streaming, so whole generation
+# Requests stream (CASTOR_NIM_STREAM=0 turns it off), so CASTOR_NIM_TIMEOUT
+# is the idle gap between chunks; a slow but moving answer never times out.
+# Without streaming it bounds the whole response, as before.
+NIM_IDLE_TIMEOUT = 60.0
+NIM_REQUEST_TIMEOUT = 180.0
+NIM_STREAM_MAX_SECONDS = 900.0  # wall cap that ends a runaway generation
 NIM_CONNECT_TIMEOUT = 15.0
 NIM_RATE_WINDOW = 60.0
 NIM_MAX_ATTEMPTS = 4  # per request, for retryable failures
@@ -3232,15 +3238,21 @@ def _nim_send_once(
 ) -> tuple[Any, _NimFailure | None]:
     """Send one HTTP request. Returns (parsed JSON, None) or (None, failure).
 
-    Redirects are not followed, so the Authorization header can never be
-    forwarded to another host. `read_timeout` raises the wait for one
-    request above CASTOR_NIM_TIMEOUT (never lowers it).
+    A streamed chat completion is rebuilt into the non-streaming shape, so
+    callers never see the difference. Redirects are not followed, so the
+    Authorization header can never be forwarded to another host.
+    `read_timeout` raises the wait for one request above
+    CASTOR_NIM_TIMEOUT (never lowers it).
     """
-    base = float(_nim_env("CASTOR_NIM_TIMEOUT", NIM_REQUEST_TIMEOUT))
+    streaming = bool(payload and payload.get("stream"))
+    default = NIM_IDLE_TIMEOUT if streaming else NIM_REQUEST_TIMEOUT
+    base = float(_nim_env("CASTOR_NIM_TIMEOUT", default))
     timeout = httpx.Timeout(
         max(base, read_timeout or 0), connect=NIM_CONNECT_TIMEOUT
     )
     try:
+        if streaming and payload is not None:
+            return _nim_send_stream(url, headers, payload, key, timeout)
         response = _nim_client().request(
             method, url, headers=headers, json=payload, timeout=timeout
         )
@@ -3254,6 +3266,13 @@ def _nim_send_once(
             True,
             f"could not reach NVIDIA NIM ({type(exc).__name__})",
         )
+    return _nim_parse_response(response, key)
+
+
+def _nim_parse_response(
+    response: httpx.Response, key: str | None
+) -> tuple[Any, _NimFailure | None]:
+    """A read response as (parsed JSON, None) or (None, failure)."""
     if response.status_code == 200:
         try:
             return response.json(), None
@@ -3266,6 +3285,141 @@ def _nim_send_once(
     return None, _classify_nim_status(
         response.status_code, detail, retry_after
     )
+
+
+def _nim_stream_fields() -> dict[str, Any]:
+    """Payload fields that turn streaming on, unless CASTOR_NIM_STREAM=0."""
+    if os.environ.get("CASTOR_NIM_STREAM", "1").strip() == "0":
+        return {"stream": False}
+    return {"stream": True, "stream_options": {"include_usage": True}}
+
+
+def _nim_send_stream(
+    url: str,
+    headers: dict[str, str],
+    payload: dict,
+    key: str | None,
+    timeout: httpx.Timeout,
+) -> tuple[Any, _NimFailure | None]:
+    """POST a streaming chat completion and rebuild the whole response.
+
+    An error status, or an endpoint that answers with plain JSON despite
+    `stream`, is read and parsed as a normal response.
+    """
+    with _nim_client().stream(
+        "POST", url, headers=headers, json=payload, timeout=timeout
+    ) as response:
+        kind = response.headers.get("content-type", "")
+        if response.status_code != 200 or "text/event-stream" not in kind:
+            response.read()
+            return _nim_parse_response(response, key)
+        return _nim_read_stream(
+            response, bool(payload.get("tools")), timeout.read or 0
+        )
+
+
+def _nim_read_stream(
+    response: httpx.Response, tools: bool, idle: float
+) -> tuple[Any, _NimFailure | None]:
+    """Accumulate SSE chunks until [DONE], a stall, or the wall cap."""
+    stream = _NimStream()
+    deadline = time.monotonic() + NIM_STREAM_MAX_SECONDS
+    try:
+        for line in response.iter_lines():
+            if not stream.feed(line):
+                break
+            if time.monotonic() > deadline:
+                return _nim_cut_short(
+                    stream, tools, f"at the {NIM_STREAM_MAX_SECONDS:.0f}s cap"
+                )
+    except httpx.ReadTimeout:
+        return _nim_cut_short(stream, tools, f"after a stall of {idle:.0f}s")
+    except ValueError:
+        return None, _NimFailure(
+            "upstream", True, "a stream chunk was not valid JSON"
+        )
+    return stream.result(), None
+
+
+def _nim_cut_short(
+    stream: "_NimStream", tools: bool, why: str
+) -> tuple[Any, _NimFailure | None]:
+    """Handle a stream that stopped before [DONE].
+
+    A partial answer beats a retry that spends the same time again, so an
+    answer with text comes back marked; a partial tool call is useless, so
+    a tool step (or an empty answer) fails as a timeout and is retried.
+    """
+    if tools or not stream.content:
+        return None, _NimFailure("timeout", True, f"stream stopped {why}")
+    note = f"\n\n[Note: response cut off {why}.]"
+    return stream.result(note, "stall"), None
+
+
+@dataclass
+class _NimStream:
+    """One streamed chat completion, accumulated from its SSE chunks.
+
+    Attributes:
+        content: Text deltas in order (reasoning deltas are dropped).
+        calls: Tool calls by index; id and name from the first delta that
+            has them, arguments concatenated.
+        finish: The last finish_reason seen.
+        usage: Token usage from the final chunk.
+    """
+
+    content: list[str] = field(default_factory=list)
+    calls: dict[int, dict] = field(default_factory=dict)
+    finish: str | None = None
+    usage: dict | None = None
+
+    def feed(self, line: str) -> bool:
+        """Take one SSE line; False once the stream sends [DONE]."""
+        if not line.startswith("data:"):
+            return True
+        body = line[5:].strip()
+        if body == "[DONE]":
+            return False
+        if body:
+            self.add(json.loads(body))
+        return True
+
+    def add(self, chunk: dict) -> None:
+        """Merge one parsed chunk."""
+        if isinstance(chunk.get("usage"), dict):
+            self.usage = chunk["usage"]
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if isinstance(delta.get("content"), str):
+                self.content.append(delta["content"])
+            for call in delta.get("tool_calls") or []:
+                self._merge_call(call)
+            if choice.get("finish_reason"):
+                self.finish = choice["finish_reason"]
+
+    def _merge_call(self, call: dict) -> None:
+        """Fold one tool-call delta into the call at its index."""
+        slot = self.calls.setdefault(
+            call.get("index", len(self.calls)),
+            {"type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if call.get("id") and "id" not in slot:
+            slot["id"] = call["id"]
+        function = call.get("function") or {}
+        if function.get("name") and not slot["function"]["name"]:
+            slot["function"]["name"] = function["name"]
+        slot["function"]["arguments"] += function.get("arguments") or ""
+
+    def result(self, note: str = "", finish: str | None = None) -> dict:
+        """The non-streaming response shape the callers already read."""
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(self.content) + note,
+        }
+        if self.calls:
+            message["tool_calls"] = [self.calls[i] for i in sorted(self.calls)]
+        choice = {"message": message, "finish_reason": finish or self.finish}
+        return {"choices": [choice], "usage": self.usage}
 
 
 def _nim_pause_before_retry(
@@ -3512,7 +3666,7 @@ def _run_nim(
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": False,
+            **_nim_stream_fields(),
             **_nim_thinking_cap(model, thinking),
         },
         keys,
@@ -3647,8 +3801,9 @@ def nim_prompt(
     not cleared for a third party.
 
     Requires NVIDIA_API_KEY in the MCP server's environment — run
-    nim_status to check. The call blocks until the model answers (up to
-    CASTOR_NIM_TIMEOUT, default 180s); use nim_start for long prompts.
+    nim_status to check. The call blocks until the model answers (the
+    reply streams; it gives up after CASTOR_NIM_TIMEOUT, default 60s, with
+    no new data); use nim_start for long prompts.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
@@ -4322,7 +4477,8 @@ NIM_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 NIM_AGENT_STEP_THINKING = 1024
 NIM_AGENT_ANSWER_THINKING = 6144
 # At about 60 tokens/s, 6,144 thinking tokens plus a review ran past the
-# 180 s default; the answer request alone may wait this long.
+# 180 s whole-response timeout. Streamed, this is the answer's idle budget;
+# with CASTOR_NIM_STREAM=0 it bounds the whole answer, as before.
 NIM_AGENT_ANSWER_TIMEOUT = 360.0
 # Engine assets and binaries the agent skips while walking a repo or listing
 # it in the file map (a Unity project tracks a .meta beside every file). A
@@ -4858,7 +5014,7 @@ def _agent_send(
         "messages": messages,
         "temperature": NIM_DEFAULT_TEMPERATURE,
         "max_tokens": max_tokens,
-        "stream": False,
+        **_nim_stream_fields(),
         **_nim_thinking_cap(model, thinking),
     }
     if tools:
