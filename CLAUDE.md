@@ -161,10 +161,11 @@ the containment check; `.env*`, key files and `.git` are off limits), reads at
 most 120 lines per call, caps each tool result, and never lets the model edit or
 run anything. Each step is one NIM request (default 12 steps, max 30; reviews
 8). `nim_edit` reuses the loop with an edit-block answer rule and returns
-patches Castor checks (`_run_nim_edit`). Agent roles default to `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super);
-`CASTOR_NIM_AGENT_MODEL` overrides it, and a set `CASTOR_NIM_MODEL` is
-followed. `CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another
-model while the agent model answers (scored no better, so unset by default).
+patches Castor checks (`_run_nim_edit`). Agent roles default to
+`NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super); `CASTOR_NIM_AGENT_MODEL`
+overrides it, and a set `CASTOR_NIM_MODEL` is followed.
+`CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another model while
+the agent model answers (scored no better, so unset by default).
 `_agent_verify_citations` tags any `path:line` that does not exist as
 `[unverified]` (a bare file name is checked against the one project file with
 that name), and `_agent_check_quotes` checks each cited line's backticked
