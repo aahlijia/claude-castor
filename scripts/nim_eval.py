@@ -81,7 +81,8 @@ DEFAULT_WINDOW = 10
 # without a patch counts as refused only on a Castor refusal (see
 # edit_refused); any other failure is an error row. A must_cover case
 # under dekko=off is "needs dekko", left out of the correct K/N count.
-SCORING_VERSION = 4
+# 5: a failed repair run or a stalled answer is an error row as well.
+SCORING_VERSION = 5
 ROLE_STEPS = {
     "review": "NIM_REVIEW_STEPS",
     "scout": "NIM_SCOUT_STEPS",
@@ -102,6 +103,12 @@ EDIT_INPUT_REFUSALS = (
     "[Error: invalid must_cover symbol:",
 )
 EDIT_CWD_REFUSAL = ("[Error: cwd ", " is not a directory.]")
+# A refusal that hides a failed run is an error row too: the repair round's
+# NIM request failed (server._edit_repair adds this line), or an answer was
+# cut off by a stall (the note server._nim_cut_short appends), which can
+# truncate a block into a refusal.
+REPAIR_FAILED_LINE = "- repair run failed:"
+CUT_OFF_NOTE = "[Note: response cut off "
 # Score keys a row loses when it turns out to be an error.
 EDIT_SCORE_KEYS = (
     "correct",
@@ -350,11 +357,31 @@ def edit_failure(text: str) -> str:
     return f"nim_edit failed: {first[:300]}"
 
 
-def _as_error_row(row: dict, text: str) -> None:
+def edit_run_failure(
+    text: str, patched: bool, raw_answers: list[str]
+) -> str | None:
+    """Why an edit run is an error row instead of a scored one, or None.
+
+    Args:
+        text: nim_edit's result text.
+        patched: Whether the run produced a patch.
+        raw_answers: The model answers nim_edit parsed during the run.
+    """
+    for line in text.splitlines():
+        if line.startswith(REPAIR_FAILED_LINE):
+            return f"nim_edit failed: {line[2:302]}"
+    if any(CUT_OFF_NOTE in answer for answer in raw_answers):
+        return "nim_edit failed: an answer was cut off by a stall"
+    if not patched and not edit_refused(text):
+        return edit_failure(text)
+    return None
+
+
+def _as_error_row(row: dict, message: str) -> None:
     """Turn a scored edit row into an error row in place."""
     for key in EDIT_SCORE_KEYS:
         row.pop(key, None)
-    row["error"] = edit_failure(text)
+    row["error"] = message
 
 
 def score_edit(case: dict, outcome: dict) -> dict:
@@ -546,7 +573,7 @@ def run_edit_case(case: dict, config: dict, server: ModuleType) -> dict:
         source = snapshot(case, server)
         tmp = Path(tempfile.mkdtemp(prefix="nim-edit-eval-"))
         try:
-            row = _run_edit_case(case, config, server, source, tmp)
+            row = _run_edit_case(case, config, server, source, tmp, answers)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     row["raw_answers"] = list(answers)
@@ -558,7 +585,12 @@ class EditCaseError(Exception):
 
 
 def _run_edit_case(
-    case: dict, config: dict, server: ModuleType, source: Path, tmp: Path
+    case: dict,
+    config: dict,
+    server: ModuleType,
+    source: Path,
+    tmp: Path,
+    answers: list[str],
 ) -> dict:
     work, expected = tmp / "work", tmp / "expected"
     try:
@@ -576,8 +608,9 @@ def _run_edit_case(
         getattr(server, ROLE_STEPS["edit"], None),
     )
     seconds = round(time.monotonic() - started, 1)
-    if stats.get("outcome") != "patch" and not edit_refused(text):
-        row = _edit_error(case, config, edit_failure(text))
+    failure = edit_run_failure(text, stats.get("outcome") == "patch", answers)
+    if failure is not None:
+        row = _edit_error(case, config, failure)
         row.update(scoring=SCORING_VERSION, seconds=seconds, answer=text)
         return row
     facts = _edit_facts(case, work, expected, reference, stats)
@@ -851,9 +884,17 @@ def _rescore_edit(row: dict, case: dict) -> None:
     """Score a saved edit row again; a failed run becomes an error row.
 
     Rows from scorer 3 and older set facts["refused"] for any run without
-    a patch, so a refusal is re-read from the answer text. A must_cover
-    case run under dekko=off becomes a "needs dekko" row.
+    a patch, so a refusal is re-read from the answer text. A failed
+    repair run or a stalled answer (edit_run_failure) also makes an error
+    row. A must_cover case run under dekko=off becomes a "needs dekko" row.
     """
+    failure = None
+    if "facts" in row:
+        failure = edit_run_failure(
+            row["answer"],
+            not row["facts"]["refused"],
+            row.get("raw_answers") or [],
+        )
     if needs_dekko(case, row.get("dekko")):
         for key in EDIT_SCORE_KEYS:
             row.pop(key, None)
@@ -861,8 +902,8 @@ def _rescore_edit(row: dict, case: dict) -> None:
         row["needs_dekko"] = True
     elif "facts" not in row:
         return
-    elif row["facts"]["refused"] and not edit_refused(row["answer"]):
-        _as_error_row(row, row["answer"])
+    elif failure is not None:
+        _as_error_row(row, failure)
     else:
         row.update(score_edit(case, row["facts"]), role="edit")
     row["scoring"] = SCORING_VERSION
