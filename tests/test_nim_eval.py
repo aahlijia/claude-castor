@@ -535,6 +535,67 @@ def test_rescore_turns_an_old_failed_run_into_an_error_row(tmp_path):
     assert kept["correct"] is True and "error" not in kept
 
 
+def test_must_cover_case_under_dekko_off_needs_dekko(tmp_path, capsys):
+    case, server = _edit_fixture(tmp_path, "two")
+    case["must_cover"] = ["f"]
+
+    def no_run(*_a):
+        raise AssertionError("nim_edit must not run")
+
+    server._run_nim_edit = no_run
+    off = {"label": "off", "model": None, "dekko": False}
+    row = nim_eval.run_edit_case(case, off, server)
+    assert row["needs_dekko"] is True and "error" not in row
+    assert "correct" not in row
+    patched = {
+        "config": "off",
+        "role": "edit",
+        "case": "p",
+        "expect": "patch",
+        "correct": True,
+        "clean_error": False,
+        "wrong_applies": False,
+        "out_of_scope": 0,
+        "seconds": 5.0,
+        "steps": 2,
+    }
+    line = nim_eval.summarize([row, patched], "off")
+    assert "correct 1/1" in line and "needs_dekko 1" in line
+    assert "errors 0" in line
+    nim_eval.report([row], ["off"])
+    assert "e" in capsys.readouterr().out.split("needs dekko")[0]
+
+
+def test_must_cover_case_runs_with_dekko_on(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    case["must_cover"] = ["f"]
+    on = {"label": "on", "model": None, "dekko": True}
+    server._dekko_ensure_map = lambda _root: True
+    assert nim_eval.run_edit_case(case, on, server)["correct"]
+
+
+def test_rescore_marks_an_old_dekko_off_must_cover_row(tmp_path):
+    case = {"name": "e", "role": "edit", "must_cover": ["f"]}
+    saved = tmp_path / "results.json"
+    row = {
+        "case": "e",
+        "config": "off",
+        "dekko": False,
+        "role": "edit",
+        "answer": "[Error: must_cover needs the dekko map]",
+        "facts": {**_facts(refused=True), "touched_paths": []},
+        "clean_error": True,
+        "seconds": 1.0,
+        "steps": 0,
+    }
+    row["facts"]["reference_paths"] = []
+    saved.write_text(json.dumps([row]))
+    nim_eval.rescore(saved, [case])
+    (kept,) = json.loads(saved.read_text())
+    assert kept["needs_dekko"] is True
+    assert "clean_error" not in kept and "error" not in kept
+
+
 def test_summarize_edit_counts_error_rows():
     rows = [
         {"config": "a", "role": "edit", "case": "x", "error": "boom"},
