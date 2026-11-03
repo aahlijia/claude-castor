@@ -203,3 +203,17 @@
   M6-nrm-sign found once with dekko off, not with it on). Speed is
   load-dependent; both configs shared the hour.
 - **Rejected:** shipping dekko off by default (no measured loss to justify it).
+
+### 2026-11-03: Review context keeps grep for call sites (0c gate failed)
+- **Why:** review cases (1 castor + 5 NQC), Super, 2 runs, all in one window,
+  dekko agent tools on in both: dekko-sourced `_review_uses` recall 8/44,
+  must-catch 6/12, precision 26%, median 70 s; grep-sourced recall 12/44,
+  must-catch 6/12, precision 28%, 71 s. Recall dropped and time did not
+  fall. Part of the gap is one long grep-context run on nqc-11d2-3a (28
+  leads), so it may be noise, but nothing showed a gain. Reverted
+  (c8d5d29, bca5f83). Results: `results-20261103-080727.json` (dekko
+  context, with an on/off pair) and `results-20261103-080211.json` (grep
+  context).
+- **Note:** the plan's on/off comparison mixed agent tools and review
+  context; the gate compared dekko-on runs of the two servers instead.
+- **Rejected:** keeping it on the 0b gate's strength (different change).
