@@ -305,68 +305,6 @@ def _run_agent_case(case: dict, config: dict, server: ModuleType) -> dict:
     return result
 
 
-GIT_ESCAPES = {
-    "a": 7,
-    "b": 8,
-    "f": 12,
-    "n": 10,
-    "r": 13,
-    "t": 9,
-    "v": 11,
-    "\\": 92,
-    '"': 34,
-}
-OCTAL_RE = re.compile(r"[0-7]{3}")
-HEADER_PREFIX = "diff --git "
-
-
-def unquote_path(raw: str) -> str:
-    """A path as git prints it: C-style quoted when it needs escaping."""
-    if not (len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"'):
-        return raw
-    body, out, i = raw[1:-1], bytearray(), 0
-    while i < len(body):
-        char = body[i]
-        octal = OCTAL_RE.match(body, i + 1) if char == "\\" else None
-        if octal:
-            out.append(int(octal.group(), 8))
-            i += 4
-        elif char == "\\" and i + 1 < len(body):
-            out.append(GIT_ESCAPES.get(body[i + 1], ord(body[i + 1])))
-            i += 2
-        else:
-            out.extend(char.encode())
-            i += 1
-    return out.decode("utf-8", errors="replace")
-
-
-def _header_paths(rest: str) -> list[str]:
-    """The a/ and b/ paths of one `diff --git` header, prefixes removed."""
-    if rest.startswith('"'):
-        end = rest.find('" ', 1)
-        while end != -1 and rest[end - 1] == "\\":
-            end = rest.find('" ', end + 1)
-        if end == -1:
-            return []
-        halves = [rest[: end + 1], rest[end + 2 :]]
-    else:
-        half = (len(rest) - 3) // 2
-        halves = [rest[:half], rest[half + 1 :]]
-        if halves[0][2:] != halves[1][2:]:  # a rename: split at the last b/
-            cut = rest.rfind(" b/")
-            halves = [rest[:cut], rest[cut + 1 :]] if cut > 0 else halves
-    return [unquote_path(h)[2:] for h in halves]
-
-
-def diff_paths(diff: str) -> set[str]:
-    """Every path a unified diff touches, from its `diff --git` headers."""
-    paths: set[str] = set()
-    for line in diff.splitlines():
-        if line.startswith(HEADER_PREFIX):
-            paths.update(_header_paths(line[len(HEADER_PREFIX) :]))
-    return paths
-
-
 def score_edit(case: dict, outcome: dict) -> dict:
     """Bucket one edit run: correct, clean_error or wrong_applies.
 
@@ -409,9 +347,47 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 
 def _commit_base(root: Path) -> None:
-    """Commit the copy's files so `git apply --check` has a base."""
-    _git(["add", "-A"], root)
-    _git(["commit", "-q", "-m", "base"], root)
+    """Make the copy a repo with one commit so `git apply` has a base."""
+    steps = [["add", "-A"], ["commit", "-q", "-m", "base"]]
+    if not (root / ".git").exists():
+        steps.insert(0, ["init", "-q"])
+    for args in steps:
+        done = _git(args, root)
+        if done.returncode:
+            raise EditCaseError(f"git {args[0]} failed: {done.stderr.strip()}")
+
+
+def numstat_paths(diff: Path, cwd: Path) -> set[str]:
+    """Every path a diff touches, as `git apply --numstat -z` reports it.
+
+    A rename lists both its old and new path (the old one is read from the
+    `rename from` line, so a quoted old path keeps its quotes). An
+    unreadable diff gives an empty set.
+    """
+    done = subprocess.run(
+        ["git", "apply", "--numstat", "-z", str(diff)],
+        cwd=cwd,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+    if done.returncode:
+        return set()
+    tokens = done.stdout.decode("utf-8", errors="replace").split("\0")
+    paths: set[str] = set()
+    i = 0
+    while i < len(tokens) and tokens[i]:
+        path = tokens[i].split("\t", 2)[-1]
+        if path:
+            paths.add(path)
+            i += 1
+        else:  # rename: the record ends at the tab, old and new follow
+            paths.update(tokens[i + 1 : i + 3])
+            i += 3
+    # numstat names only the destination of a rename; add the source.
+    for line in diff.read_text(errors="replace").splitlines():
+        if line.startswith("rename from "):
+            paths.add(line[len("rename from ") :])
+    return paths
 
 
 def _trees_equal(work: Path, expected: Path, paths: set[str]) -> bool:
@@ -445,6 +421,7 @@ def _edit_error(case: dict, config: dict, message: str) -> dict:
         "case": case["name"],
         "config": config["label"],
         "dekko": config.get("dekko"),
+        "role": "edit",
         "error": message,
     }
 
@@ -460,19 +437,18 @@ def run_edit_case(case: dict, config: dict, server: ModuleType) -> dict:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class EditCaseError(Exception):
+    """A case that cannot be scored (bad reference, broken copy)."""
+
+
 def _run_edit_case(
     case: dict, config: dict, server: ModuleType, source: Path, tmp: Path
 ) -> dict:
     work, expected = tmp / "work", tmp / "expected"
-    for root in (work, expected):
-        shutil.copytree(source, root, symlinks=True)
-        _commit_base(root)
-    reference = (Path(case["_base"]) / case["reference_diff"]).resolve()
-    applied = _git(["apply", str(reference)], expected)
-    if applied.returncode:
-        return _edit_error(
-            case, config, f"reference diff does not apply: {applied.stderr}"
-        )
+    try:
+        reference = _prepare_copies(case, source, work, expected)
+    except EditCaseError as exc:
+        return _edit_error(case, config, str(exc))
     _prepare_dekko(config, work, server)
     started = time.monotonic()
     text, stats = server._run_nim_edit(
@@ -505,11 +481,46 @@ def _run_edit_case(
     return result
 
 
+def _prepare_copies(
+    case: dict, source: Path, work: Path, expected: Path
+) -> Path | None:
+    """Copy the snapshot twice, commit both, apply the reference diff.
+
+    Returns:
+        The reference diff's path, or None for a refuse case without one.
+
+    Raises:
+        EditCaseError: When a copy cannot be committed, a patch case has no
+            reference, or the reference touches nothing or fails to apply.
+    """
+    name = case.get("reference_diff")
+    if name is None and case.get("expect") != "refuse":
+        raise EditCaseError("patch case has no reference_diff")
+    for root in (work, expected):
+        shutil.copytree(source, root, symlinks=True)
+        _commit_base(root)
+    if name is None:
+        return None
+    reference = (Path(case["_base"]) / name).resolve()
+    if not numstat_paths(reference, expected):
+        raise EditCaseError("reference diff touches no files")
+    applied = _git(["apply", str(reference)], expected)
+    if applied.returncode:
+        raise EditCaseError(
+            f"reference diff does not apply: {applied.stderr.strip()}"
+        )
+    return reference
+
+
 def _edit_facts(
-    case: dict, work: Path, expected: Path, reference: Path, stats: dict
+    case: dict,
+    work: Path,
+    expected: Path,
+    reference: Path | None,
+    stats: dict,
 ) -> dict:
     """Apply NIM's patch in the work copy and gather what scoring needs."""
-    reference_paths = diff_paths(reference.read_text())
+    reference_paths = numstat_paths(reference, work) if reference else set()
     facts: dict[str, Any] = {
         "expect": case.get("expect", "patch"),
         "refused": stats.get("outcome") != "patch",
@@ -523,13 +534,17 @@ def _edit_facts(
     if facts["refused"]:
         return facts
     patch = Path(stats["patch"])
-    facts["touched_paths"] = diff_paths(patch.read_text())
-    if _git(["apply", str(patch)], work).returncode:
+    facts["touched_paths"] = numstat_paths(patch, work)
+    if (
+        not facts["touched_paths"]
+        or _git(["apply", str(patch)], work).returncode
+    ):
         facts["apply_failed"] = True
         return facts
-    facts["trees_equal"] = _trees_equal(
-        work, expected, facts["touched_paths"] | reference_paths
-    )
+    if reference:
+        facts["trees_equal"] = _trees_equal(
+            work, expected, facts["touched_paths"] | reference_paths
+        )
     if case.get("check"):
         facts["check_passed"] = _run_check(case["check"], work)
     return facts
@@ -616,11 +631,7 @@ def summarize(results: list[dict], label: str) -> str:
     Precision covers agent roles only; plain roles have no leads.
     """
     edits = [
-        r
-        for r in results
-        if r["config"] == label
-        and r.get("role") == "edit"
-        and "error" not in r
+        r for r in results if r["config"] == label and r.get("role") == "edit"
     ]
     rows = [r for r in results if r["config"] == label and "leads" in r]
     if edits:
@@ -632,7 +643,11 @@ def summarize(results: list[dict], label: str) -> str:
 
 
 def summarize_edit(rows: list[dict], label: str) -> str:
-    """One table row for a configuration's edit runs."""
+    """One table row for a configuration's edit runs (errors counted)."""
+    errors = sum("error" in r for r in rows)
+    rows = [r for r in rows if "error" not in r]
+    if not rows:
+        return f"{label:<24} edit no completed runs  errors {errors}"
     patch = [r for r in rows if r.get("expect", "patch") != "refuse"]
     refuse = [r for r in rows if r.get("expect") == "refuse"]
     right = sum(r["correct"] for r in patch)
@@ -645,7 +660,8 @@ def summarize_edit(rows: list[dict], label: str) -> str:
         f"out_of_scope {sum(r['out_of_scope'] for r in rows)}  "
         f"refusals refused {sum(r['correct'] for r in refuse)}/{len(refuse)}  "
         f"{statistics.median(r['seconds'] for r in rows):>4.0f}s  "
-        f"{statistics.median(steps) if steps else 0:.1f} steps"
+        f"{statistics.median(steps) if steps else 0:.1f} steps  "
+        f"errors {errors}"
     )
 
 
