@@ -6926,5 +6926,195 @@ def _parse_edit_blocks(answer: str) -> tuple[list[EditBlock], list[str]]:
             errors.append(error)
 
 
+@dataclass
+class FileEdit:
+    """One file's edit: original text, new text and the replaced line ranges.
+
+    `spans` are 1-based inclusive line ranges in the original, one per block.
+    """
+
+    path: Path
+    relative: str
+    original: str
+    new: str
+    spans: list[tuple[int, int]]
+
+
+_EDIT_PATH_ERRORS = {
+    "path is outside the project": "outside cwd",
+    "path is off limits (secrets and .git)": "denied",
+}
+
+
+def _edit_in_scope(path: Path, root: Path, scope: list[str] | None) -> bool:
+    """True when `path` is an entry of `scope` or inside an entry directory."""
+    if scope is None:
+        return True
+
+    for entry in scope:
+        try:
+            base = (root / entry).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path == base or path.is_relative_to(base):
+            return True
+
+    return False
+
+
+def _edit_check_path(
+    raw: str, root: Path, scope: list[str] | None
+) -> tuple[Path | None, str | None]:
+    """Resolve an edit target: (path, None) or (None, reason).
+
+    Reasons: outside cwd, denied, invalid path, outside scope, file
+    creation is not supported, binary file, not UTF-8.
+    """
+    path, error = _agent_resolve(root, raw)
+    if error or path is None:
+        return None, _EDIT_PATH_ERRORS.get(error or "", "invalid path")
+
+    if not _edit_in_scope(path, root, scope):
+        return None, "outside scope"
+
+    data = _read_bytes(path) if path.is_file() else None
+    if data is None:
+        return None, "file creation is not supported"
+
+    if _is_binary_bytes(data):
+        return None, "binary file"
+
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "not UTF-8"
+
+    return path, None
+
+
+def _edit_find_all(text: str, needle: str) -> list[int]:
+    """Start offsets of every occurrence of `needle`, overlaps included."""
+    found: list[int] = []
+    at = text.find(needle)
+    while at != -1:
+        found.append(at)
+        at = text.find(needle, at + 1)
+
+    return found
+
+
+def _edit_span(text: str, start: int, old: str) -> tuple[int, int]:
+    """1-based inclusive line range of `old` matched at offset `start`."""
+    first = text.count("\n", 0, start) + 1
+    inside = old.count("\n") - (1 if old.endswith("\n") else 0)
+    return first, first + inside
+
+
+def _edit_locate(
+    text: str,
+    block: EditBlock,
+    rel: str,
+    taken: list[tuple[int, int, int]],
+) -> tuple[tuple[int, int, str] | None, str | None]:
+    """Match one block in `text`: ((start, end, new), None) or (None, error).
+
+    `taken` holds (start, end, index) of the file's earlier accepted blocks.
+    """
+    crlf = "\r\n" in text
+    old = block.old.replace("\n", "\r\n") if crlf else block.old
+    new = block.new.replace("\n", "\r\n") if crlf else block.new
+    if not old:
+        return None, "old text is empty"
+
+    hits = _edit_find_all(text, old)
+    if not hits:
+        return None, f"old text not found in {rel}"
+
+    if len(hits) > 1:
+        return None, f"old text matches {len(hits)} times in {rel}"
+
+    start = hits[0]
+    end = start + len(old)
+    for other_start, other_end, other_index in taken:
+        if start < other_end and other_start < end:
+            return None, f"overlaps block {other_index} in {rel}"
+
+    return (start, end, new), None
+
+
+def _edit_splice(text: str, parts: list[tuple[int, int, str]]) -> str:
+    """Apply (start, end, new) replacements to `text` by offset in one pass."""
+    out: list[str] = []
+    pos = 0
+    for start, end, new in sorted(parts):
+        out.append(text[pos:start])
+        out.append(new)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _edit_apply_in_memory(
+    blocks: list[EditBlock], root: Path, scope: list[str] | None
+) -> tuple[dict[Path, FileEdit], list[str]]:
+    """Check every block against the real files and apply them in memory.
+
+    Each old text must occur exactly once in the original file, and blocks
+    on one file must not overlap. CRLF files get the block's newlines
+    converted before matching. Every error is reported; `changes` holds
+    only files where all blocks succeeded.
+
+    Args:
+        blocks: Parsed edit blocks.
+        root: Resolved project root.
+        scope: Relative files or directories blocks may touch; None for all.
+
+    Returns:
+        (changes keyed by resolved path, errors like "block 3: ...").
+    """
+    texts: dict[Path, str] = {}
+    errors: list[tuple[int, str]] = []
+    placed: dict[Path, list[tuple[int, int, str]]] = {}
+    taken: dict[Path, list[tuple[int, int, int]]] = {}
+    spans: dict[Path, list[tuple[int, int]]] = {}
+    failed: set[Path] = set()
+    for block in blocks:
+        path, error = _edit_check_path(block.path, root, scope)
+        if error or path is None:
+            errors.append((block.index, f"block {block.index}: {error}"))
+            continue
+
+        if path not in texts:
+            texts[path] = (_read_bytes(path) or b"").decode("utf-8")
+        rel = path.relative_to(root).as_posix()
+        hit, error = _edit_locate(
+            texts[path], block, rel, taken.setdefault(path, [])
+        )
+        if error or hit is None:
+            errors.append((block.index, f"block {block.index}: {error}"))
+            failed.add(path)
+            continue
+
+        start, end, _ = hit
+        placed.setdefault(path, []).append(hit)
+        taken[path].append((start, end, block.index))
+        spans.setdefault(path, []).append(
+            _edit_span(texts[path], start, texts[path][start:end])
+        )
+
+    changes = {
+        path: FileEdit(
+            path,
+            path.relative_to(root).as_posix(),
+            texts[path],
+            _edit_splice(texts[path], parts),
+            spans[path],
+        )
+        for path, parts in placed.items()
+        if path not in failed
+    }
+    return changes, [message for _, message in sorted(errors)]
+
+
 if __name__ == "__main__":
     mcp.run()

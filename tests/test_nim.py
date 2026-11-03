@@ -2387,6 +2387,146 @@ def test_parse_edit_blocks_reports_missing_path():
     assert [b.index for b in blocks] == [2]
 
 
+def _blk(index, path, old, new):
+    return server.EditBlock(index, path, old, new)
+
+
+def test_apply_replaces_exactly_once(repo):
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", "TARGET = 1", "TARGET = 2")], repo, None
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "a.py"]
+    assert edit.new == "one\nTARGET = 2\nthree\n"
+    assert edit.original == "one\nTARGET = 1\nthree\n"
+    assert edit.relative == "src/a.py"
+    assert edit.spans == [(2, 2)]
+
+
+def test_apply_rejects_missing_and_duplicate_old_text(repo):
+    (repo / "src" / "d.py").write_text("x\nx\n")
+    changes, errors = server._edit_apply_in_memory(
+        [
+            _blk(3, "src/a.py", "nope", "y"),
+            _blk(4, "src/d.py", "x", "y"),
+            _blk(5, "src/a.py", "", "y"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == [
+        "block 3: old text not found in src/a.py",
+        "block 4: old text matches 2 times in src/d.py",
+        "block 5: old text is empty",
+    ]
+    assert changes == {}
+
+
+def test_apply_counts_overlapping_occurrences(repo):
+    (repo / "src" / "d.py").write_text("aaa")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "aa", "b")], repo, None
+    )
+    assert errors == ["block 1: old text matches 2 times in src/d.py"]
+
+
+def test_apply_rejects_out_of_scope_denied_and_escaping_paths(repo):
+    (repo / "README.md").write_text("TARGET\n")
+    (repo / "src" / "link.txt").symlink_to(repo.parent / "outside.txt")
+    blocks = [
+        _blk(1, "README.md", "TARGET", "x"),
+        _blk(2, ".env", "TARGET", "x"),
+        _blk(3, "../outside.txt", "TARGET", "x"),
+        _blk(4, "src/link.txt", "TARGET", "x"),
+    ]
+    _, errors = server._edit_apply_in_memory(blocks, repo, ["src"])
+    assert errors == [
+        "block 1: outside scope",
+        "block 2: denied",
+        "block 3: outside cwd",
+        "block 4: outside cwd",
+    ]
+    _, errors = server._edit_apply_in_memory(blocks[:1], repo, ["./src/a.py"])
+    assert errors == ["block 1: outside scope"]
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", "TARGET = 1", "x")], repo, ["./src/"]
+    )
+    assert errors == [] and len(changes) == 1
+
+
+def test_apply_rejects_overlapping_blocks_even_when_paths_differ_in_form(repo):
+    changes, errors = server._edit_apply_in_memory(
+        [
+            _blk(2, "./src/a.py", "TARGET = 1", "TARGET = 2"),
+            _blk(4, "src/a.py", "TARGET", "OTHER"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == ["block 4: overlaps block 2 in src/a.py"]
+    assert changes == {}
+
+
+def test_apply_applies_several_blocks_in_one_pass(repo):
+    changes, errors = server._edit_apply_in_memory(
+        [
+            _blk(1, "src/a.py", "three", "3\n3"),
+            _blk(2, "src/a.py", "one", "1"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "a.py"]
+    assert edit.new == "1\nTARGET = 1\n3\n3\n"
+    assert sorted(edit.spans) == [(1, 1), (3, 3)]
+
+
+def test_apply_keeps_crlf(repo):
+    (repo / "src" / "b.py").write_bytes(b"a\r\nTARGET = 1\r\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/b.py", "a\nTARGET = 1", "a\nTARGET = 2\nz")], repo, None
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "b.py"]
+    assert edit.new.encode() == b"a\r\nTARGET = 2\r\nz\r\n"
+    assert edit.spans == [(1, 2)]
+
+
+def test_apply_handles_non_ascii(repo):
+    text = "café\nnaïve “quote”\nend\n"
+    (repo / "src" / "u.py").write_bytes(text.encode())
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/u.py", "naïve “quote”", "plain")],
+        repo,
+        None,
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "u.py"]
+    assert edit.new.encode() == "café\nplain\nend\n".encode()
+    assert edit.original.encode() == text.encode()
+
+
+def test_apply_refuses_new_files_binary_and_bad_utf8(repo):
+    (repo / "src" / "bad.txt").write_bytes(b"caf\xe9 TARGET\n")
+    _, errors = server._edit_apply_in_memory(
+        [
+            _blk(1, "src/new.py", "x", "y"),
+            _blk(2, "src/blob.bin", "TARGET", "y"),
+            _blk(3, "src", "x", "y"),
+            _blk(4, "src/bad.txt", "TARGET", "y"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == [
+        "block 1: file creation is not supported",
+        "block 2: binary file",
+        "block 3: file creation is not supported",
+        "block 4: not UTF-8",
+    ]
+
+
 def test_main_guard_is_the_last_top_level_statement():
     import ast
 
