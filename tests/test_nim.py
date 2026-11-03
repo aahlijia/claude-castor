@@ -635,6 +635,8 @@ def test_all_nim_tools_registered():
         "nim_first_pass_review_start",
         "nim_triage_log",
         "nim_triage_log_start",
+        "nim_edit",
+        "nim_edit_start",
     } <= names
 
 
@@ -2787,3 +2789,326 @@ def test_main_guard_is_the_last_top_level_statement():
     last = tree.body[-1]
     assert isinstance(last, ast.If)
     assert ast.unparse(last.test) == "__name__ == '__main__'"
+
+
+# --- nim_edit (check, repair, patch) ----------------------------------------
+
+
+def _edit_answer(*blocks):
+    """An answer with one edit block per (path, old, new)."""
+    parts = [
+        f"<<<EDIT {path}\n<<<OLD\n{old}\n>>>NEW\n{new}\n>>>END"
+        for path, old, new in blocks
+    ]
+    return "\n".join(parts)
+
+
+_GOOD_EDIT = _edit_answer(("src/a.py", "TARGET = 1", "TARGET = 2"))
+_BAD_EDIT = _edit_answer(("src/a.py", "TARGET = 9", "TARGET = 2"))
+
+
+def _git_init(root):
+    """Turn the `repo` fixture into a real git repo with one commit."""
+    import shutil
+
+    shutil.rmtree(root / ".git")
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "init"],
+    ):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True)
+
+
+def _patches():
+    folder = server._cache_dir() / server.NIM_EDIT_PATCH_DIR
+    return sorted(folder.glob("*.diff")) if folder.is_dir() else []
+
+
+def _answers(stub, *texts):
+    for text in texts:
+        stub.queue.append((200, {}, _completion(text)))
+
+
+def test_nim_edit_returns_a_checked_patch(stub, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    (patch,) = _patches()
+    assert lines[1] == f"patch: {patch}"
+    assert patch.is_absolute()
+    assert lines[2] == f"base: {server._repo_fingerprint(str(repo))}"
+    assert lines[3] == "checked: git apply --check passed"
+    assert "-TARGET = 1\n+TARGET = 2\n" in out
+    assert patch.read_text() == "\n".join(lines[4:])
+    assert (repo / "src" / "a.py").read_text() == "one\nTARGET = 1\nthree\n"
+    assert len(stub.posts()) == 1
+    request = stub.posts()[0][3]
+    assert "<<<EDIT" in request["messages"][0]["content"]
+    assert "set TARGET to 2" in request["messages"][1]["content"]
+
+
+def test_nim_edit_outside_git_is_not_checked(stub, tmp_path):
+    plain = tmp_path / "plain"
+    (plain / "src").mkdir(parents=True)
+    (plain / "src" / "a.py").write_text("one\nTARGET = 1\nthree\n")
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(plain))
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    assert lines[2] == "base: none"
+    assert lines[3] == "checked: not checked by git (apply with patch -p1)"
+
+
+def test_nim_edit_repairs_once_then_succeeds(stub, repo):
+    _git_init(repo)
+    _answers(stub, _BAD_EDIT, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: yes]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 2
+    repair = posts[1][3]["messages"][1]["content"]
+    assert "set TARGET to 2" in repair
+    assert "TARGET = 9" in repair
+    assert "block 1: old text not found in src/a.py" in repair
+    assert len(_patches()) == 1
+
+
+def test_nim_edit_refuses_after_failed_repair(stub, repo):
+    _answers(stub, _BAD_EDIT, _BAD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 1: old text not found in src/a.py",
+    ]
+    assert len(stub.posts()) == 2
+    assert _patches() == []
+
+
+def test_nim_edit_refuses_an_answer_without_blocks(stub, repo):
+    _answers(stub, "I could not find it.", "Still nothing.")
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- no edit blocks in the answer",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_enforces_the_files_scope(stub, repo):
+    (repo / "docs").mkdir()
+    (repo / "docs" / "x.md").write_text("TARGET\n")
+    _answers(stub, _GOOD_EDIT, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET", str(repo), files=["docs"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 1: outside scope",
+    ]
+    assert "docs" in stub.posts()[0][3]["messages"][1]["content"]
+    assert _patches() == []
+
+
+def _cover_repo(repo):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "use.py").write_text(
+        "def go():\n    return old_name() + 1\n\n\n"
+        "def stay():\n    return old_name() + 2\n"
+    )
+
+
+def _cover_dekko():
+    callers = {
+        "results": [
+            {"path": "src/use.py", "id": "src/use.py::go", "sites": [2]},
+            {"path": "src/use.py", "id": "src/use.py::stay", "sites": [6]},
+        ]
+    }
+    symbol = {"path": "src/lib.py", "line": 1}
+    return [
+        (True, json.dumps(callers)),
+        (True, json.dumps(symbol)),
+        (True, json.dumps(symbol)),
+    ]
+
+
+def test_nim_edit_must_cover_flags_an_unedited_site(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    answer = _edit_answer(
+        ("src/lib.py", "def old_name():", "def new_name():"),
+        ("src/use.py", "old_name() + 1", "new_name() + 1"),
+    )
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- call site src/use.py:6 of old_name not edited",
+    ]
+    assert "old_name" in stub.posts()[0][3]["messages"][1]["content"]
+    assert _patches() == []
+
+
+def test_nim_edit_must_cover_flags_an_unedited_definition(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    answer = _edit_answer(
+        ("src/use.py", "old_name() + 1", "new_name() + 1"),
+        ("src/use.py", "old_name() + 2", "new_name() + 2"),
+    )
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- definition src/lib.py:1 of old_name not edited",
+    ]
+
+
+def test_nim_edit_must_cover_passes_when_every_site_is_edited(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    answer = _edit_answer(
+        ("src/lib.py", "def old_name():", "def new_name():"),
+        ("src/use.py", "old_name() + 1", "new_name() + 1"),
+        ("src/use.py", "old_name() + 2", "new_name() + 2"),
+    )
+    _answers(stub, answer)
+    out = _tool(server.nim_edit)(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 3 blocks, repair round: no]"
+    )
+
+
+def test_nim_edit_must_cover_dekko_failure_is_an_error(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), (False, "[dekko error: boom]")]
+    fake_dekko.queue += [(False, "[dekko error: boom]")]
+    answer = _edit_answer(("src/lib.py", "def old_name():", "def new():"))
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- must_cover: dekko could not list callers of old_name",
+    ]
+
+
+def test_nim_edit_must_cover_needs_dekko(stub, repo):
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["x"])
+    assert out == "[Error: must_cover needs the dekko map]"
+    assert not stub.posts()
+
+
+def test_nim_edit_must_cover_needs_a_map_that_builds(stub, repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["x"])
+    assert out == "[Error: must_cover needs the dekko map]"
+    assert not stub.posts()
+
+
+def test_nim_edit_rejects_a_flag_like_must_cover_symbol(
+    stub, repo, fake_dekko
+):
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["-x"])
+    assert out == "[Error: invalid must_cover symbol: -x]"
+    assert not stub.posts() and not fake_dekko.calls
+
+
+def test_nim_edit_rejects_bad_input(stub, repo, tmp_path):
+    edit = _tool(server.nim_edit)
+    assert edit("  ", str(repo)) == "[Error: task is empty.]"
+    assert edit("t", str(tmp_path / "nope")).startswith("[Error: cwd ")
+    assert edit("t", str(repo), files=["-x"]) == (
+        "[Error: invalid files entry: -x]"
+    )
+    assert edit("t", str(repo), must_cover=[""]) == (
+        "[Error: invalid must_cover symbol: ]"
+    )
+    assert not stub.posts()
+
+
+def test_nim_edit_refuses_an_oversized_patch(stub, repo, monkeypatch):
+    _git_init(repo)
+    monkeypatch.setattr(server, "NIM_REVIEW_MAX_DIFF_CHARS", 10)
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED]",
+        "- patch too large for a mechanical edit (1 files, +1 -1 lines)",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_refuses_a_failed_git_check(stub, repo, monkeypatch):
+    _git_init(repo)
+    monkeypatch.setattr(
+        server,
+        "_edit_make_patch",
+        lambda changes, root: ("diff", False, "error: patch failed"),
+    )
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED]",
+        "- git apply --check failed: error: patch failed",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_reports_a_failed_nim_run(stub, repo):
+    stub.queue.append((401, {}, {"error": "bad key"}))
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.startswith("[") and not out.startswith("[nim_edit: OK")
+    assert _patches() == []
+
+
+def test_nim_edit_writes_a_trace(stub, tmp_path, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    _tool(server.nim_edit)("trace this edit", str(repo))
+    folder = tmp_path / "cache" / "claude-castor" / server.NIM_TRACES_DIR
+    (path,) = folder.glob("*.json")
+    trace = json.loads(path.read_text())
+    assert trace["task_head"] == "trace this edit"
+    assert trace["outcome"] == "patch"
+    assert trace["patch"] == str(_patches()[0])
+    assert (trace["blocks"], trace["files"], trace["repair"]) == (1, 1, False)
+
+
+def test_nim_edit_start_and_poll(stub, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    started = _tool(server.nim_edit_start)("set TARGET to 2", str(repo))
+    job_id = _job_id(started)
+    for _ in range(200):
+        out = _tool(server.gemini_poll)(job_id)
+        if "still running" not in out:
+            break
+        time.sleep(0.05)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+
+
+def test_nim_edit_start_reports_bad_input_at_once(stub, repo):
+    start = _tool(server.nim_edit_start)
+    assert start("rename", str(repo), must_cover=["a b"]) == (
+        "[Error: invalid must_cover symbol: a b]"
+    )
+    assert not stub.posts()

@@ -317,6 +317,7 @@ bulk:
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+| Mechanical edit across files | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
 
 **`nim_first_pass_review` (`/castor:first-pass`) is weak; don't build on it.**
