@@ -6936,8 +6936,12 @@ class EditBlock:
 
 
 def _edit_marker_at(line: str) -> str | None:
-    """The marker a line is, or None. A marker is the whole line."""
-    line = line.removesuffix("\r")
+    """The marker a line is, or None.
+
+    A marker is the whole line, give or take trailing spaces and tabs; a
+    line with leading whitespace is never a marker.
+    """
+    line = line.rstrip(" \t\r")
     if line in _EDIT_MARKERS:
         return line
     if line.startswith(EDIT_MARKER + " "):
@@ -6969,8 +6973,11 @@ def _parse_edit_block(
         return None, f"block {index}: missing path", start + 1
 
     pos = start + 1
-    parts: list[str] = []  # gap before <<<OLD, old text, new text
-    for want in (OLD_MARKER, NEW_MARKER, END_MARKER):
+    at, found = _edit_next_marker(lines, pos)
+    if found == OLD_MARKER:  # text between <<<EDIT and <<<OLD is ignored
+        pos = at + 1
+    parts: list[str] = []  # old text, new text
+    for want in (NEW_MARKER, END_MARKER):
         at, found = _edit_next_marker(lines, pos)
         if found != want:
             error = f"block {index}: missing {want}"
@@ -6978,7 +6985,7 @@ def _parse_edit_block(
         parts.append(_edit_join(lines, pos, at))
         pos = at + 1
 
-    return EditBlock(index, path, parts[1], parts[2]), None, pos
+    return EditBlock(index, path, parts[0], parts[1]), None, pos
 
 
 def _edit_join(lines: list[str], start: int, stop: int) -> str:
@@ -6990,7 +6997,10 @@ def _parse_edit_blocks(answer: str) -> tuple[list[EditBlock], list[str]]:
     """Parse a model answer into edit blocks and parse errors.
 
     A block is `<<<EDIT <path>`, `<<<OLD`, the old text, `>>>NEW`, the new
-    text, `>>>END`. Markers count only as whole lines; text outside blocks
+    text, `>>>END`. `<<<OLD` may be left out: then the old text is every
+    line between `<<<EDIT` and `>>>NEW` (with it, lines before `<<<OLD`
+    are ignored). `>>>NEW` and `>>>END` are required. Markers count only
+    as whole lines, trailing spaces and tabs allowed; text outside blocks
     is ignored. A block with an error is dropped and parsing goes on at
     the next `<<<EDIT`. Block numbers count every `<<<EDIT` from 1.
 
