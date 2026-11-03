@@ -17,7 +17,9 @@ NVIDIA_API_KEY or NVIDIA_API_KEYS must be set. Code is taken read-only
 with `git archive` into ~/.cache/claude-castor/eval/snapshots/, so a case
 can point at another repo without touching its working tree. Keep cases
 for private repos outside this repo (for example under that cache dir).
-Results are written as JSON beside the snapshots.
+Results are written as JSON beside the snapshots. Edit rows keep the raw
+model answers nim_edit parsed (first answer, then any repair answer) in
+`raw_answers`, so a refusal can be diagnosed from the file.
 
 Case fields (JSON list of objects):
     name, role                 "review" | "scout" | "triage" | "explain"
@@ -56,6 +58,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -475,6 +478,45 @@ def _edit_error(case: dict, config: dict, message: str) -> dict:
     }
 
 
+# Raw nim_edit answers seen by the current thread's run (rows run on a
+# thread pool), filled by the wrapper capture_answers installs.
+_answer_capture = threading.local()
+_capture_lock = threading.Lock()
+
+
+def _install_answer_capture(server: ModuleType) -> None:
+    """Wrap server._parse_edit_blocks once so each call's answer is kept.
+
+    The wrapper stays installed and records only while this thread has a
+    run open, so concurrent runs never see each other's answers.
+    """
+    with _capture_lock:
+        real = getattr(server, "_parse_edit_blocks", None)
+        if real is None or getattr(server, "_eval_capture", False):
+            return
+
+        def parse(answer: str) -> Any:
+            bucket = getattr(_answer_capture, "answers", None)
+            if bucket is not None:
+                bucket.append(answer)
+            return real(answer)
+
+        server._parse_edit_blocks = parse
+        server._eval_capture = True
+
+
+@contextlib.contextmanager
+def capture_answers(server: ModuleType) -> Iterator[list[str]]:
+    """Collect the raw answers nim_edit parses during one run."""
+    _install_answer_capture(server)
+    answers: list[str] = []
+    _answer_capture.answers = answers
+    try:
+        yield answers
+    finally:
+        _answer_capture.answers = None
+
+
 def needs_dekko(case: dict, dekko: bool | None) -> bool:
     """True for a must_cover case under a dekko=off configuration."""
     return dekko is False and bool(case.get("must_cover"))
@@ -500,13 +542,15 @@ def run_edit_case(case: dict, config: dict, server: ModuleType) -> dict:
     """
     if needs_dekko(case, config.get("dekko")):
         return _needs_dekko_row(case, config)
-    with dekko_scope(config, server):
+    with dekko_scope(config, server), capture_answers(server) as answers:
         source = snapshot(case, server)
         tmp = Path(tempfile.mkdtemp(prefix="nim-edit-eval-"))
         try:
-            return _run_edit_case(case, config, server, source, tmp)
+            row = _run_edit_case(case, config, server, source, tmp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+    row["raw_answers"] = list(answers)
+    return row
 
 
 class EditCaseError(Exception):
