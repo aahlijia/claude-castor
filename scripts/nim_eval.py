@@ -1,11 +1,13 @@
 """Score Castor's NIM roles and plain tools against cases with known answers.
 
 Each case names a role (review, scout or triage for the agent; explain or
-summarize for plain calls), where its code comes from, and the findings,
-ranges, log lines or key points a good answer holds. The script runs every
-case under every model configuration. Agent answers are scored by their
-path:line citations (lead precision, recall, must-catch hits); plain
-answers by keywords alone (recall of known causes or key points).
+summarize for plain calls; edit for nim_edit), where its code comes from,
+and the findings, ranges, log lines or key points a good answer holds. The
+script runs every case under every model configuration. Agent answers are
+scored by their path:line citations (lead precision, recall, must-catch
+hits); plain answers by keywords alone (recall of known causes or key
+points); edit patches by applying them and comparing the resulting files
+with those of the reference diff.
 
     uv run --with httpx --with fastmcp python scripts/nim_eval.py \\
         scripts/eval/cases.json \\
@@ -19,7 +21,7 @@ Results are written as JSON beside the snapshots.
 
 Case fields (JSON list of objects):
     name, role                 "review" | "scout" | "triage" | "explain"
-                               | "summarize"
+                               | "summarize" | "edit"
     repo, commit, paths        snapshot source (paths limit the archive)
     apply                      optional diff applied to the snapshot
     dir                        or a fixture directory instead of a repo
@@ -29,6 +31,13 @@ Case fields (JSON list of objects):
     error_file, files          explain inputs: a file holding the error
                                text, and source files to inline
     target                     summarize input, relative to the case's code
+    task, files, must_cover    edit inputs: the edit as briefed, the scope
+                               fence, symbols whose uses must be edited
+    reference_diff             edit: the known-good diff, applied to a
+                               second copy to get the expected files
+    check                      edit: optional shell command run in the
+                               patched copy (300 s); pass or fail recorded
+    expect                     edit: "patch" (default) or "refuse"
     expected                   [{id, locations: [{file, lines: [a, b]}],
                                  keywords, window, must}]; plain roles use
                                  keywords only
@@ -42,8 +51,11 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
+import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -62,8 +74,13 @@ DEFAULT_WINDOW = 10
 # Stamped on every result row. Bump it whenever score() or score_plain()
 # changes, so a saved file scored the old way is flagged and re-scored.
 # 1: keyword-gated location matching. 2: plain roles scored by keyword.
-SCORING_VERSION = 2
-ROLE_STEPS = {"review": "NIM_REVIEW_STEPS", "scout": "NIM_SCOUT_STEPS"}
+# 3: edit role scored by patch against reference diff.
+SCORING_VERSION = 3
+ROLE_STEPS = {
+    "review": "NIM_REVIEW_STEPS",
+    "scout": "NIM_SCOUT_STEPS",
+    "edit": "NIM_EDIT_STEPS",
+}
 # Plain tool calls: no agent loop, scored by keywords over the whole answer.
 PLAIN_ROLES = ("explain", "summarize")
 
@@ -243,6 +260,8 @@ def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one case under one configuration and score it."""
     if case["role"] in PLAIN_ROLES:
         return run_plain(case, config, server)
+    if case["role"] == "edit":
+        return run_edit_case(case, config, server)
     with dekko_scope(config, server):
         return _run_agent_case(case, config, server)
 
@@ -284,6 +303,236 @@ def _run_agent_case(case: dict, config: dict, server: ModuleType) -> dict:
         answer=text,
     )
     return result
+
+
+GIT_ESCAPES = {
+    "a": 7,
+    "b": 8,
+    "f": 12,
+    "n": 10,
+    "r": 13,
+    "t": 9,
+    "v": 11,
+    "\\": 92,
+    '"': 34,
+}
+OCTAL_RE = re.compile(r"[0-7]{3}")
+HEADER_PREFIX = "diff --git "
+
+
+def unquote_path(raw: str) -> str:
+    """A path as git prints it: C-style quoted when it needs escaping."""
+    if not (len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"'):
+        return raw
+    body, out, i = raw[1:-1], bytearray(), 0
+    while i < len(body):
+        char = body[i]
+        octal = OCTAL_RE.match(body, i + 1) if char == "\\" else None
+        if octal:
+            out.append(int(octal.group(), 8))
+            i += 4
+        elif char == "\\" and i + 1 < len(body):
+            out.append(GIT_ESCAPES.get(body[i + 1], ord(body[i + 1])))
+            i += 2
+        else:
+            out.extend(char.encode())
+            i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def _header_paths(rest: str) -> list[str]:
+    """The a/ and b/ paths of one `diff --git` header, prefixes removed."""
+    if rest.startswith('"'):
+        end = rest.find('" ', 1)
+        while end != -1 and rest[end - 1] == "\\":
+            end = rest.find('" ', end + 1)
+        if end == -1:
+            return []
+        halves = [rest[: end + 1], rest[end + 2 :]]
+    else:
+        half = (len(rest) - 3) // 2
+        halves = [rest[:half], rest[half + 1 :]]
+        if halves[0][2:] != halves[1][2:]:  # a rename: split at the last b/
+            cut = rest.rfind(" b/")
+            halves = [rest[:cut], rest[cut + 1 :]] if cut > 0 else halves
+    return [unquote_path(h)[2:] for h in halves]
+
+
+def diff_paths(diff: str) -> set[str]:
+    """Every path a unified diff touches, from its `diff --git` headers."""
+    paths: set[str] = set()
+    for line in diff.splitlines():
+        if line.startswith(HEADER_PREFIX):
+            paths.update(_header_paths(line[len(HEADER_PREFIX) :]))
+    return paths
+
+
+def score_edit(case: dict, outcome: dict) -> dict:
+    """Bucket one edit run: correct, clean_error or wrong_applies.
+
+    Args:
+        case: The case; supplies `expect` when the facts do not.
+        outcome: The gathered facts: refused, trees_equal, touched_paths,
+            reference_paths, apply_failed, check_passed, repair.
+    """
+    expect = outcome.get("expect") or case.get("expect", "patch")
+    refused = outcome["refused"]
+    if expect == "refuse":
+        correct, clean_error = refused, False
+    else:
+        correct = (
+            not refused
+            and bool(outcome["trees_equal"])
+            and not outcome["apply_failed"]
+        )
+        clean_error = refused
+    touched = set(outcome["touched_paths"])
+    return {
+        "correct": correct,
+        "clean_error": clean_error,
+        "wrong_applies": not correct and not clean_error,
+        "out_of_scope": len(touched - set(outcome["reference_paths"])),
+        "repair": outcome["repair"],
+        "check_passed": outcome["check_passed"],
+    }
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run git quietly in cwd with a throwaway identity."""
+    return subprocess.run(
+        ["git", "-c", "user.email=eval@local", "-c", "user.name=eval", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def _commit_base(root: Path) -> None:
+    """Commit the copy's files so `git apply --check` has a base."""
+    _git(["add", "-A"], root)
+    _git(["commit", "-q", "-m", "base"], root)
+
+
+def _trees_equal(work: Path, expected: Path, paths: set[str]) -> bool:
+    """True when every path holds the same bytes (or is absent) in both."""
+
+    def read(root: Path, rel: str) -> bytes | None:
+        path = root / rel
+        return path.read_bytes() if path.is_file() else None
+
+    return all(read(work, p) == read(expected, p) for p in paths)
+
+
+def _run_check(command: str, cwd: Path) -> bool:
+    """Run the case's check command in the patched copy."""
+    try:
+        done = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return done.returncode == 0
+
+
+def _edit_error(case: dict, config: dict, message: str) -> dict:
+    return {
+        "case": case["name"],
+        "config": config["label"],
+        "dekko": config.get("dekko"),
+        "error": message,
+    }
+
+
+def run_edit_case(case: dict, config: dict, server: ModuleType) -> dict:
+    """Run one nim_edit case on a copy of its snapshot and score the patch."""
+    with dekko_scope(config, server):
+        source = snapshot(case, server)
+        tmp = Path(tempfile.mkdtemp(prefix="nim-edit-eval-"))
+        try:
+            return _run_edit_case(case, config, server, source, tmp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run_edit_case(
+    case: dict, config: dict, server: ModuleType, source: Path, tmp: Path
+) -> dict:
+    work, expected = tmp / "work", tmp / "expected"
+    for root in (work, expected):
+        shutil.copytree(source, root, symlinks=True)
+        _commit_base(root)
+    reference = (Path(case["_base"]) / case["reference_diff"]).resolve()
+    applied = _git(["apply", str(reference)], expected)
+    if applied.returncode:
+        return _edit_error(
+            case, config, f"reference diff does not apply: {applied.stderr}"
+        )
+    _prepare_dekko(config, work, server)
+    started = time.monotonic()
+    text, stats = server._run_nim_edit(
+        case["task"],
+        str(work),
+        case.get("files"),
+        case.get("must_cover"),
+        config["model"],
+        getattr(server, ROLE_STEPS["edit"], None),
+    )
+    seconds = round(time.monotonic() - started, 1)
+    facts = _edit_facts(case, work, expected, reference, stats)
+    result = score_edit(case, facts)
+    result.update(
+        scoring=SCORING_VERSION,
+        case=case["name"],
+        role="edit",
+        config=config["label"],
+        dekko=config.get("dekko"),
+        seconds=seconds,
+        steps=stats.get("steps"),
+        expect=facts["expect"],
+        facts={
+            **facts,
+            "touched_paths": sorted(facts["touched_paths"]),
+            "reference_paths": sorted(facts["reference_paths"]),
+        },
+        answer=text,
+    )
+    return result
+
+
+def _edit_facts(
+    case: dict, work: Path, expected: Path, reference: Path, stats: dict
+) -> dict:
+    """Apply NIM's patch in the work copy and gather what scoring needs."""
+    reference_paths = diff_paths(reference.read_text())
+    facts: dict[str, Any] = {
+        "expect": case.get("expect", "patch"),
+        "refused": stats.get("outcome") != "patch",
+        "trees_equal": None,
+        "touched_paths": set(),
+        "reference_paths": reference_paths,
+        "apply_failed": False,
+        "check_passed": None,
+        "repair": bool(stats.get("repair")),
+    }
+    if facts["refused"]:
+        return facts
+    patch = Path(stats["patch"])
+    facts["touched_paths"] = diff_paths(patch.read_text())
+    if _git(["apply", str(patch)], work).returncode:
+        facts["apply_failed"] = True
+        return facts
+    facts["trees_equal"] = _trees_equal(
+        work, expected, facts["touched_paths"] | reference_paths
+    )
+    if case.get("check"):
+        facts["check_passed"] = _run_check(case["check"], work)
+    return facts
 
 
 def footer_steps(text: str) -> int | None:
@@ -366,7 +615,42 @@ def summarize(results: list[dict], label: str) -> str:
 
     Precision covers agent roles only; plain roles have no leads.
     """
+    edits = [
+        r
+        for r in results
+        if r["config"] == label
+        and r.get("role") == "edit"
+        and "error" not in r
+    ]
     rows = [r for r in results if r["config"] == label and "leads" in r]
+    if edits:
+        edit_line = summarize_edit(edits, label)
+        if not rows:
+            return edit_line
+        return summarize_rows(rows, label) + "\n" + edit_line
+    return summarize_rows(rows, label)
+
+
+def summarize_edit(rows: list[dict], label: str) -> str:
+    """One table row for a configuration's edit runs."""
+    patch = [r for r in rows if r.get("expect", "patch") != "refuse"]
+    refuse = [r for r in rows if r.get("expect") == "refuse"]
+    right = sum(r["correct"] for r in patch)
+    share = f" ({right / len(patch):.0%})" if patch else ""
+    steps = [r["steps"] for r in rows if r["steps"]]
+    return (
+        f"{label:<24} edit runs {len(rows):>2}  "
+        f"correct {right}/{len(patch)}{share}  "
+        f"wrong_applies {sum(r['wrong_applies'] for r in rows)}  "
+        f"out_of_scope {sum(r['out_of_scope'] for r in rows)}  "
+        f"refusals refused {sum(r['correct'] for r in refuse)}/{len(refuse)}  "
+        f"{statistics.median(r['seconds'] for r in rows):>4.0f}s  "
+        f"{statistics.median(steps) if steps else 0:.1f} steps"
+    )
+
+
+def summarize_rows(rows: list[dict], label: str) -> str:
+    """The row for agent and plain runs; see summarize."""
     if not rows:
         return f"{label:<24} no completed runs"
     cited = [r for r in rows if r.get("role") not in PLAIN_ROLES]
@@ -413,6 +697,11 @@ def rescore(path: Path, cases: list[dict]) -> None:
     for r in results:
         case = by_name.get(r.get("case"))
         if case and "answer" in r:
+            if case["role"] == "edit":
+                if "facts" in r:
+                    r.update(score_edit(case, r["facts"]), role="edit")
+                    r["scoring"] = SCORING_VERSION
+                continue
             scorer = score_plain if case["role"] in PLAIN_ROLES else score
             r.update(scorer(case, r["answer"]), role=case["role"])
             r["scoring"] = SCORING_VERSION
@@ -430,6 +719,15 @@ def report(results: list[dict], labels: list[str]) -> None:
     for r in results:
         if "error" in r:
             print(f"{r['config']:<24} {r['case']:<22} ERROR {r['error']}")
+            continue
+        if r.get("role") == "edit":
+            bucket = next(
+                k for k in ("correct", "clean_error", "wrong_applies") if r[k]
+            )
+            print(
+                f"{r['config']:<24} {r['case']:<22} edit {bucket} "
+                f"out_of_scope {r['out_of_scope']} {r['seconds']:.0f}s"
+            )
             continue
         print(
             f"{r['config']:<24} {r['case']:<22} leads {r['leads']:>2} "
