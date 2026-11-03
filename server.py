@@ -6962,14 +6962,10 @@ def _edit_in_scope(path: Path, root: Path, scope: list[str] | None) -> bool:
     return False
 
 
-def _edit_check_path(
+def _edit_resolve(
     raw: str, root: Path, scope: list[str] | None
 ) -> tuple[Path | None, str | None]:
-    """Resolve an edit target: (path, None) or (None, reason).
-
-    Reasons: outside cwd, denied, invalid path, outside scope, file
-    creation is not supported, binary file, not UTF-8.
-    """
+    """Resolve an edit target and its scope: (path, None) or (None, reason)."""
     path, error = _agent_resolve(root, raw)
     if error or path is None:
         return None, _EDIT_PATH_ERRORS.get(error or "", "invalid path")
@@ -6977,6 +6973,11 @@ def _edit_check_path(
     if not _edit_in_scope(path, root, scope):
         return None, "outside scope"
 
+    return path, None
+
+
+def _edit_read(path: Path) -> tuple[str | None, str | None]:
+    """Read one file as strict UTF-8 text: (text, None) or (None, reason)."""
     data = _read_bytes(path) if path.is_file() else None
     if data is None:
         return None, "file creation is not supported"
@@ -6985,11 +6986,25 @@ def _edit_check_path(
         return None, "binary file"
 
     try:
-        data.decode("utf-8")
+        return data.decode("utf-8"), None
     except UnicodeDecodeError:
         return None, "not UTF-8"
 
-    return path, None
+
+def _edit_check_path(
+    raw: str, root: Path, scope: list[str] | None
+) -> tuple[Path | None, str | None]:
+    """Resolve an edit target: (path, None) or (None, reason).
+
+    Reasons: outside cwd, denied, invalid path, outside scope, file
+    creation is not supported, binary file, not UTF-8.
+    """
+    path, error = _edit_resolve(raw, root, scope)
+    if error or path is None:
+        return None, error
+
+    _, error = _edit_read(path)
+    return (None, error) if error else (path, None)
 
 
 def _edit_find_all(text: str, needle: str) -> list[int]:
@@ -7004,9 +7019,20 @@ def _edit_find_all(text: str, needle: str) -> list[int]:
 
 
 def _edit_span(text: str, start: int, old: str) -> tuple[int, int]:
-    """1-based inclusive line range of `old` matched at offset `start`."""
-    first = text.count("\n", 0, start) + 1
-    inside = old.count("\n") - (1 if old.endswith("\n") else 0)
+    """1-based inclusive line range of `old` matched at offset `start`.
+
+    A leading or trailing line terminator does not count as touching the
+    line it ends; an `old` that is only terminators spans the line holding
+    the first one.
+    """
+    lead = 2 if old.startswith("\r\n") else 1 if old.startswith("\n") else 0
+    if lead == len(old):
+        line = text.count("\n", 0, start) + 1
+        return line, line
+
+    body = old[lead:]
+    first = text.count("\n", 0, start + lead) + 1
+    inside = body.count("\n") - (1 if body.endswith("\n") else 0)
     return first, first + inside
 
 
@@ -7025,6 +7051,9 @@ def _edit_locate(
     new = block.new.replace("\n", "\r\n") if crlf else block.new
     if not old:
         return None, "old text is empty"
+
+    if old == new:
+        return None, "old and new text are identical"
 
     hits = _edit_find_all(text, old)
     if not hits:
@@ -7061,7 +7090,9 @@ def _edit_apply_in_memory(
 
     Each old text must occur exactly once in the original file, and blocks
     on one file must not overlap. CRLF files get the block's newlines
-    converted before matching. Every error is reported; `changes` holds
+    converted before matching. A file containing any "\\r\\n" counts as
+    CRLF and the block's text is converted whole, so a mixed-ending file
+    gets CRLF in the replaced text. Every error is reported; `changes` holds
     only files where all blocks succeeded.
 
     Args:
@@ -7073,19 +7104,26 @@ def _edit_apply_in_memory(
         (changes keyed by resolved path, errors like "block 3: ...").
     """
     texts: dict[Path, str] = {}
+    unreadable: dict[Path, str] = {}
     errors: list[tuple[int, str]] = []
     placed: dict[Path, list[tuple[int, int, str]]] = {}
     taken: dict[Path, list[tuple[int, int, int]]] = {}
     spans: dict[Path, list[tuple[int, int]]] = {}
     failed: set[Path] = set()
     for block in blocks:
-        path, error = _edit_check_path(block.path, root, scope)
+        path, error = _edit_resolve(block.path, root, scope)
+        if path is not None and path not in texts and path not in unreadable:
+            text, error = _edit_read(path)
+            if text is None:
+                unreadable[path] = error or "file creation is not supported"
+            else:
+                texts[path] = text
+        if path is not None and path in unreadable:
+            error = unreadable[path]
         if error or path is None:
             errors.append((block.index, f"block {block.index}: {error}"))
             continue
 
-        if path not in texts:
-            texts[path] = (_read_bytes(path) or b"").decode("utf-8")
         rel = path.relative_to(root).as_posix()
         hit, error = _edit_locate(
             texts[path], block, rel, taken.setdefault(path, [])
