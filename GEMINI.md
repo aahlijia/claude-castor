@@ -365,7 +365,9 @@ row and hands the agent the verdict line, the trial lines and the script name,
 and the agent answers five lines: Row, Verdict code (`path:line`, or "not
 found"), Precondition (what `PRE_OK` tests, or "plain verdict"), Trial lines
 (at most 6) and Reading (harness, game or unclear, with one sentence). A PASS
-row, or a name that matches none or several rows, is an input error.
+row, or a name that matches none or several rows, is an input error. Logs
+written before NQC stamped rows work too; there a name over 34 characters
+needs its exact name.
 `format="json"` returns the same fields parsed by Castor, with `row` and
 `verdict` from the row Castor found, `reading` null unless the answer gives
 exactly one reading, and `verified` and `quote_ok` from the citation checks.
