@@ -318,6 +318,7 @@ files yourself when the answer is a short list and the reading is bulk:
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+| Explain a FAIL or NOT ASSESSED row of a playtest log (gated, off unless `CASTOR_NIM_EXPLAIN_ROW=1`, see below) | `nim_explain_row` |
 | Mechanical edit across files (off unless `CASTOR_NIM_EDIT=1`, see below) | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
 
@@ -346,6 +347,34 @@ quote that isn't at the cited line `[quote is at line N]` or
 `[quote not in file]`, so treat those leads as wrong or mislocated. A
 matched quote proves the location, not the claim.
 
+`nim_triage_log` (and its `_start`) takes `format="json"` for a program that
+consumes the result. Castor parses the model's usual answer, so the model is
+never asked for JSON. You get `verdict`, `totals`, `rows` (the log's FAIL and
+NOT ASSESSED rows, read by Castor from the log, not the model), `failures`
+(each with its `row`, `log_line`, `cause_shown`, `verified`, `quote_ok`),
+`markers` and `agent` stats. Errors are objects with `error` set to
+`rate_limited` (with `retry_after_s`), `failed` or `bad_input`. There is no
+confidence or owner field: a self-rated number is not calibrated, and triage
+reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
+are the checks Castor can stand behind.
+
+`nim_explain_row` (and its `_start`) is gated, off unless the server runs with
+`CASTOR_NIM_EXPLAIN_ROW=1`: its eval gate (12 cases from NQC fix history) ran
+and failed on the reading (site 23/24, reading right 4/24). Give it the log and a row name (or a piece of one); Castor finds the
+row and hands the agent the verdict line, the trial lines and the script name,
+and the agent answers five lines: Row, Verdict code (`path:line`, or "not
+found"), Precondition (what `PRE_OK` tests, or "plain verdict"), Trial lines
+(at most 6) and Reading (harness, game or unclear, with one sentence). A PASS
+row, or a name that matches none or several rows, is an input error. Logs
+written before NQC stamped rows work too; there a name over 34 characters
+needs its exact name.
+`format="json"` returns the same fields parsed by Castor, with `row` and
+`verdict` from the row Castor found, `reading` null unless the answer gives
+exactly one reading, and `verified` and `quote_ok` from the citation checks.
+Treat the reading as a lead: open the verdict code before acting on it.
+The prompt tells the agent to use dekko, but in the gate it called a dekko
+tool in 1 of 24 runs (grep and read_range did the work).
+
 **Models.** Every `nim_*` tool defaults to Nemotron 3.5 Super
 (`nvidia/nemotron-3.5-super-vl-120b-a12b`); `CASTOR_NIM_MODEL` and
 `CASTOR_NIM_AGENT_MODEL` override it. The other model worth passing is
@@ -353,9 +382,9 @@ Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b`):
 
 | Tool | Default | Pass Ultra when |
 |---|---|---|
-| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | Super is crawling (under ~40 tokens/s in `nim_usage`); Ultra's speed holds steadier under load |
-| `nim_explain_error` | 3.5 Super | as above; Super found every known cause in the eval, Ultra missed one secondary point |
-| `nim_summarize` | 3.5 Super | as above; Ultra dropped must-have key points on 2 of 3 docs |
+| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | not as a fallback: on 2026-11-03 Ultra was rate-limited on 252 of 326 requests (Super ran 556 requests without a 429 in the same hour, 09:00; Super was itself rate-limited later that day, 158 times at 12:04-12:07; whether Ultra has a separate limit is unconfirmed). For a slow or limited Super, use the `_start` job form, which waits up to `CASTOR_NIM_JOB_MAX_WAIT` |
+| `nim_explain_error` | 3.5 Super | not as a fallback (see above); Super found every known cause in the eval, Ultra missed one secondary point |
+| `nim_summarize` | 3.5 Super | not as a fallback (see above); Ultra dropped must-have key points on 2 of 3 docs |
 | `nim_agent`, `nim_scout`, `nim_first_pass_review`, `nim_triage_log` | 3.5 Super | never: Ultra scored the same, spends every step it is given, and is about 2.5x slower |
 
 Rules of thumb:

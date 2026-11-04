@@ -295,3 +295,41 @@
   instead) and `owner` (triage reads no code; explain-row's `reading`);
   building run/compare as NQC scripts (Claude's recommendation; the user
   wants them in castor); Castor killing or taking the lock (scripts own it).
+
+### 2026-11-04: Ultra is not a fallback for Super
+- **Why:** in the 09:00 hour (local) of 2026-11-03 Ultra was rate limited on
+  252 of 326 requests, while Super ran 556 ok and 0 rate_limit in that same
+  hour (Super was limited later that day, 158 rate_limit at 12:04 to 12:07).
+  Counting by local minute over 2026-11-02 and 11-03:
+  10 minutes held an Ultra rate_limit, 2 of them (09:37 and 09:38 on 11-03)
+  also held successful Super requests (26 in all), and 8 had no Super
+  traffic. The 8 are most of the 429s (245 of 257) because the burst ran
+  09:39 to 09:42 after Super traffic stopped, so the log alone cannot show
+  whether Ultra's limit is separate or just hit first at 64 to 81 requests a
+  minute. The overlap is small but real.
+- **How:** GEMINI.md no longer tells Claude to pass Ultra when Super is slow
+  (all three table rows now say "not as a fallback"); for a slow or limited
+  Super it points to the `_start` job form, which waits up to
+  `CASTOR_NIM_JOB_MAX_WAIT`. This amends the 2026-11-02 "limit is per
+  account, not per model" premise: not confirmed either way (2 overlap
+  minutes). Treat a per-model Ultra limit as a lead to test before building
+  model fallback chains for a later second-provider design.
+- **Rejected:** keeping Ultra as the fallback for a crawling Super (it adds
+  a tighter limit exactly when load is high).
+
+### 2026-11-04: nim_explain_row stays gated: its reading failed the gate
+- **Why:** the gate run (commit 5013a0d, Super with dekko on, 2 runs, 12 NQC
+  cases, results in ~/.cache/claude-castor/eval/results-20261104-094551.json)
+  scored run 1 at site 11/12, reading right 1/12, wrong 2, errors 0, and
+  run 2 at site 12/12, reading right 3/12, wrong 2, errors 0. The bar needs
+  reading right 8 or more and wrong 1 or fewer, so both runs failed on the
+  reading. Of 24 readings, 16 were unclear, 7 game and 1 harness. All 4 wrong
+  ones were "game" on harness cases (nqc-tear-consoles both runs,
+  nqc-washer-consoles run 2, nqc-garage-carry run 1), mostly console-warning
+  rows where the model took a Unity warning for a game fault. Finding the
+  code that decides the verdict hit 23 of 24.
+- **How:** the tool stays behind CASTOR_NIM_EXPLAIN_ROW=1; the bar is
+  unchanged. The site part passed on its own, so a variant without the
+  harness/game reading is a separate decision for the user. CLAUDE.md and
+  GEMINI.md say the gate ran and failed on the reading.
+- **Rejected:** tuning the bar or the prompt after seeing these results.

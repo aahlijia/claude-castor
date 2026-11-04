@@ -603,6 +603,38 @@ def test_status_skip_verify_spends_no_completion(stub):
     assert not stub.posts()
 
 
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        (None, 300.0),
+        ("1800", 1800.0),
+        ("5", 60.0),
+        ("99999", 3600.0),
+        ("x", 300.0),
+    ],
+)
+def test_job_max_wait_env(monkeypatch, raw, want):
+    if raw is None:
+        monkeypatch.delenv("CASTOR_NIM_JOB_MAX_WAIT", raising=False)
+    else:
+        monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", raw)
+    assert server._nim_job_max_wait() == want
+
+
+def test_job_worker_uses_env_wait(monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", "900")
+    server._nim_patience.on = True
+    try:
+        assert server._nim_max_wait() == 900.0
+    finally:
+        server._nim_patience.on = False
+
+
+def test_nim_status_reports_job_wait(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", "1200")
+    assert "job wait 1200 s" in _tool(server.nim_status)(verify=False)
+
+
 def test_nim_start_and_poll(stub):
     started = _tool(server.nim_start)("background q", use_cache=False)
     job_id = re.search(r"job (\w+)\.", started).group(1)
@@ -1563,6 +1595,97 @@ def test_triage_refuses_a_log_over_the_size_cap(captured, repo, monkeypatch):
     monkeypatch.setattr(server, "NIM_TRIAGE_MAX_LOG_BYTES", 10)
     out = _tool(server.nim_triage_log)(str(repo), "big.log")
     assert "split it first" in out and not captured
+
+
+# --- verdict rows ------------------------------------------------------------
+
+
+def _verdict_log(items):
+    """Build suite-log lines in verdict.sh's layout."""
+    lines = []
+    for item in items:
+        if len(item) == 2:
+            lines.append(item[0])
+            continue
+        status, name, detail = item
+        lines.append(f"{status:<13} {name:<34} {detail}")
+        lines.append(f"@case 1700000000 {status.replace(' ', '_')} {name}")
+    return lines
+
+
+def test_verdict_rows_reads_stamped_rows():
+    lines = _verdict_log(
+        [
+            ("trial a1", None),
+            ("PASS", "test standard", "50 ms"),
+            ("  walk trial 1: off after 0.12 s", None),
+            ("FAIL", "tops: walk off (host)", "1 of 3 trials"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.status) for r in rows] == [
+        ("test standard", "PASS"),
+        ("tops: walk off (host)", "FAIL"),
+    ]
+    assert rows[1].detail == "1 of 3 trials"
+    assert rows[1].block == (4, 4)
+    assert rows[0].block == (1, 1)
+
+
+def test_verdict_rows_long_name_splits_on_stamp():
+    name = "tops: a janitor walks off the BedroomWardrobe top (host)"
+    lines = _verdict_log([("PASS", name, "3 of 3 trials")])
+    rows = server._verdict_rows(lines)
+    assert rows[0].name == name and rows[0].detail == "3 of 3 trials"
+
+
+def test_verdict_rows_normalises_not_assessed():
+    lines = _verdict_log([("NOT ASSESSED", "x", "pre not met")])
+    rows = server._verdict_rows(lines)
+    assert rows[0].status == "NOT ASSESSED"
+
+
+def test_verdict_rows_skips_summary_reprint():
+    lines = [
+        *_verdict_log([("FAIL", "x", "d")]),
+        "--- verdicts ---",
+        f"{'FAIL':<13} {'x':<34} d",
+        "total 1, fail 1, not assessed 0",
+    ]
+    assert len(server._verdict_rows(lines)) == 1
+    totals = server._verdict_totals(lines)
+    assert totals == {"total": 1, "fail": 1, "not_assessed": 0}
+
+
+def test_verdict_rows_counts_occurrences():
+    lines = _verdict_log([("PASS", "x", "a"), ("FAIL", "x", "b")])
+    rows = server._verdict_rows(lines)
+    assert [r.occurrence for r in rows] == [0, 1]
+
+
+def test_verdict_rows_pytest_fallback():
+    lines = [
+        "FAILED tests/t.py::test_a - AssertionError",
+        "1 failed, 4 passed in 0.2s",
+    ]
+    rows = server._verdict_rows(lines)
+    assert rows[0].name == "tests/t.py::test_a" and rows[0].status == "FAIL"
+    assert rows[0].block is None
+    totals = server._verdict_totals(lines)
+    assert totals == {"total": 5, "fail": 1, "not_assessed": 0}
+
+
+def test_verdict_rows_crlf_and_none():
+    assert server._verdict_rows(["[12:00:01] door open\r", "ok\r"]) == []
+    assert server._verdict_totals(["nothing"]) is None
+
+
+def test_row_for_line_uses_block_and_verdict_line():
+    lines = _verdict_log([("  trial", None), ("FAIL", "x", "d")])
+    rows = server._verdict_rows(lines)
+    assert server._row_for_line(rows, 1).name == "x"
+    assert server._row_for_line(rows, 2).name == "x"
+    assert server._row_for_line(rows, 99) is None
 
 
 # --- chunked summarize -------------------------------------------------------
@@ -4363,3 +4486,742 @@ def test_gated_tools_register_only_with_their_env(monkeypatch):
         (server.nim_edit, server.nim_edit_start), "CASTOR_NIM_EDIT"
     )
     assert {"nim_edit", "nim_edit_start"} <= names()
+
+
+# --- triage json -------------------------------------------------------------
+
+
+def _triage_json(stub, repo, answer, name="run.log", log=None):
+    if log is not None:
+        (repo / name).write_text("\n".join(log) + "\n")
+    stub.queue.append((200, {}, _completion(answer)))
+    out = _tool(server.nim_triage_log)(str(repo), name, format="json")
+    return json.loads(out)
+
+
+def test_triage_json_shape(stub, repo):
+    log = _verdict_log(
+        [("  trial 1: none", None), ("FAIL", "tops: x", "1 of 3")]
+    )
+    out = _triage_json(
+        stub,
+        repo,
+        "Verdict: failed\n- suite.log:1 - trial missed - start not on top",
+        "suite.log",
+        log,
+    )
+    assert out["verdict"] == "failed" and out["log"] == "suite.log"
+    assert out["rows"] == [
+        {
+            "row": "tops: x",
+            "verdict": "FAIL",
+            "detail": "1 of 3",
+            "log_line": 2,
+        }
+    ]
+    f = out["failures"][0]
+    assert (f["row"], f["log_line"], f["what"], f["cause_hint"]) == (
+        "tops: x",
+        1,
+        "trial missed",
+        "start not on top",
+    )
+    assert f["verified"] is True and f["cause_shown"] is True
+    assert f["quote_ok"] is None
+    assert set(out["agent"]) == {"model", "steps", "seconds"}
+
+
+def test_triage_json_maps_failure_to_second_occurrence(stub, repo):
+    log = _verdict_log(
+        [
+            ("PASS", "x", "ok"),
+            ("  trial a", None),
+            ("FAIL", "x", "2 of 3"),
+        ]
+    )
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:3 - trial a - cause not shown",
+        log=log,
+    )
+    assert out["rows"] == [
+        {"row": "x", "verdict": "FAIL", "detail": "2 of 3", "log_line": 4}
+    ]
+    assert out["failures"][0]["row"] == "x"
+
+
+def test_triage_json_without_rows(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - door stuck - jammed",
+        log=["[12:00:01] ERROR door stuck"],
+    )
+    assert out["rows"] == [] and out["totals"] is None
+    assert out["failures"][0]["row"] is None
+    assert out["markers"]["ERROR"] == 1
+
+
+def test_triage_json_tolerates_loose_answers(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "I looked.\n- run.log:3 - boom - cause not shown\nfoo",
+        log=["a", "b", "FAIL boom"],
+    )
+    assert out["verdict"] is None and len(out["failures"]) == 1
+    f = out["failures"][0]
+    assert f["cause_shown"] is False and f["cause_hint"] == ""
+
+
+@pytest.mark.parametrize(
+    "item,line",
+    [
+        ("- run.log:3-5 - boom - jammed", 3),
+        ("2. run.log:3 - boom - jammed", 3),
+        ("3) run.log:3 - boom - jammed", 3),
+        ("- `run.log:3` - boom - jammed", 3),
+        ("- `run.log:3-5` - boom - jammed", 3),
+        ("- ./run.log:3 - boom - jammed", 3),
+        ("- /tmp/work/run.log:3 - boom - jammed", 3),
+    ],
+)
+def test_triage_json_reads_cited_item_shapes(stub, repo, item, line):
+    out = _triage_json(
+        stub, repo, "failed\n" + item, log=["a", "b", "FAIL boom"]
+    )
+    assert [f["log_line"] for f in out["failures"]] == [line]
+    assert out["failures"][0]["what"] == "boom"
+
+
+def test_triage_json_reads_a_path_ending_in_the_label(stub, repo):
+    sub = repo / "Library" / "flow"
+    sub.mkdir(parents=True)
+    (sub / "run-1.log").write_text("a\nb\nFAIL boom\n")
+    stub.queue.append(
+        (200, {}, _completion("failed\n- /abs/Library/flow/run-1.log:3 - x"))
+    )
+    out = json.loads(
+        _tool(server.nim_triage_log)(
+            str(repo), "Library/flow/run-1.log", format="json"
+        )
+    )
+    assert [f["log_line"] for f in out["failures"]] == [3]
+
+
+def test_triage_json_marks_unverified_and_quote_tags(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:999 - gone - why\n"
+        "- run.log:1 - quoted `x` [quote not in file] - why\n"
+        "\n[nim_agent: 1 steps, 0 tool calls, model m]",
+        log=["FAIL x"],
+    )
+    first, second = out["failures"]
+    assert first["verified"] is False and first["what"] == "gone"
+    assert second["quote_ok"] is False and second["verified"] is True
+    assert "[" not in second["what"]
+
+
+def test_triage_json_rate_limit_error(stub, repo, monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_run_nim_agent",
+        lambda *a, **k: (
+            "[NVIDIA NIM is rate-limited: try again in ~42s. Client limit "
+            "is 40 requests/min per key (CASTOR_NIM_RPM).]",
+            {},
+        ),
+    )
+    (repo / "run.log").write_text("FAIL x\n")
+    out = json.loads(
+        _tool(server.nim_triage_log)(str(repo), "run.log", format="json")
+    )
+    assert out == {
+        "error": "rate_limited",
+        "retry_after_s": 42,
+        "message": out["message"],
+    }
+    assert "rate-limited" in out["message"]
+
+
+def test_nim_error_json_other_failures():
+    out = server._nim_error_json("[NIM request failed: boom]")
+    assert out == {"error": "failed", "message": "NIM request failed: boom"}
+
+
+def test_triage_json_bad_input(repo):
+    out = json.loads(
+        _tool(server.nim_triage_log)(str(repo), "nope.log", format="json")
+    )
+    assert out["error"] == "bad_input"
+
+
+def test_triage_format_rejects_unknown(repo):
+    out = _tool(server.nim_triage_log)(str(repo), "x.log", format="xml")
+    assert out.startswith("[Error")
+    start = _tool(server.nim_triage_log_start)
+    assert start(str(repo), "x.log", format="xml").startswith("[Error")
+
+
+def test_triage_start_json_runs_json_runner(stub, repo):
+    (repo / "run.log").write_text("FAIL x\n")
+    stub.queue.append(
+        (200, {}, _completion("failed\n- run.log:1 - x failed - why"))
+    )
+    started = _tool(server.nim_triage_log_start)(
+        str(repo), "run.log", format="json"
+    )
+    out = json.loads(_poll_until_done(_job_id(started)))
+    assert out["verdict"] == "failed" and out["failures"][0]["log_line"] == 1
+
+
+def test_triage_text_default_unchanged(captured, repo):
+    (repo / "run.log").write_text("FAIL x\n")
+    assert _tool(server.nim_triage_log)(str(repo), "run.log") == "ok"
+    assert len(captured) == 1
+
+
+# --- explain row -------------------------------------------------------------
+
+
+def _registered_tool_names():
+    import asyncio
+
+    return {t.name for t in asyncio.run(server.mcp.list_tools())}
+
+
+def _explain_log(repo, items, folder="tops", name="a-20261104-024904.log"):
+    (repo / "Library" / folder).mkdir(parents=True, exist_ok=True)
+    log = repo / "Library" / folder / name
+    log.write_text("\n".join(_verdict_log(items)) + "\n")
+    return log
+
+
+def test_explain_row_task_carries_row_and_block(captured, repo):
+    (repo / "Library" / "tops").mkdir(parents=True)
+    log = repo / "Library" / "tops" / "a-20261104-024904.log"
+    log.write_text(
+        "\n".join(
+            _verdict_log(
+                [
+                    ("  trial 1: off after none s", None),
+                    ("FAIL", "tops: x (host)", "1 of 3"),
+                ]
+            )
+        )
+    )
+    out = server.nim_explain_row(str(repo), str(log), "tops: x (host)")
+    assert out == "ok"
+    task = captured[0]["task"]
+    assert "tops: x (host)" in task and "trial 1: off after none s" in task
+    assert "script: tops" in task
+    assert "1:   trial 1: off after none s" in task
+    assert captured[0]["steps"] == server.NIM_EXPLAIN_ROW_STEPS
+
+
+def test_explain_row_substring_and_ambiguity(captured, repo):
+    log = _explain_log(
+        repo,
+        [
+            ("  host trial", None),
+            ("FAIL", "tops: x (host)", "1 of 3"),
+            ("  client trial", None),
+            ("FAIL", "tops: x (client)", "2 of 3"),
+        ],
+    )
+    out = server.nim_explain_row(str(repo), str(log), "x")
+    assert out.startswith("[Error")
+    assert "tops: x (host)" in out and "tops: x (client)" in out
+    assert captured == []
+    assert server.nim_explain_row(str(repo), str(log), "(host)") == "ok"
+    task = captured[0]["task"]
+    assert "host trial" in task and "client trial" not in task
+
+
+def test_explain_row_ambiguity_is_bad_input_in_json(captured, repo):
+    log = _explain_log(
+        repo, [("FAIL", "tops: x (host)", "a"), ("FAIL", "tops: x (c)", "b")]
+    )
+    out = json.loads(
+        server.nim_explain_row(str(repo), str(log), "x", format="json")
+    )
+    assert out["error"] == "bad_input" and "tops: x (c)" in out["message"]
+
+
+def test_explain_row_picks_occurrence(captured, repo):
+    log = _explain_log(
+        repo,
+        [
+            ("  first run", None),
+            ("FAIL", "tops: x", "1 of 3"),
+            ("  second run", None),
+            ("FAIL", "tops: x", "2 of 3"),
+        ],
+    )
+    server.nim_explain_row(str(repo), str(log), "tops: x", occurrence=1)
+    task = captured[0]["task"]
+    assert "second run" in task and "first run" not in task
+    out = server.nim_explain_row(str(repo), str(log), "tops: x", occurrence=2)
+    assert out.startswith("[Error") and "2" in out
+    assert len(captured) == 1
+
+
+def test_explain_row_not_found_lists_candidates(captured, repo):
+    items = [("FAIL", f"tops: row {i}", "x") for i in range(12)]
+    log = _explain_log(repo, items)
+    out = server.nim_explain_row(str(repo), str(log), "door")
+    assert out.startswith("[Error") and "'door'" in out
+    assert "tops: row 0" in out and "tops: row 9" in out
+    assert "tops: row 10" not in out and "2 more" in out
+    assert captured == []
+
+
+def test_explain_row_log_without_rows(captured, repo):
+    (repo / "plain.log").write_text("nothing here\n")
+    out = server.nim_explain_row(str(repo), "plain.log", "x")
+    assert out.startswith("[Error") and "no verdict rows" in out
+    assert captured == []
+
+
+def test_explain_row_trims_long_block(captured, repo):
+    trials = [(f"  trial {i}: off", None) for i in range(1, 201)]
+    log = _explain_log(repo, [*trials, ("FAIL", "tops: x", "200 of 200")])
+    server.nim_explain_row(str(repo), str(log), "tops: x")
+    task = captured[0]["task"]
+    assert "[140 lines cut]" in task
+    assert "30:   trial 30: off" in task and "171:   trial 171: off" in task
+    assert "trial 31: off" not in task and "trial 170: off" not in task
+
+
+def test_explain_row_refuses_pass_row(captured, repo):
+    log = _explain_log(repo, [("PASS", "tops: x", "50 ms")])
+    out = server.nim_explain_row(str(repo), str(log), "tops: x")
+    assert out == "[Error: row 'tops: x' passed; nothing to explain.]"
+    assert captured == []
+
+
+def test_explain_row_carries_not_assessed_reason(captured, repo):
+    log = _explain_log(repo, [("NOT ASSESSED", "tops: x", "no host seen")])
+    server.nim_explain_row(str(repo), str(log), "tops: x")
+    task = captured[0]["task"]
+    assert "NOT ASSESSED reason: no host seen" in task
+    assert "(NOT ASSESSED)" in task
+
+
+def test_explain_row_rejects_log_outside_cwd(captured, repo, tmp_path):
+    out = server.nim_explain_row(str(repo), str(tmp_path / "outside.txt"), "x")
+    assert out.startswith("[Error: log_path must be")
+    assert captured == []
+
+
+def _explain_answer(log_label, code_line=88):
+    return (
+        "Row: tops: x (host) (FAIL)\n"
+        f"Verdict code: Tools/playtest/tops.sh:{code_line} - verdict FAIL "
+        "on stay\n"
+        "Precondition: plain verdict\n"
+        f"Trial lines: {log_label}:1, {log_label}:1\n"
+        "Reading: harness - the probe at Tools/playtest/tops.sh:3 reads "
+        "the wrong flag."
+    )
+
+
+def _explain_repo(repo):
+    (repo / "Tools" / "playtest").mkdir(parents=True)
+    (repo / "Tools" / "playtest" / "tops.sh").write_text(
+        "".join(f"line {i}\n" for i in range(1, 101))
+    )
+    return _explain_log(
+        repo,
+        [("  trial 1: off", None), ("FAIL", "tops: x (host)", "1 of 3")],
+    )
+
+
+def test_explain_row_json_parses_answer(stub, repo):
+    log = _explain_repo(repo)
+    label = "Library/tops/a-20261104-024904.log"
+    stub.queue.append((200, {}, _completion(_explain_answer(label))))
+    out = json.loads(
+        server.nim_explain_row(
+            str(repo), str(log), "tops: x (host)", format="json"
+        )
+    )
+    assert out["row"] == "tops: x (host)" and out["verdict"] == "FAIL"
+    assert out["verdict_code"] == "Tools/playtest/tops.sh:88"
+    assert out["precondition"] == "plain verdict"
+    assert out["trial_lines"] == [1]
+    assert out["reading"] == "harness"
+    assert out["why"].startswith("the probe at Tools/playtest/tops.sh:3")
+    assert out["verified"] is True and out["quote_ok"] is None
+    assert set(out["agent"]) == {"model", "steps", "seconds"}
+
+
+def test_explain_row_json_marks_unverified(stub, repo):
+    log = _explain_repo(repo)
+    label = "Library/tops/a-20261104-024904.log"
+    answer = _explain_answer(label, code_line=999)
+    stub.queue.append((200, {}, _completion(answer)))
+    out = json.loads(
+        server.nim_explain_row(str(repo), str(log), "(host)", format="json")
+    )
+    assert out["verified"] is False
+    assert out["verdict_code"] == "Tools/playtest/tops.sh:999"
+
+
+def test_explain_row_json_tolerates_loose_answer():
+    out = server._explain_row_json(
+        "I could not find it.\n**Reading:** Unclear - no line decides it\n"
+        "\n[nim_agent: 1 steps, 0 tool calls, model m]",
+        {"model": "m", "steps": 1, "seconds": 2.0},
+        "run.log",
+    )
+    assert out["row"] is None and out["verdict_code"] is None
+    assert out["trial_lines"] == [] and out["reading"] == "unclear"
+    assert out["why"] == "no line decides it"
+    assert out["agent"] == {"model": "m", "steps": 1, "seconds": 2.0}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "harness | game | unclear - <one sentence>",
+        "harness | game - one sentence",
+        "Unclear: no line decides it",
+        "harness",
+        "game -",
+    ],
+)
+def test_explain_row_json_refuses_echoed_or_loose_reading(value):
+    out = server._explain_row_json(f"Reading: {value}", {}, "run.log")
+    assert out["reading"] is None and out["why"] is None
+
+
+def test_explain_row_json_verdict_code_not_found():
+    out = server._explain_row_json(
+        "Verdict code: not found - search found no verdict call",
+        {},
+        "run.log",
+    )
+    assert out["verdict_code"] is None
+
+
+def test_explain_row_json_reads_numbered_lines():
+    out = server._explain_row_json(
+        "1. Row: tops: x (FAIL)\n"
+        "2) Verdict code: Tools/playtest/tops.sh:88 - verdict\n"
+        "3. Precondition: plain verdict\n"
+        "4. Trial lines: run.log:4\n"
+        "5) Reading: game - the door at Assets/Door.cs:10 never opens",
+        {},
+        "run.log",
+    )
+    assert out["row"] == "tops: x" and out["verdict"] == "FAIL"
+    assert out["verdict_code"] == "Tools/playtest/tops.sh:88"
+    assert out["precondition"] == "plain verdict"
+    assert out["trial_lines"] == [4] and out["reading"] == "game"
+
+
+def test_explain_row_json_takes_row_from_castor(stub, repo):
+    log = _explain_repo(repo)
+    answer = _explain_answer("Library/tops/a-20261104-024904.log").replace(
+        "Row: tops: x (host) (FAIL)", "Row: tops x host (fail)"
+    )
+    stub.queue.append((200, {}, _completion(answer)))
+    out = json.loads(
+        server.nim_explain_row(str(repo), str(log), "(host)", format="json")
+    )
+    assert out["row"] == "tops: x (host)" and out["verdict"] == "FAIL"
+
+
+def test_explain_row_prompt_offers_not_found_and_unclear(captured, repo):
+    log = _explain_log(repo, [("FAIL", "tops: x", "1 of 3")])
+    server.nim_explain_row(str(repo), str(log), "tops: x")
+    task = captured[0]["task"]
+    assert "Verdict code: not found" in task
+    assert "unclear unless" in task
+
+
+def test_explain_row_json_caps_trial_lines():
+    lines = ", ".join(f"run.log:{n}" for n in range(1, 10))
+    out = server._explain_row_json(f"Trial lines: {lines}", {}, "run.log")
+    assert out["trial_lines"] == [1, 2, 3, 4, 5, 6]
+
+
+def test_explain_row_json_rate_limit_error(stub, repo, monkeypatch):
+    log = _explain_repo(repo)
+    monkeypatch.setattr(
+        server,
+        "_run_nim_agent",
+        lambda *a, **k: (
+            "[NVIDIA NIM is rate-limited: try again in ~42s. Client limit "
+            "is 40 requests/min per key (CASTOR_NIM_RPM).]",
+            {},
+        ),
+    )
+    out = json.loads(
+        server.nim_explain_row(str(repo), str(log), "(host)", format="json")
+    )
+    assert out["error"] == "rate_limited" and out["retry_after_s"] == 42
+
+
+def test_explain_row_caps_steps(captured, repo):
+    log = _explain_log(repo, [("FAIL", "tops: x", "1 of 3")])
+    server.nim_explain_row(str(repo), str(log), "tops: x", max_steps=50)
+    assert captured[0]["steps"] == server.NIM_EXPLAIN_ROW_MAX_STEPS == 12
+
+
+def test_explain_row_format_rejects_unknown(repo):
+    out = server.nim_explain_row(str(repo), "x.log", "x", format="xml")
+    assert out == server.TRIAGE_FORMAT_ERROR
+    start = server.nim_explain_row_start(str(repo), "x.log", "x", format="xml")
+    assert start == server.TRIAGE_FORMAT_ERROR
+
+
+def test_explain_row_start_json_runs_json_runner(stub, repo):
+    log = _explain_repo(repo)
+    label = "Library/tops/a-20261104-024904.log"
+    stub.queue.append((200, {}, _completion(_explain_answer(label))))
+    started = server.nim_explain_row_start(
+        str(repo), str(log), "(host)", format="json"
+    )
+    out = json.loads(_poll_until_done(_job_id(started)))
+    assert out["verdict_code"] == "Tools/playtest/tops.sh:88"
+
+
+def test_explain_row_start_refuses_bad_row(captured, repo):
+    log = _explain_log(repo, [("PASS", "tops: x", "50 ms")])
+    out = server.nim_explain_row_start(str(repo), str(log), "tops: x")
+    assert out.startswith("[Error") and "passed" in out
+
+
+def test_explain_row_registers_only_with_its_env(monkeypatch):
+    from fastmcp import FastMCP
+
+    fns = (server.nim_explain_row, server.nim_explain_row_start)
+    monkeypatch.setattr(server, "mcp", FastMCP("explain-off"))
+    monkeypatch.delenv("CASTOR_NIM_EXPLAIN_ROW", raising=False)
+    server._register_gated(fns, "CASTOR_NIM_EXPLAIN_ROW")
+    assert "nim_explain_row" not in _registered_tool_names()
+    monkeypatch.setattr(server, "mcp", FastMCP("explain-on"))
+    monkeypatch.setenv("CASTOR_NIM_EXPLAIN_ROW", "1")
+    server._register_gated(fns, "CASTOR_NIM_EXPLAIN_ROW")
+    assert {"nim_explain_row", "nim_explain_row_start"} <= (
+        _registered_tool_names()
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("CASTOR_NIM_EXPLAIN_ROW") is not None,
+    reason="CASTOR_NIM_EXPLAIN_ROW is set, so the server registered it",
+)
+def test_explain_row_unregistered_on_the_real_server():
+    assert "nim_explain_row" not in _registered_tool_names()
+    assert "nim_explain_row_start" not in _registered_tool_names()
+
+
+# --- verdict rows without case stamps ----------------------------------------
+
+LONG_ROW = "tops: a tier-1 hover lifts off BookcaseE1 (host)"
+
+
+def _unstamped_log(items):
+    """verdict.sh lines as written before NQC added @case stamps."""
+    return [ln for ln in _verdict_log(items) if not ln.startswith("@case ")]
+
+
+def test_verdict_rows_reads_unstamped_lines():
+    lines = _unstamped_log(
+        [
+            ("start", None),
+            ("PASS", "test standard", "50 ms"),
+            ("  walk trial 1: off after 0.12 s", None),
+            ("  walk trial 2: off after none s", None),
+            ("FAIL", "tops: walk off (host)", "1 of 3 trials"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.status, r.detail, r.line, r.block) for r in rows] == [
+        ("test standard", "PASS", "50 ms", 2, (1, 1)),
+        ("tops: walk off (host)", "FAIL", "1 of 3 trials", 5, (3, 4)),
+    ]
+    assert [r.occurrence for r in rows] == [0, 0]
+
+
+def test_verdict_rows_unstamped_skips_reprint():
+    items = [
+        ("  trial a", None),
+        ("FAIL", "tops: x", "1 of 3"),
+        ("NOT ASSESSED", "tops: y", "no host"),
+    ]
+    summary = [
+        "--- verdicts ---",
+        *_unstamped_log(items[1:]),
+        "total 2, fail 1, not assessed 1",
+        "log: Library/tops/a.log",
+    ]
+    rows = server._verdict_rows([*_unstamped_log(items), *summary])
+    assert [(r.name, r.status, r.line) for r in rows] == [
+        ("tops: x", "FAIL", 2),
+        ("tops: y", "NOT ASSESSED", 3),
+    ]
+    assert rows[1].block is None
+
+
+def test_verdict_rows_unstamped_overflowing_name_skipped():
+    assert len(LONG_ROW) == 48
+    lines = _unstamped_log(
+        [("  hover trial 1", None), ("FAIL", LONG_ROW, "x")]
+    )
+    assert server._verdict_rows(lines) == []
+
+
+def test_verdict_rows_unstamped_occurrence_counts_repeats():
+    lines = _unstamped_log(
+        [("FAIL", "tops: x", "1 of 3"), ("FAIL", "tops: x", "2 of 3")]
+    )
+    assert [r.occurrence for r in server._verdict_rows(lines)] == [0, 1]
+
+
+def test_explain_row_finds_unstamped_long_name(captured, repo):
+    (repo / "Library" / "tops").mkdir(parents=True)
+    log = repo / "Library" / "tops" / "old.log"
+    items = [
+        ("PASS", "test standard", "50 ms"),
+        ("  hover host trial 1: rise 0.02 m", None),
+        ("FAIL", LONG_ROW, "10 of 10 stuck on the top"),
+        ("  hover client trial 1: rise 0.01 m", None),
+        ("FAIL", LONG_ROW.replace("(host)", "(client)"), "9 of 10 stuck"),
+    ]
+    summary = ["--- verdicts ---", *_unstamped_log(items[::2])]
+    lines = [
+        *_unstamped_log(items),
+        *summary,
+        "total 3, fail 2, not assessed 0",
+    ]
+    log.write_text("\n".join(lines) + "\n")
+    assert server.nim_explain_row(str(repo), str(log), LONG_ROW) == "ok"
+    task = captured[0]["task"]
+    assert f"row: {LONG_ROW} (FAIL)" in task
+    assert "verdict line 3:" in task and "10 of 10 stuck on the top" in task
+    assert "2:   hover host trial 1: rise 0.02 m" in task
+    assert "client trial" not in task
+
+
+def test_explain_row_unstamped_long_name_needs_exact_name(captured, repo):
+    (repo / "old.log").write_text(
+        "\n".join(_unstamped_log([("FAIL", LONG_ROW, "x")])) + "\n"
+    )
+    out = server.nim_explain_row(str(repo), "old.log", "hover lifts")
+    assert out.startswith("[Error") and captured == []
+
+
+def test_explain_row_unstamped_refuses_pass_long_name(captured, repo):
+    (repo / "old.log").write_text(
+        "\n".join(_unstamped_log([("PASS", LONG_ROW, "x")])) + "\n"
+    )
+    out = server.nim_explain_row(str(repo), "old.log", LONG_ROW)
+    assert out == f"[Error: row {LONG_ROW!r} passed; nothing to explain.]"
+
+
+def test_verdict_rows_stamped_unchanged():
+    lines = _verdict_log(
+        [
+            ("PASS", "test standard", "50 ms"),
+            ("FAIL", "tops: unstamped looking", "1 of 3"),
+            ("  trial 1", None),
+            ("FAIL", "tops: x", "2 of 3"),
+        ]
+    )
+    del lines[3]  # the second row's stamp: its line now looks unstamped
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.line, r.block) for r in rows] == [
+        ("test standard", 1, None),
+        ("tops: x", 5, (3, 4)),
+    ]
+
+
+def _long_pair_log():
+    client = LONG_ROW.replace("(host)", "(client)")
+    return _unstamped_log(
+        [
+            ("  hover host trial 1", None),
+            ("FAIL", LONG_ROW, "10 of 10 stuck on the top"),
+            ("  hover client trial 1", None),
+            ("FAIL", client, "9 of 10 stuck on the top"),
+        ]
+    )
+
+
+def test_explain_row_unstamped_prefix_of_two_rows_is_refused(captured, repo):
+    (repo / "old.log").write_text("\n".join(_long_pair_log()) + "\n")
+    prefix = "tops: a tier-1 hover lifts off BookcaseE1"
+    out = json.loads(
+        server.nim_explain_row(str(repo), "old.log", prefix, format="json")
+    )
+    assert out["error"] == "bad_input"
+    assert f"'{prefix} (host) 10 of'" in out["message"]
+    assert f"'{prefix} (client) 9 of'" in out["message"]
+    assert "more of the row name" in out["message"]
+    assert captured == []
+
+
+def test_explain_row_unstamped_exact_long_name_detail():
+    lines = _long_pair_log()
+    rows = server._verdict_rows(lines)
+    found, error = server._explain_row_find(rows, LONG_ROW, 0, lines)
+    assert error is None and found is not None
+    assert (found.name, found.line, found.block) == (LONG_ROW, 2, (1, 1))
+    assert found.detail == "10 of 10 stuck on the top"
+
+
+def test_explain_row_unstamped_same_long_name_twice_picks_occurrence():
+    lines = _unstamped_log(
+        [
+            ("FAIL", LONG_ROW, "1 of 3 first"),
+            ("  trial b", None),
+            ("FAIL", LONG_ROW, "1 of 3 second"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    found, error = server._explain_row_find(rows, LONG_ROW, 1, lines)
+    assert error is None and found is not None
+    assert (found.line, found.occurrence, found.detail) == (
+        3,
+        1,
+        "1 of 3 second",
+    )
+
+
+def test_verdict_rows_reprint_without_totals_ends_at_other_output():
+    lines = [
+        *_unstamped_log([("FAIL", "tops: a", "1 of 3")]),
+        "--- verdicts ---",
+        *_unstamped_log([("FAIL", "tops: a", "1 of 3")]),
+        "",
+        "second suite starts",
+        *_unstamped_log([("  trial b", None), ("FAIL", "tops: b", "2 of 3")]),
+    ]
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.line, r.block) for r in rows] == [
+        ("tops: a", 1, None),
+        ("tops: b", 7, (5, 6)),
+    ]
+
+
+def test_verdict_rows_indented_marker_does_not_start_reprint():
+    lines = _unstamped_log(
+        [
+            ("FAIL", "tops: a", "1 of 3"),
+            ("  --- verdicts ---", None),
+            ("  trial b", None),
+            ("FAIL", "tops: b", "2 of 3"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.line, r.block) for r in rows] == [
+        ("tops: a", 1, None),
+        ("tops: b", 4, (2, 3)),
+    ]

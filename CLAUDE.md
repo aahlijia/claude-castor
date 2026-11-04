@@ -109,6 +109,8 @@ lists them. Use for long explorations and fan-out. Workers match the NIM gate
 (4 per key, at most 8); jobs are in-memory (lost on restart) and bounded to 50
 (oldest finished evicted, never a running job). A job waits up to
 `NIM_JOB_MAX_WAIT` (300 s) for a NIM slot or key, a foreground call 30 s.
+Set `CASTOR_NIM_JOB_MAX_WAIT` (seconds, clamped to 60..3600, default 300) to
+change the job wait; `nim_status` reports it as `job wait N s`.
 
 ### Sessions
 
@@ -152,8 +154,10 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_agent_start` | same | Background `nim_agent`; poll with `gemini_poll` |
 | `nim_scout` | `(question, cwd, model=None, max_steps=None)` | Role: the exact `path:start-end` ranges a task needs |
 | `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
-| `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
-| `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll` |
+| `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None, format="text")` | Role: verdict plus `log:LINE` failures for a log inside `cwd`; `format="json"` returns Castor's parse (verdict, totals, FAIL rows, failures, markers, agent stats) |
+| `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll`; the triage one takes `format` too |
+| `nim_explain_row` | `(cwd, log_path, row, occurrence=0, format="text", model=None, max_steps=None)` | Gated, off unless `CASTOR_NIM_EXPLAIN_ROW=1` (its eval gate ran and failed on the reading: site 23/24, reading right 4/24; `_register_gated`). Role: for one FAIL or NOT ASSESSED row of a verdict.sh log inside `cwd` (exact name with `occurrence`, else the one name containing `row`; none or several is an error listing at most 10; logs from before `@case` stamps are read from the verdict lines, where a name over 34 characters is found only by its exact name), Castor puts the verdict line, the trial lines (over 60, the first and last 30 with a cut marker) and the script name (the log's folder) in the task; the agent (the prompt says dekko `search`, then `symbol` / `context`; in the gate it called a dekko tool in 1 of 24 runs, grep and read_range did the work) answers Row, Verdict code, Precondition, Trial lines, Reading (harness, game or unclear). Default 6 steps, max 12. `format="json"` returns `row`, `verdict` (both from the row Castor found), `verdict_code` (null for "not found"), `precondition`, `trial_lines`, `reading` (null unless exactly one reading and " - "), `why`, `verified`, `quote_ok`, `agent` |
+| `nim_explain_row_start` | same | Gated like `nim_explain_row`; background run, input checked at start; poll with `gemini_poll` |
 | `nim_edit` | `(task, cwd, files=None, must_cover=None, model=None, max_steps=None)` | Registered only with `CASTOR_NIM_EDIT=1` (its gate has not passed; `_register_gated`). Mechanical edit as a checked patch under `~/.cache/claude-castor/nim-patches/`; NIM never writes files. The model records edits with `propose_edit`/`drop_edit`, each checked on arrival (edit blocks in the answer are the fallback). Each edit's old text must be whole lines matching exactly once inside `cwd` and `files`; `must_cover` (needs dekko) requires every call site and the definition edited, and other mentions inside `files` (ones outside are listed, not refused); one repair round, then a refusal or `git apply --check`. Read the diff, then `git apply <patch>` |
 | `nim_edit_start` | same | Background `nim_edit`; input is checked at start; poll with `gemini_poll` |
 | `nim_models` | `(query=None)` | List served model ids |
@@ -220,7 +224,8 @@ wait would exceed `NIM_MAX_WAIT` (30s; `NIM_JOB_MAX_WAIT`, 300 s, on a job
 worker). Requests share one `httpx.Client` (`_nim_client`). `_classify_nim_status` decides what is
 retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
 http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
-`CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`. NIM session compaction uses NIM
+`CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`, `CASTOR_NIM_JOB_MAX_WAIT`
+(background-job wait for a slot, 60..3600 s, default 300). NIM session compaction uses NIM
 (`_summarize_text_nim`), so NIM-only users never need agy. `gemini_status` adds
 a one-line `nvidia_nim:` summary (no network call).
 
