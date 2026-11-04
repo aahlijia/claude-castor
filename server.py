@@ -6641,18 +6641,20 @@ Your job:
 1. Find where this row's verdict is decided: the `verdict` or `check` call,
    or the probe that prints the detail. Use `search` for a distinctive
    piece of the row name or detail, then `symbol` or `context` on what it
-   finds (grep when those tools are missing).
+   finds (grep when those tools are missing). If you did not read the
+   code that decides it, write "Verdict code: not found".
 2. Name the precondition the `check` tests (what PRE_OK tests) with its
    path:line, or write "plain verdict" when a plain `verdict` call decides
    the row.
 3. Pick at most 6 trial lines from [ROW] that decide the verdict.
 4. Give one reading: harness (the test, probe or script is wrong), game
    (the game code behaves wrongly) or unclear, in one sentence that cites
-   a line.
+   a line. Say unclear unless the code or log lines you read show which
+   side is wrong.
 
 Answer in exactly these five lines and nothing else:
 Row: {name} ({status})
-Verdict code: <path:line> - <the call, a few words>
+Verdict code: <path:line> - <the call, a few words> | not found
 Precondition: <what PRE_OK tests> - <path:line> | plain verdict
 Trial lines: {log}:LINE, {log}:LINE (at most 6, the ones that decide it)
 Reading: harness | game | unclear - <one sentence>
@@ -7518,12 +7520,15 @@ def _explain_row_job(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """The dispatch kwargs for one explain-row run, or the input error.
 
-    JSON runs carry a `label` (the log relative to the root), which the
-    JSON runner needs to read the trial lines.
+    JSON runs also carry `label` (the log relative to the root, for the
+    trial lines) and the found row's `row_name` and `row_status`, which
+    the JSON takes in place of the model's Row line.
     """
     if fmt not in TRIAGE_FORMATS:
         return None, TRIAGE_FORMAT_ERROR
-    task, root, error = _explain_row_task(cwd, log_path, row, occurrence)
+    task, root, error, facts = _explain_row_build(
+        cwd, log_path, row, occurrence
+    )
     if error or task is None:
         return None, _triage_bad_input(error, fmt)
     steps = min(
@@ -7536,8 +7541,7 @@ def _explain_row_job(
         "max_steps": steps,
     }
     if fmt == "json":
-        target, _ = _agent_resolve(Path(root), log_path)
-        kwargs["label"] = str(target.relative_to(root)) if target else ""
+        kwargs.update(facts)
     return kwargs, None
 
 
@@ -7555,19 +7559,36 @@ def _explain_row_task(
     Returns:
         The task text and resolved root, or (None, root, bracketed error).
     """
+    task, root, error, _ = _explain_row_build(cwd, log_path, row, occurrence)
+    return task, root, error
+
+
+def _explain_row_build(
+    cwd: str, log_path: str, row: str, occurrence: int
+) -> tuple[str | None, str, str | None, dict[str, str]]:
+    """_explain_row_task plus the facts the JSON runner needs.
+
+    The facts are `label` (the log relative to the root), `row_name` and
+    `row_status` of the row Castor found; empty on an error.
+    """
     target, root, error = _role_log(cwd, log_path)
     if error or target is None:
-        return None, root, error
+        return None, root, error, {}
     data = _read_bytes(target)
     if data is None:
-        return None, root, f"[Error: {log_path!r} is unreadable.]"
+        return None, root, f"[Error: {log_path!r} is unreadable.]", {}
     lines = _clean_lines(data.decode("utf-8", errors="replace").splitlines())
     found, error = _explain_row_find(_verdict_rows(lines), row, occurrence)
     if error or found is None:
-        return None, root, error
+        return None, root, error, {}
     label = str(target.relative_to(root))
     task = _explain_row_prompt(found, lines, label, target.parent.name)
-    return task, root, None
+    facts = {
+        "label": label,
+        "row_name": found.name,
+        "row_status": found.status,
+    }
+    return task, root, None, facts
 
 
 def _explain_row_find(
@@ -7650,16 +7671,19 @@ def _explain_row_block(lines: list[str], block: tuple[int, int] | None) -> str:
     )
 
 
-# The five answer lines, as "Field: value"; markdown bullets and bold
-# around the field name are tolerated.
+# The five answer lines, as "Field: value"; markdown bullets, a list
+# number ("1." or "2)") and bold around the field name are tolerated.
 _EXPLAIN_FIELD_RE = re.compile(
-    r"^[\s*>-]*(row|verdict code|precondition|trial lines|reading)"
+    r"^[\s*>-]*(?:\d+[.)]\s*)?[\s*]*"
+    r"(row|verdict code|precondition|trial lines|reading)"
     r"\s*\**\s*:\s*\**\s*(.*?)\s*$",
     re.IGNORECASE,
 )
 _EXPLAIN_ROW_NAME_RE = re.compile(r"^(.*?)\s*\((FAIL|NOT ASSESSED|PASS)\)$")
+# One reading word, " - ", then the sentence; a "|" after the word is the
+# template echoed back, not an answer, so it does not match.
 _EXPLAIN_READING_RE = re.compile(
-    r"^(harness|game|unclear)\b[\s:,.-]*(.*)$", re.IGNORECASE
+    r"^(harness|game|unclear) - (.*\S.*)$", re.IGNORECASE
 )
 
 
@@ -7678,11 +7702,10 @@ def _explain_row_json(answer: str, stats: dict, label: str) -> dict:
     fields, verified, quote_ok = _explain_row_fields(_answer_lines(answer))
     name, verdict = _explain_row_name(fields.get("row"))
     reading, why = _explain_row_reading(fields.get("reading"))
-    code = _CITATION_RE.search(fields.get("verdict code", ""))
     return {
         "row": name,
         "verdict": verdict,
-        "verdict_code": code.group(0) if code else None,
+        "verdict_code": _explain_verdict_code(fields.get("verdict code")),
         "precondition": fields.get("precondition") or None,
         "trial_lines": _explain_trial_lines(
             fields.get("trial lines", ""), label
@@ -7693,6 +7716,14 @@ def _explain_row_json(answer: str, stats: dict, label: str) -> dict:
         "quote_ok": quote_ok,
         "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
     }
+
+
+def _explain_verdict_code(text: str | None) -> str | None:
+    """The Verdict code line's path:line; None for "not found" or none."""
+    if not text or text.lower().startswith("not found"):
+        return None
+    code = _CITATION_RE.search(text)
+    return code.group(0) if code else None
 
 
 def _explain_row_fields(
@@ -7726,13 +7757,15 @@ def _explain_row_name(text: str | None) -> tuple[str | None, str | None]:
 def _explain_row_reading(
     text: str | None,
 ) -> tuple[str | None, str | None]:
-    """(harness | game | unclear, why) from the Reading line."""
-    if not text:
-        return None, None
-    match = _EXPLAIN_READING_RE.match(text)
+    """(harness | game | unclear, why) from the Reading line.
+
+    Both are None unless the line is one reading word, " - " and a
+    sentence.
+    """
+    match = _EXPLAIN_READING_RE.match(text or "")
     if not match:
-        return None, text
-    return match.group(1).lower(), match.group(2) or None
+        return None, None
+    return match.group(1).lower(), match.group(2).strip()
 
 
 def _explain_trial_lines(text: str, label: str) -> list[int]:
@@ -7749,14 +7782,20 @@ def _dispatch_explain_row_json(
     model: str | None,
     max_steps: int | None,
     label: str,
+    row_name: str,
+    row_status: str,
 ) -> str:
-    """Run the explain-row agent; its answer as a JSON object string."""
+    """Run the explain-row agent; its answer as a JSON object string.
+
+    `row` and `verdict` are the row Castor found, not the model's Row
+    line, so a misnamed row in the answer cannot change them.
+    """
     text, stats = _run_nim_agent(task, cwd, model, max_steps)
     if text.startswith("["):
         return json.dumps(_nim_error_json(text), ensure_ascii=False)
-    return json.dumps(
-        _explain_row_json(text, stats, label), ensure_ascii=False
-    )
+    obj = _explain_row_json(text, stats, label)
+    obj["row"], obj["verdict"] = row_name, row_status
+    return json.dumps(obj, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
