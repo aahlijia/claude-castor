@@ -5168,6 +5168,8 @@ def _agent_system(
     )
     if "callers" in tool_names:
         tools += NIM_AGENT_DEKKO_NOTE
+    if "propose_edit" in tool_names:
+        tools += NIM_AGENT_EDIT_NOTE
     return NIM_AGENT_SYSTEM.format(
         steps=steps, calls=calls, tools=tools, answer=answer
     )
@@ -5502,29 +5504,66 @@ def _agent_step_results(
     calls: list[dict],
     seen: set[str],
     offered: frozenset[str] = NIM_AGENT_TOOL_NAMES,
+    edits: "_EditStore | None" = None,
 ) -> list[dict]:
     """Run one step's tool calls, answering every call id the model made.
 
     `offered` names the tools this run offered; any other name is unknown.
+    With an edit store, propose_edit and drop_edit run against it and are
+    capped at NIM_EDIT_CALLS_PER_STEP per step, apart from the
+    NIM_AGENT_CALLS_PER_STEP cap on every other call.
     """
+    counts = {True: 0, False: 0}  # calls so far: edit tools, the rest
     messages = []
-    for index, call in enumerate(calls):
+    for call in calls:
         name = (call.get("function") or {}).get("name", "")
-        args = _agent_parse_args(call)
-        key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
-        if index >= NIM_AGENT_CALLS_PER_STEP:
+        is_edit = edits is not None and name in NIM_EDIT_TOOL_NAMES
+        counts[is_edit] += 1
+        cap = NIM_EDIT_CALLS_PER_STEP if is_edit else NIM_AGENT_CALLS_PER_STEP
+        if counts[is_edit] > cap:
             result = "[skipped: too many tool calls in one step]"
-        elif args is None:
-            result = "[error: arguments were not a JSON object]"
-        elif key in seen:
-            result = "[already ran this exact call; use that result]"
         else:
-            seen.add(key)
-            result = _agent_run_tool(root, name, args, offered)
+            result = _agent_call_result(root, call, seen, offered, edits)
         messages.append(
             {"role": "tool", "tool_call_id": call["id"], "content": result}
         )
     return messages
+
+
+def _agent_call_key(name: str, args: dict, edits: "_EditStore | None") -> str:
+    """The repeat key of one call.
+
+    A propose_edit key carries the store's drop count, so a proposal
+    made again after a drop_edit runs again instead of "already ran".
+    """
+    key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+    if edits is not None and name == "propose_edit":
+        return f"{name}#{edits.drops}:{key}"
+    return key
+
+
+def _agent_call_result(
+    root: Path,
+    call: dict,
+    seen: set[str],
+    offered: frozenset[str],
+    edits: "_EditStore | None",
+) -> str:
+    """Run one call within its step's cap, skipping an exact repeat."""
+    name = (call.get("function") or {}).get("name", "")
+    args = _agent_parse_args(call)
+    if args is None:
+        return "[error: arguments were not a JSON object]"
+
+    key = _agent_call_key(name, args, edits)
+    if key in seen:
+        return "[already ran this exact call; use that result]"
+
+    seen.add(key)
+    if edits is not None and name in NIM_EDIT_TOOL_NAMES:
+        return _edit_run_tool(edits, root, name, args)
+
+    return _agent_run_tool(root, name, args, offered)
 
 
 def _agent_answer_messages(messages: list[dict]) -> list[dict]:
@@ -5698,24 +5737,20 @@ def _agent_out_of_tokens(data: Any) -> bool:
     return (choices or [{}])[0].get("finish_reason") == "length"
 
 
-def _nim_agent_loop(
+def _agent_opening(
     task: str,
     root: Path,
-    model: str,
     max_steps: int,
-    max_tokens: int,
-    step_model: str | None = None,
-    answer: str = NIM_AGENT_ANSWER_BULLETS,
-) -> tuple[bool, str, dict]:
-    """Drive the tool loop. Returns (ok, answer or error, stats).
+    answer: str,
+    edits: "_EditStore | None",
+) -> tuple[list[dict], list[dict]]:
+    """A run's tool schemas and its opening system and user messages.
 
-    Tool steps run on `step_model` (default `model`) and the answer on
-    `model`. The last step, an over-budget transcript, a tool step that ran
-    out of tokens, or a separate step model ending its steps all hand over
-    to _agent_answer.
+    The edit tools join the schemas only when an edit store is given.
     """
-    stepper = step_model or model
     tools = _agent_tools(root)
+    if edits is not None:
+        tools = [*tools, *NIM_EDIT_TOOLS]
     names = [t["function"]["name"] for t in tools]
     system = _agent_system(max_steps, NIM_AGENT_CALLS_PER_STEP, names, answer)
     file_map = _agent_file_map(root)
@@ -5726,6 +5761,32 @@ def _nim_agent_loop(
         },
         {"role": "user", "content": task},
     ]
+    return tools, messages
+
+
+def _nim_agent_loop(
+    task: str,
+    root: Path,
+    model: str,
+    max_steps: int,
+    max_tokens: int,
+    step_model: str | None = None,
+    answer: str = NIM_AGENT_ANSWER_BULLETS,
+    edits: "_EditStore | None" = None,
+) -> tuple[bool, str, dict]:
+    """Drive the tool loop. Returns (ok, answer or error, stats).
+
+    Tool steps run on `step_model` (default `model`) and the answer on
+    `model`. The last step, an over-budget transcript, a tool step that ran
+    out of tokens, or a separate step model ending its steps all hand over
+    to _agent_answer. Only nim_edit passes `edits`: then propose_edit and
+    drop_edit are offered, and once the store holds an edit a reply with
+    no calls, or the steps running out, ends the loop with no answer
+    request (the caller reads the store).
+    """
+    stepper = step_model or model
+    tools, messages = _agent_opening(task, root, max_steps, answer, edits)
+    names = [t["function"]["name"] for t in tools]
     stats: dict[str, Any] = {"steps": 0, "tool_calls": 0, "requests": []}
     budget = int(
         _nim_env("CASTOR_NIM_MAX_INPUT_CHARS", NIM_DEFAULT_MAX_INPUT_CHARS)
@@ -5748,6 +5809,9 @@ def _nim_agent_loop(
         _agent_record(stats, stepper, started, data, calls)
         if error:
             return False, error, stats
+        if not calls and _edit_recorded(edits):
+            ok, text = _nim_extract_text(data, model)
+            return True, text if ok else "", stats
         if not calls:
             if _agent_out_of_tokens(data) or stepper != model:
                 break
@@ -5762,10 +5826,15 @@ def _nim_agent_loop(
                 "tool_calls": calls,
             }
         )
-        results = _agent_step_results(root, calls, seen, frozenset(names))
+        results = _agent_step_results(
+            root, calls, seen, frozenset(names), edits
+        )
         stats["tool_calls"] += len(results)
         used += sum(len(r["content"]) for r in results)
         messages.extend(results)
+    if _edit_recorded(edits):
+        return True, "", stats
+
     stats["steps"] += 1
     started = time.monotonic()
     ok, text = _agent_answer(messages, model, max_tokens)
@@ -6918,9 +6987,10 @@ def _triage_ends(lines: list[str], label: str) -> str:
 # ---------------------------------------------------------------------------
 # NIM edit
 #
-# nim_edit asks a NIM model for exact-text edit blocks; Castor checks each
-# block against the file and turns the result into a patch. This section
-# starts with the block parser.
+# nim_edit asks a NIM model for exact-text edits, recorded through the
+# propose_edit tool or, as a fallback, written as edit blocks in its answer;
+# Castor checks each one against the file and turns the result into a
+# patch. This section starts with the block parser.
 # ---------------------------------------------------------------------------
 
 EDIT_MARKER = "<<<EDIT"
@@ -7660,7 +7730,12 @@ Make this mechanical edit to the repository and answer with edit blocks.
 Task: {task}
 {scope}{cover}
 Read each place you change before you write its block. Change every place \
-the task covers and nothing else.\
+the task covers and nothing else.
+
+Record each change with propose_edit as soon as you have read its lines. \
+Castor checks each edit at once and says if it is refused; fix a refusal \
+with another propose_edit or drop_edit. When every change is recorded, \
+reply done.\
 """
 
 NIM_EDIT_SCOPE = "Edit only inside these files or directories: {files}\n"
@@ -7702,8 +7777,263 @@ Re-read the files involved, then answer again with the complete set of \
 edit blocks for the whole task, not only the fixed ones.\
 """
 
+NIM_EDIT_REPAIR_TOOLS = """\
+{prompt}
+
+Your recorded edits were checked and nothing was applied. They are still \
+recorded:
+{edits}
+
+Castor found these problems:
+{errors}
+
+Fix them with propose_edit and drop_edit: re-read the lines involved, \
+record what is missing and drop any edit that is wrong. Then reply done.\
+"""
+
 # Details from _edit_make_patch that already say what went wrong.
 _EDIT_GIT_DETAIL_PREFIXES = ("git check could not run", "git apply --check")
+
+
+# --- nim_edit: edits recorded through propose_edit -------------------------
+
+NIM_EDIT_CALLS_PER_STEP = 16
+NIM_EDIT_REFUSAL_CHARS = 300  # per refusal kept in the stats
+NIM_AGENT_EDIT_NOTE = (
+    " propose_edit and drop_edit calls count apart from the others: up to "
+    f"{NIM_EDIT_CALLS_PER_STEP} of them per request."
+)
+
+NIM_EDIT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_edit",
+            "description": (
+                "Record one edit: replace old with new in path. Castor "
+                "checks it at once and answers with the edit number and "
+                "its lines, or why it was refused. No file is written."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to the project",
+                    },
+                    "old": {
+                        "type": "string",
+                        "description": (
+                            "Whole lines copied exactly from read_range or "
+                            'grep output, without the "N: " or "path:N:" '
+                            "prefixes"
+                        ),
+                    },
+                    "new": {
+                        "type": "string",
+                        "description": (
+                            'The replacement lines. new "" deletes the old '
+                            "lines."
+                        ),
+                    },
+                },
+                "required": ["path", "old", "new"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "drop_edit",
+            "description": "Remove a recorded edit by its number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "edit": {
+                        "type": "integer",
+                        "description": "The number propose_edit gave it",
+                    },
+                },
+                "required": ["edit"],
+            },
+        },
+    },
+]
+NIM_EDIT_TOOL_NAMES = frozenset(
+    tool["function"]["name"] for tool in NIM_EDIT_TOOLS
+)
+
+
+@dataclass(frozen=True)
+class _StoredEdit:
+    """One recorded edit: its block, file and matched range.
+
+    `start` and `end` are offsets in the file's original text (a delete
+    widened to its terminator); `lines` is the 1-based inclusive range.
+    """
+
+    block: EditBlock
+    path: Path
+    relative: str
+    start: int
+    end: int
+    lines: tuple[int, int]
+
+
+@dataclass
+class _EditStore:
+    """The edits one nim_edit run records through propose_edit.
+
+    One store serves the first loop and the repair loop. `edits` maps
+    each recorded edit's number to it, in the order recorded; `texts`
+    holds the original text of every file read for them; `refusals` the
+    refusal messages given. `drops` counts successful drop_edit calls (a
+    propose_edit repeat key carries it), `calls` the edit tool calls run,
+    and `used` is set once the recorded edits were taken as the answer.
+    """
+
+    scope: list[str] | None
+    edits: dict[int, _StoredEdit] = field(default_factory=dict)
+    texts: dict[Path, str] = field(default_factory=dict)
+    refusals: list[str] = field(default_factory=list)
+    next_index: int = 1
+    drops: int = 0
+    calls: int = 0
+    used: bool = False
+
+
+def _edit_recorded(store: _EditStore | None) -> bool:
+    """True when a store is given and holds at least one edit."""
+    return store is not None and bool(store.edits)
+
+
+def _edit_store_blocks(store: _EditStore) -> list[EditBlock]:
+    """The recorded edits' blocks, in the order they were recorded."""
+    return [edit.block for edit in store.edits.values()]
+
+
+def _edit_run_tool(
+    store: _EditStore, root: Path, name: str, args: dict
+) -> str:
+    """Run one propose_edit or drop_edit call against the store."""
+    store.calls += 1
+    if name == "propose_edit":
+        return _edit_propose(store, root, args)
+
+    return _edit_drop(store, args.get("edit"))
+
+
+def _edit_proposed_block(args: dict, index: int) -> EditBlock | None:
+    """The block a propose_edit call asks for, or None for bad arguments.
+
+    new "" deletes the old lines; then one trailing newline comes off old
+    and new, so new "\\n" leaves one empty line.
+    """
+    path, old, new = (args.get(key) for key in ("path", "old", "new"))
+    if not all(isinstance(value, str) for value in (path, old, new)):
+        return None
+
+    deletes = new == ""
+    return EditBlock(
+        index, path, old.removesuffix("\n"), new.removesuffix("\n"), deletes
+    )
+
+
+def _edit_propose(store: _EditStore, root: Path, args: dict) -> str:
+    """Check one proposed edit now: record it, or refuse it with the reason."""
+    block = _edit_proposed_block(args, store.next_index)
+    if block is None:
+        edit, error = None, "path, old and new must be strings"
+    else:
+        edit, error = _edit_place(store, root, block)
+    if error or edit is None:
+        message = f"edit refused: {error or 'not placed'}"
+        store.refusals.append(message)
+        return message
+
+    store.edits[edit.block.index] = edit
+    store.next_index += 1
+    first, last = edit.lines
+    return (
+        f"edit {edit.block.index} recorded: {edit.relative} "
+        f"lines {first}-{last}"
+    )
+
+
+def _edit_store_text(
+    store: _EditStore, path: Path
+) -> tuple[str | None, str | None]:
+    """A file's original text, read once per run: (text, None) or (None,
+    reason)."""
+    if path in store.texts:
+        return store.texts[path], None
+
+    text, error = _edit_read(path)
+    if text is not None:
+        store.texts[path] = text
+    return text, error
+
+
+def _edit_place(
+    store: _EditStore, root: Path, block: EditBlock
+) -> tuple[_StoredEdit | None, str | None]:
+    """Match a block against its file's original text and the recorded
+    edits in that file, as _edit_apply_in_memory does."""
+    path, error = _edit_resolve(block.path, root, store.scope)
+    if error or path is None:
+        return None, error or "invalid path"
+
+    text, error = _edit_store_text(store, path)
+    if text is None:
+        return None, error or "file creation is not supported"
+
+    rel = path.relative_to(root).as_posix()
+    taken = [
+        (edit.start, edit.end, index)
+        for index, edit in store.edits.items()
+        if edit.path == path
+    ]
+    hit, error = _edit_locate(text, block, rel, taken)
+    if error or hit is None:
+        return None, error
+
+    start, end, _ = hit
+    lines = _edit_span(text, start, text[start:end])
+    return _StoredEdit(block, path, rel, start, end, lines), None
+
+
+def _edit_drop(store: _EditStore, raw: Any) -> str:
+    """Remove recorded edit `raw` (its number) from the store."""
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        return "[error: edit must be a recorded edit's number]"
+
+    if store.edits.pop(number, None) is None:
+        return f"[error: no recorded edit {number}]"
+
+    store.drops += 1
+    return f"edit {number} dropped"
+
+
+def _edit_store_lines(store: _EditStore) -> str:
+    """The recorded edits as "- edit N: path lines A-B" lines."""
+    return "\n".join(
+        f"- edit {index}: {edit.relative} lines {edit.lines[0]}-"
+        f"{edit.lines[1]}"
+        for index, edit in store.edits.items()
+    )
+
+
+def _edit_store_stats(store: _EditStore) -> dict[str, Any]:
+    """The edit tool keys of a run's stats."""
+    return {
+        "edit_tool": store.used,
+        "edit_calls": store.calls,
+        "edit_refusals": [
+            message[:NIM_EDIT_REFUSAL_CHARS] for message in store.refusals
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -7818,9 +8148,9 @@ def _edit_job(
 
 
 def _edit_explore(
-    job: _EditJob, task: str, steps: int
+    job: _EditJob, task: str, steps: int, store: _EditStore
 ) -> tuple[bool, str, dict]:
-    """One agent loop that must answer with edit blocks."""
+    """One agent loop that records edits in `store` or answers with blocks."""
     return _nim_agent_loop(
         task,
         job.root,
@@ -7829,6 +8159,7 @@ def _edit_explore(
         job.max_tokens,
         job.step_model,
         answer=NIM_EDIT_ANSWER,
+        edits=store,
     )
 
 
@@ -8038,12 +8369,26 @@ def _edit_check_coverage(
     return errors, sorted(outside)
 
 
-def _edit_check_answer(answer: str, job: _EditJob) -> _EditCheck:
-    """Parse an answer, apply it in memory and check must_cover coverage."""
+def _edit_answer_blocks(
+    answer: str, store: _EditStore
+) -> tuple[list[EditBlock], list[str]]:
+    """The run's blocks: the recorded edits, else the answer's text blocks."""
+    if store.edits:
+        store.used = True
+        return _edit_store_blocks(store), []
+
     blocks, errors = _parse_edit_blocks(answer)
     if not blocks and not errors:
         errors = ["no edit blocks in the answer"]
+    return blocks, errors
 
+
+def _edit_check_answer(
+    answer: str, job: _EditJob, store: _EditStore
+) -> _EditCheck:
+    """Take the recorded edits (or parse the answer), apply them in memory
+    and check must_cover coverage."""
+    blocks, errors = _edit_answer_blocks(answer, store)
     changes, applied = _edit_apply_in_memory(blocks, job.root, job.scope)
     errors += applied
     outside: list[_EditUse] = []
@@ -8065,24 +8410,40 @@ def _edit_merge_stats(stats: dict, extra: dict) -> None:
     stats.setdefault("requests", []).extend(extra.get("requests", []))
 
 
-def _edit_repair(job: _EditJob, check: _EditCheck, stats: dict) -> _EditCheck:
-    """One short loop that sees the rejected answer and its errors.
+def _edit_repair_task(
+    job: _EditJob, check: _EditCheck, store: _EditStore
+) -> str:
+    """The repair loop's task: the recorded edits, or the rejected answer,
+    with the errors."""
+    errors = "\n".join(f"- {error}" for error in check.errors)
+    if store.edits:
+        return NIM_EDIT_REPAIR_TOOLS.format(
+            prompt=job.prompt, edits=_edit_store_lines(store), errors=errors
+        )
 
-    The new answer is checked on its own. A failed repair run keeps the
-    first answer's errors and adds its own, so the result is a refusal.
-    """
-    task = NIM_EDIT_REPAIR.format(
-        prompt=job.prompt,
-        answer=check.answer.strip(),
-        errors="\n".join(f"- {error}" for error in check.errors),
+    return NIM_EDIT_REPAIR.format(
+        prompt=job.prompt, answer=check.answer.strip(), errors=errors
     )
-    ok, text, extra = _edit_explore(job, task, NIM_EDIT_REPAIR_STEPS)
+
+
+def _edit_repair(
+    job: _EditJob, check: _EditCheck, stats: dict, store: _EditStore
+) -> _EditCheck:
+    """One short loop that sees the errors and fixes the edits.
+
+    The repair loop shares the run's store, so recorded edits stay unless
+    it drops them; its result is checked on its own. A failed repair run
+    keeps the first check's errors and adds its own, so the result is a
+    refusal.
+    """
+    task = _edit_repair_task(job, check, store)
+    ok, text, extra = _edit_explore(job, task, NIM_EDIT_REPAIR_STEPS, store)
     _edit_merge_stats(stats, extra)
     if not ok:
         failed = f"repair run failed: {text}"
         return _EditCheck(check.answer, [], {}, [*check.errors, failed])
 
-    return _edit_check_answer(text, job)
+    return _edit_check_answer(text, job, store)
 
 
 def _edit_one_line(text: str) -> str:
@@ -8205,6 +8566,9 @@ def _edit_base_stats() -> dict[str, Any]:
         "outcome": "refused",
         "patch": None,
         "unedited_references": 0,
+        "edit_tool": False,
+        "edit_calls": 0,
+        "edit_refusals": [],
     }
 
 
@@ -8231,8 +8595,9 @@ def _run_nim_edit(
 ) -> tuple[str, dict]:
     """Explore, check, repair once, then return a checked patch or refuse.
 
-    NIM answers with edit blocks; nothing is written to the repo. Any error
-    left after the repair round is a refusal with no patch file.
+    NIM records edits with propose_edit (or, failing that, answers with
+    edit blocks); nothing is written to the repo. Any error left after the
+    repair round is a refusal with no patch file.
 
     Returns:
         (result text, stats for the trace and the eval script).
@@ -8257,18 +8622,20 @@ def _run_nim_edit(
         root,
     )
     started = time.monotonic()
-    ok, text, stats = _edit_explore(job, job.prompt, steps)
+    store = _EditStore(scope=job.scope)
+    ok, text, stats = _edit_explore(job, job.prompt, steps, store)
     stats.update(_edit_base_stats())
     if ok:
-        check = _edit_check_answer(text, job)
+        check = _edit_check_answer(text, job, store)
         if check.errors:
             stats["repair"] = True
-            check = _edit_repair(job, check, stats)
+            check = _edit_repair(job, check, stats, store)
         text = _edit_outcome(job, check, stats["repair"], stats)
     stats.update(
         seconds=round(time.monotonic() - started, 1),
         model=job.model,
         step_model=job.step_model,
+        **_edit_store_stats(store),
     )
     _agent_trace_write(task, root, ok, text, stats)
     return text, stats
@@ -8287,25 +8654,29 @@ def nim_edit(
 
     Mechanical edits only: a rename, a signature change carried to every
     caller, a constant and its mentions in the docs, table rows, import
-    fixes. The model reads the repo with the nim_agent tools and answers
-    with exact-text edit blocks. Castor checks each block (inside cwd and
-    `files`, old text found exactly once as whole lines, no overlaps) and
-    the uses of each `must_cover` symbol: its call sites and definition
-    must be edited wherever they are, and other grep hits (references,
-    strings, doc mentions) wherever `files` allows (all of cwd without
-    it). References outside `files` do not refuse; the OK result lists
-    them after the `checked:` line so you can see what the patch left
-    alone. A call site or definition counts as edited only when a block
-    changes its statement; any other mention only when its own line
-    changes. The
-    reference search skips engine assets (.prefab, .meta, .unity and the
-    rest of NIM_AGENT_SKIP_EXTENSIONS), files over 1 MB and binary or
-    non-UTF-8 files, so mentions there are not required. Castor gives the
-    model one repair round, then builds a unified diff and runs
-    `git apply --check`. NIM never writes files and Castor never edits
-    project files: it writes the patch and a trace under its cache dir,
-    and builds dekko's map in `.dekko/` under cwd when `must_cover` or
-    the dekko tools are used.
+    fixes. The model reads the repo with the nim_agent tools and records
+    each exact-text edit with propose_edit (drop_edit takes one back).
+    Castor checks each edit as it arrives (inside cwd and `files`, old
+    text found exactly once as whole lines, no overlap with a recorded
+    edit) and tells the model at once if it is refused, so it can fix the
+    copy while the file is in view. When nothing was recorded, edit blocks
+    in the model's answer are checked the same way, as a fallback. Castor
+    then checks the uses of each `must_cover` symbol: its call sites and
+    definition must be edited wherever they are, and other grep hits
+    (references, strings, doc mentions) wherever `files` allows (all of
+    cwd without it). References outside `files` do not refuse; the OK
+    result lists them after the `checked:` line so you can see what the
+    patch left alone. A call site or definition counts as edited only
+    when an edit changes its statement; any other mention only when its
+    own line changes. The reference search skips engine assets (.prefab,
+    .meta, .unity and the rest of NIM_AGENT_SKIP_EXTENSIONS), files over
+    1 MB and binary or non-UTF-8 files, so mentions there are not
+    required. Castor gives the model one repair round (recorded edits
+    stay, and the model fixes them with propose_edit and drop_edit), then
+    builds a unified diff and runs `git apply --check`. NIM never writes
+    files and Castor never edits project files: it writes the patch and a
+    trace under its cache dir, and builds dekko's map in `.dekko/` under
+    cwd when `must_cover` or the dekko tools are used.
 
     Read the diff before applying it, then run `git apply <patch>` from
     the repo top level (`patch -p1` from cwd outside git). A refusal

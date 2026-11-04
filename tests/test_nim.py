@@ -3927,3 +3927,380 @@ def test_nim_edit_reports_zero_unedited_references_by_default(stub, repo):
     out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
     assert "unedited references" not in out
     assert stats["unedited_references"] == 0
+
+
+# --- nim_edit: edits recorded through propose_edit ---------------------------
+
+
+def _step(*calls):
+    """One step's reply holding several tool calls, each (name, args)."""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(args),
+                            },
+                        }
+                        for i, (name, args) in enumerate(calls)
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+
+def _propose(path, old, new):
+    return ("propose_edit", {"path": path, "old": old, "new": new})
+
+
+def _steps(stub, *replies):
+    """Queue step replies: a tuple of calls is a tool step, a str a text."""
+    for reply in replies:
+        body = _completion(reply) if isinstance(reply, str) else _step(*reply)
+        stub.queue.append((200, {}, body))
+
+
+def _tool_replies(post):
+    """The tool results a request carried, in order."""
+    return [m["content"] for m in post[3]["messages"] if m["role"] == "tool"]
+
+
+def _tool_names(post):
+    return [t["function"]["name"] for t in post[3].get("tools") or []]
+
+
+def _store(scope=None):
+    return server._EditStore(scope=scope)
+
+
+def _propose_in(store, repo, path, old, new):
+    args = {"path": path, "old": old, "new": new}
+    return server._edit_run_tool(store, repo, "propose_edit", args)
+
+
+def test_propose_edit_patch_equals_the_text_block_patch(stub, repo):
+    _git_init(repo)
+    _steps(stub, (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),), "done")
+    tool_out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    _answers(stub, _GOOD_EDIT)
+    text_out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    head = "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    assert tool_out.split("\n")[0] == head == text_out.split("\n")[0]
+    assert tool_out.split("\n")[4:] == text_out.split("\n")[4:]
+    first, second = stub.posts()[:2]
+    assert _tool_names(first)[-2:] == ["propose_edit", "drop_edit"]
+    assert "propose_edit, drop_edit" in first[3]["messages"][0]["content"]
+    assert _tool_replies(second) == ["edit 1 recorded: src/a.py lines 2-2"]
+    assert (repo / "src" / "a.py").read_text() == "one\nTARGET = 1\nthree\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "error"),
+    [
+        (
+            "src/a.py",
+            "TARGET = 9",
+            "old text not found in src/a.py (closest is line 2: `TARGET = 1`)",
+        ),
+        (
+            "src/d.py",
+            "x = 1",
+            "old text matches 2 times in src/d.py (lines 1, 2; add a line "
+            "that tells them apart)",
+        ),
+        (
+            "src/a.py",
+            "TARGET",
+            "old text must be whole lines (copy each line in full); line 2 "
+            "in full: `TARGET = 1`",
+        ),
+        ("docs/x.md", "TARGET", "outside scope"),
+        (".env", "TARGET=secret-value", "denied"),
+        ("../outside.txt", "TARGET outside", "outside cwd"),
+    ],
+)
+def test_propose_edit_refusal_records_nothing(repo, path, old, error):
+    (repo / "src" / "d.py").write_text("x = 1\nx = 1\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "x.md").write_text("TARGET\n")
+    store = _store(scope=["src", ".env", "../outside.txt"])
+    out = _propose_in(store, repo, path, old, "changed")
+    assert out == f"edit refused: {error}"
+    assert store.edits == {} and store.refusals == [out]
+    good = _propose_in(store, repo, "src/a.py", "TARGET = 1", "TARGET = 2")
+    assert good == "edit 1 recorded: src/a.py lines 2-2"
+    assert [b.index for b in server._edit_store_blocks(store)] == [1]
+
+
+def test_drop_edit_removes_an_edit_and_never_reuses_its_number(repo):
+    store = _store()
+    assert _propose_in(store, repo, "src/a.py", "one", "ONE").startswith(
+        "edit 1 recorded"
+    )
+    assert _propose_in(store, repo, "src/a.py", "three", "3").startswith(
+        "edit 2 recorded"
+    )
+    drop = server._edit_run_tool
+    assert drop(store, repo, "drop_edit", {"edit": 1}) == "edit 1 dropped"
+    assert drop(store, repo, "drop_edit", {"edit": 1}) == (
+        "[error: no recorded edit 1]"
+    )
+    assert drop(store, repo, "drop_edit", {"edit": 7}) == (
+        "[error: no recorded edit 7]"
+    )
+    again = _propose_in(store, repo, "src/a.py", "one", "ONE")
+    assert again == "edit 3 recorded: src/a.py lines 1-1"
+    assert [b.index for b in server._edit_store_blocks(store)] == [2, 3]
+
+
+def test_drop_edit_leaves_the_edit_out_of_the_patch(stub, repo):
+    _steps(
+        stub,
+        (
+            _propose("src/a.py", "one", "ONE"),
+            _propose("src/a.py", "three", "3"),
+        ),
+        (("drop_edit", {"edit": 1}),),
+        "done",
+    )
+    out = _tool(server.nim_edit)("change three", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+    assert "-three\n+3\n" in out and "+ONE" not in out
+    assert _tool_replies(stub.posts()[2])[-1] == "edit 1 dropped"
+
+
+def test_propose_edit_refuses_an_overlap_with_a_recorded_edit(repo):
+    store = _store()
+    _propose_in(store, repo, "src/a.py", "TARGET = 1", "TARGET = 2")
+    out = _propose_in(store, repo, "./src/a.py", "TARGET = 1\nthree", "x")
+    assert out == "edit refused: overlaps block 1 in src/a.py"
+    assert list(store.edits) == [1]
+
+
+@pytest.mark.parametrize(
+    ("new", "result"),
+    [("", "one\nthree\n"), ("\n", "one\n\nthree\n")],
+)
+def test_propose_edit_empty_new_deletes_the_lines(repo, new, result):
+    store = _store()
+    out = _propose_in(store, repo, "src/a.py", "TARGET = 1\n", new)
+    assert out == "edit 1 recorded: src/a.py lines 2-2"
+    blocks = server._edit_store_blocks(store)
+    changes, errors = server._edit_apply_in_memory(blocks, repo, None)
+    assert errors == []
+    assert changes[repo / "src" / "a.py"].new == result
+
+
+def test_recorded_edits_skip_the_answer_request(stub, repo):
+    _steps(stub, (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),))
+    out, stats = server._run_nim_edit("set TARGET", str(repo), max_steps=2)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 1 and all("tools" in p[3] for p in posts)
+    assert stats["steps"] == 1
+
+
+def test_text_blocks_still_work_when_nothing_is_recorded(stub, repo):
+    _answers(stub, _GOOD_EDIT)
+    out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+    assert "propose_edit" in _tool_names(stub.posts()[0])
+    assert stats["edit_tool"] is False and stats["edit_calls"] == 0
+
+
+def _call(name, args, call_id):
+    return {
+        "id": call_id,
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+def _offered():
+    return frozenset(
+        [*server.NIM_AGENT_TOOL_NAMES, *server.NIM_EDIT_TOOL_NAMES]
+    )
+
+
+def test_edit_calls_have_their_own_step_cap(repo):
+    rows = [f"item {i:02d}" for i in range(20)]
+    (repo / "src" / "many.py").write_text("\n".join(rows) + "\n")
+    calls = [
+        _call(
+            "propose_edit",
+            {"path": "src/many.py", "old": row, "new": row + "!"},
+            f"e{i}",
+        )
+        for i, row in enumerate(rows[:17])
+    ]
+    store = _store()
+    out = server._agent_step_results(repo, calls, set(), _offered(), store)
+    contents = [m["content"] for m in out]
+    assert all(c.startswith("edit ") for c in contents[:16])
+    assert contents[16] == "[skipped: too many tool calls in one step]"
+    assert len(store.edits) == server.NIM_EDIT_CALLS_PER_STEP == 16
+
+
+def test_read_and_edit_calls_share_a_step(repo):
+    reads = [
+        ("list_dir", {}),
+        ("list_dir", {"path": "src"}),
+        ("read_range", {"path": "src/a.py", "start": 1, "end": 3}),
+        ("grep", {"pattern": "TARGET"}),
+    ]
+    edits = [
+        ("propose_edit", {"path": "src/a.py", "old": old, "new": "x"})
+        for old in ("one", "TARGET = 1", "three")
+    ]
+    mixed = [reads[0], edits[0], reads[1], edits[1], reads[2], edits[2]]
+    mixed += [reads[3], ("list_dir", {"path": "."})]
+    calls = [_call(n, a, f"c{i}") for i, (n, a) in enumerate(mixed)]
+    out = server._agent_step_results(repo, calls, set(), _offered(), _store())
+    contents = [m["content"] for m in out]
+    assert "skipped" not in " ".join(contents[:7])
+    assert contents[7] == "[skipped: too many tool calls in one step]"
+    assert [c for c in contents if c.startswith("edit ")] == [
+        "edit 1 recorded: src/a.py lines 1-1",
+        "edit 2 recorded: src/a.py lines 2-2",
+        "edit 3 recorded: src/a.py lines 3-3",
+    ]
+
+
+def test_propose_edit_runs_again_after_a_drop(repo):
+    store = _store()
+    seen = set()
+    args = {"path": "src/a.py", "old": "TARGET = 1", "new": "TARGET = 2"}
+    propose = _call("propose_edit", args, "p")
+    drop = _call("drop_edit", {"edit": 1}, "d")
+
+    def run(call):
+        out = server._agent_step_results(repo, [call], seen, _offered(), store)
+        return out[0]["content"]
+
+    assert run(propose) == "edit 1 recorded: src/a.py lines 2-2"
+    assert "already ran" in run(propose)
+    assert run(drop) == "edit 1 dropped"
+    assert run(propose) == "edit 2 recorded: src/a.py lines 2-2"
+
+
+def test_repair_round_keeps_and_lists_recorded_edits(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    _steps(
+        stub,
+        (
+            _propose("src/lib.py", "def old_name():", "def new_name():"),
+            _propose(
+                "src/use.py",
+                "    return old_name() + 1",
+                "    return new_name() + 1",
+            ),
+        ),
+        "all recorded, done",
+        (
+            _propose(
+                "src/use.py",
+                "    return old_name() + 2",
+                "    return new_name() + 2",
+            ),
+        ),
+        "done",
+    )
+    out, stats = server._run_nim_edit(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 3 blocks, repair round: yes]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 4
+    repair = posts[2][3]["messages"][1]["content"]
+    assert "- edit 1: src/lib.py lines 1-1" in repair
+    assert "- edit 2: src/use.py lines 2-2" in repair
+    assert "- call site src/use.py:6 of old_name not edited" in repair
+    assert "propose_edit" in repair and "drop_edit" in repair
+    assert "all recorded" not in repair
+    assert "previous answer" not in repair
+    assert _tool_replies(posts[3])[-1] == (
+        "edit 3 recorded: src/use.py lines 6-6"
+    )
+    assert stats["edit_tool"] is True and stats["edit_calls"] == 3
+
+
+def test_repair_run_failure_with_recorded_edits_refuses(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    _steps(
+        stub,
+        (_propose("src/lib.py", "def old_name():", "def new_name():"),),
+        "done",
+    )
+    stub.queue.append((401, {}, {"error": "bad key"}))
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: REFUSED after repair round]"
+    assert lines[-1].startswith("- repair run failed: [")
+    assert _patches() == []
+
+
+def test_agent_roles_never_offer_the_edit_tools(stub, repo):
+    _answers(stub, "agent answer", "scout answer")
+    _tool(server.nim_agent)("where is TARGET?", str(repo))
+    _tool(server.nim_scout)("find TARGET", str(repo))
+    posts = stub.posts()
+    assert len(posts) == 2
+    for post in posts:
+        assert _tool_names(post) == ["grep", "read_range", "list_dir"]
+        assert "propose_edit" not in post[3]["messages"][0]["content"]
+
+
+def test_nim_edit_reports_edit_tool_stats(stub, repo):
+    _steps(
+        stub,
+        (
+            _propose("src/a.py", "TARGET = 9", "TARGET = 2"),
+            _propose("src/a.py", "TARGET = 1", "TARGET = 2"),
+        ),
+        "done",
+    )
+    out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
+    assert out.startswith("[nim_edit: OK")
+    assert stats["edit_tool"] is True
+    assert stats["edit_calls"] == 2
+    assert stats["edit_refusals"] == [
+        "edit refused: old text not found in src/a.py "
+        "(closest is line 2: `TARGET = 1`)"
+    ]
+
+
+def test_edit_refusals_are_clipped_in_the_stats(repo):
+    line = "x = '" + "a" * 500 + "'"
+    (repo / "src" / "long.py").write_text(line + "\n")
+    store = _store()
+    out = _propose_in(store, repo, "src/long.py", line[:30], "y")
+    assert out.startswith("edit refused: old text must be whole lines")
+    assert len(out) > 300
+    (clipped,) = server._edit_store_stats(store)["edit_refusals"]
+    assert clipped == out[:300]
+
+
+def test_edit_base_stats_carry_the_edit_tool_keys():
+    stats = server._edit_base_stats()
+    assert stats["edit_tool"] is False
+    assert stats["edit_calls"] == 0 and stats["edit_refusals"] == []

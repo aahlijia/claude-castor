@@ -154,7 +154,7 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
 | `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
 | `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll` |
-| `nim_edit` | `(task, cwd, files=None, must_cover=None, model=None, max_steps=None)` | Mechanical edit as a checked patch under `~/.cache/claude-castor/nim-patches/`; NIM never writes files. Each block's old text must be whole lines matching exactly once inside `cwd` and `files`; `must_cover` (needs dekko) requires every call site and the definition edited, and other mentions inside `files` (ones outside are listed, not refused); one repair round, then a refusal or `git apply --check`. Read the diff, then `git apply <patch>` |
+| `nim_edit` | `(task, cwd, files=None, must_cover=None, model=None, max_steps=None)` | Mechanical edit as a checked patch under `~/.cache/claude-castor/nim-patches/`; NIM never writes files. The model records edits with `propose_edit`/`drop_edit`, each checked on arrival (edit blocks in the answer are the fallback). Each edit's old text must be whole lines matching exactly once inside `cwd` and `files`; `must_cover` (needs dekko) requires every call site and the definition edited, and other mentions inside `files` (ones outside are listed, not refused); one repair round, then a refusal or `git apply --check`. Read the diff, then `git apply <patch>` |
 | `nim_edit_start` | same | Background `nim_edit`; input is checked at start; poll with `gemini_poll` |
 | `nim_models` | `(query=None)` | List served model ids |
 | `nim_usage` | `(days=7)` | Per-day and per-model requests, failures, tokens and agent runs from local records |
@@ -171,8 +171,15 @@ not offer gets the unknown-tool reply. To offer them, any agent role builds
 dekko's map in `.dekko/` under `cwd` (`dekko map --if-stale`, at most once a
 minute per root; a failed build is not retried for 30 minutes). It shows in
 `git status` as an untracked directory; Castor never edits the repo's
-`.gitignore`. `nim_edit` reuses the loop with an edit-block answer rule and returns
-patches Castor checks (`_run_nim_edit`). Agent roles default to
+`.gitignore`. `nim_edit` reuses the loop with two more tools and returns
+patches Castor checks (`_run_nim_edit`): the model records each edit with
+`propose_edit(path, old, new)` and takes one back with `drop_edit(edit)`.
+Each proposal is checked on arrival against the file and the edits already
+recorded (`_EditStore`), and a refusal comes back with its repair hint.
+Recorded edits are the answer: no answer request is made for them, and the
+repair round keeps and lists them. Edit calls have their own cap
+(`NIM_EDIT_CALLS_PER_STEP`, 16 per step). With nothing recorded, edit blocks
+in the answer are parsed as before (the fallback). Agent roles default to
 `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super); `CASTOR_NIM_AGENT_MODEL`
 overrides it, and a set `CASTOR_NIM_MODEL` is followed.
 `CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another model while
