@@ -399,16 +399,18 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one explain_row case through nim_explain_row and score it."""
     started = time.monotonic()
     try:
-        cwd = snapshot_with_log(case, server)
-        text = _tool_fn(server.nim_explain_row)(
-            str(cwd),
-            case["log"],
-            case["row"],
-            case.get("occurrence", 0),
-            "text",
-            config["model"],
-            None,
-        )
+        with dekko_scope(config, server):
+            cwd = snapshot_with_log(case, server)
+            _prepare_dekko(config, cwd, server)
+            text = _tool_fn(server.nim_explain_row)(
+                str(cwd),
+                case["log"],
+                case["row"],
+                case.get("occurrence", 0),
+                "text",
+                config["model"],
+                None,
+            )
     except Exception as exc:  # a failed run is an error row, not a crash
         text = f"[Error: {type(exc).__name__}: {exc}]"
     result = score_explain_row(text, case)
@@ -417,6 +419,7 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
         case=case["name"],
         role="explain_row",
         config=config["label"],
+        dekko=config.get("dekko"),
         seconds=round(time.monotonic() - started, 1),
         answer=text,
     )
@@ -932,8 +935,15 @@ def summarize(results: list[dict], label: str) -> str:
         for r in results
         if r["config"] == label and r.get("role") == "explain_row"
     ]
-    if explains:
-        return summarize_explain_row(explains, label)
+    main = _summarize_main(results, label)
+    if not explains:
+        return main or summarize_rows([], label)
+    explain_lines = summarize_explain_row(explains, label)
+    return f"{main}\n{explain_lines}" if main else explain_lines
+
+
+def _summarize_main(results: list[dict], label: str) -> str:
+    """The review, scout, triage and edit lines ("" when there are none)."""
     edits = [
         r for r in results if r["config"] == label and r.get("role") == "edit"
     ]
@@ -943,7 +953,7 @@ def summarize(results: list[dict], label: str) -> str:
         if not rows:
             return edit_line
         return summarize_rows(rows, label) + "\n" + edit_line
-    return summarize_rows(rows, label)
+    return summarize_rows(rows, label) if rows else ""
 
 
 EXPLAIN_ROW_BARS = {"site": 10, "right": 8, "wrong": 1, "errors": 0}

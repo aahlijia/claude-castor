@@ -935,3 +935,73 @@ def test_snapshot_with_log_leaves_base_untouched(tmp_path):
     assert (snap / "Library/flow/r.log").read_text() == "FAIL x\n"
     assert not (fixture / "Library").exists()
     assert nim_eval.snapshot_with_log(case, server) == snap
+
+
+def test_summary_keeps_main_lines_beside_explain_row():
+    review = {
+        "config": "c",
+        "role": "review",
+        "leads": 2,
+        "matched": 1,
+        "hit": ["x"],
+        "known": 1,
+        "must_hit": [],
+        "musts": 0,
+        "quotes": [0, 0],
+        "seconds": 3.0,
+        "steps": 2,
+        "failed": False,
+    }
+    text = nim_eval.summarize([review, *_rows(1, 12, 12, 0)], "c")
+    lines = text.splitlines()
+    assert "precision" in lines[0] and "explain_row" not in lines[0]
+    assert "explain_row run 1" in lines[1]
+    assert lines[-1].endswith("explain_row gate: pass")
+
+
+def _explain_server(seen):
+    override = contextvars.ContextVar("o", default=None)
+
+    def explain_row(*_a):
+        seen["at_run"] = override.get()
+        return "[Error: x]"
+
+    def ensure_map(root):
+        seen["map"] = root
+        return True
+
+    return SimpleNamespace(
+        _dekko_override=override,
+        _dekko_ensure_map=ensure_map,
+        _cache_dir=lambda: seen["cache"],
+        nim_explain_row=explain_row,
+    )
+
+
+def _explain_case(tmp_path):
+    (tmp_path / "fx").mkdir()
+    return {
+        "name": "e",
+        "role": "explain_row",
+        "dir": "fx",
+        "_base": str(tmp_path),
+        "log": "r.log",
+        "row": "x",
+        "expected_site": {"file": "a.sh", "lines": [1, 2]},
+    }
+
+
+@pytest.mark.parametrize("dekko", [True, False, None])
+def test_explain_row_case_honours_the_dekko_setting(tmp_path, dekko):
+    seen = {"cache": tmp_path / "cache"}
+    server = _explain_server(seen)
+    config = {"label": "c", "model": None}
+    if dekko is not None:
+        config["dekko"] = dekko
+    result = nim_eval.run_explain_row_case(
+        _explain_case(tmp_path), config, server
+    )
+    assert seen["at_run"] is dekko
+    assert ("map" in seen) is (dekko is True)
+    assert result["dekko"] is dekko
+    assert server._dekko_override.get() is None
