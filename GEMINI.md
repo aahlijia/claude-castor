@@ -346,6 +346,17 @@ quote that isn't at the cited line `[quote is at line N]` or
 `[quote not in file]`, so treat those leads as wrong or mislocated. A
 matched quote proves the location, not the claim.
 
+`nim_triage_log` (and its `_start`) takes `format="json"` for a program that
+consumes the result. Castor parses the model's usual answer, so the model is
+never asked for JSON. You get `verdict`, `totals`, `rows` (the log's FAIL and
+NOT ASSESSED rows, read by Castor from the log, not the model), `failures`
+(each with its `row`, `log_line`, `cause_shown`, `verified`, `quote_ok`),
+`markers` and `agent` stats. Errors are objects with `error` set to
+`rate_limited` (with `retry_after_s`), `failed` or `bad_input`. There is no
+confidence or owner field: a self-rated number is not calibrated, and triage
+reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
+are the checks Castor can stand behind.
+
 **Models.** Every `nim_*` tool defaults to Nemotron 3.5 Super
 (`nvidia/nemotron-3.5-super-vl-120b-a12b`); `CASTOR_NIM_MODEL` and
 `CASTOR_NIM_AGENT_MODEL` override it. The other model worth passing is

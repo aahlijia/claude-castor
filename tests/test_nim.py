@@ -4454,3 +4454,164 @@ def test_gated_tools_register_only_with_their_env(monkeypatch):
         (server.nim_edit, server.nim_edit_start), "CASTOR_NIM_EDIT"
     )
     assert {"nim_edit", "nim_edit_start"} <= names()
+
+
+# --- triage json -------------------------------------------------------------
+
+
+def _triage_json(stub, repo, answer, name="run.log", log=None):
+    if log is not None:
+        (repo / name).write_text("\n".join(log) + "\n")
+    stub.queue.append((200, {}, _completion(answer)))
+    out = _tool(server.nim_triage_log)(str(repo), name, format="json")
+    return json.loads(out)
+
+
+def test_triage_json_shape(stub, repo):
+    log = _verdict_log(
+        [("  trial 1: none", None), ("FAIL", "tops: x", "1 of 3")]
+    )
+    out = _triage_json(
+        stub,
+        repo,
+        "Verdict: failed\n- suite.log:1 - trial missed - start not on top",
+        "suite.log",
+        log,
+    )
+    assert out["verdict"] == "failed" and out["log"] == "suite.log"
+    assert out["rows"] == [
+        {
+            "row": "tops: x",
+            "verdict": "FAIL",
+            "detail": "1 of 3",
+            "log_line": 2,
+        }
+    ]
+    f = out["failures"][0]
+    assert (f["row"], f["log_line"], f["what"], f["cause_hint"]) == (
+        "tops: x",
+        1,
+        "trial missed",
+        "start not on top",
+    )
+    assert f["verified"] is True and f["cause_shown"] is True
+    assert f["quote_ok"] is None
+    assert set(out["agent"]) == {"model", "steps", "seconds"}
+
+
+def test_triage_json_maps_failure_to_second_occurrence(stub, repo):
+    log = _verdict_log(
+        [
+            ("PASS", "x", "ok"),
+            ("  trial a", None),
+            ("FAIL", "x", "2 of 3"),
+        ]
+    )
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:3 - trial a - cause not shown",
+        log=log,
+    )
+    assert out["rows"] == [
+        {"row": "x", "verdict": "FAIL", "detail": "2 of 3", "log_line": 4}
+    ]
+    assert out["failures"][0]["row"] == "x"
+
+
+def test_triage_json_without_rows(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - door stuck - jammed",
+        log=["[12:00:01] ERROR door stuck"],
+    )
+    assert out["rows"] == [] and out["totals"] is None
+    assert out["failures"][0]["row"] is None
+    assert out["markers"]["ERROR"] == 1
+
+
+def test_triage_json_tolerates_loose_answers(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "I looked.\n- run.log:3 - boom - cause not shown\nfoo",
+        log=["a", "b", "FAIL boom"],
+    )
+    assert out["verdict"] is None and len(out["failures"]) == 1
+    f = out["failures"][0]
+    assert f["cause_shown"] is False and f["cause_hint"] == ""
+
+
+def test_triage_json_marks_unverified_and_quote_tags(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:999 - gone - why\n"
+        "- run.log:1 - quoted `x` [quote not in file] - why\n"
+        "\n[nim_agent: 1 steps, 0 tool calls, model m]",
+        log=["FAIL x"],
+    )
+    first, second = out["failures"]
+    assert first["verified"] is False and first["what"] == "gone"
+    assert second["quote_ok"] is False and second["verified"] is True
+    assert "[" not in second["what"]
+
+
+def test_triage_json_rate_limit_error(stub, repo, monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_run_nim_agent",
+        lambda *a, **k: (
+            "[NVIDIA NIM is rate-limited: try again in ~42s. Client limit "
+            "is 40 requests/min per key (CASTOR_NIM_RPM).]",
+            {},
+        ),
+    )
+    (repo / "run.log").write_text("FAIL x\n")
+    out = json.loads(
+        _tool(server.nim_triage_log)(str(repo), "run.log", format="json")
+    )
+    assert out == {
+        "error": "rate_limited",
+        "retry_after_s": 42,
+        "message": out["message"],
+    }
+    assert "rate-limited" in out["message"]
+
+
+def test_nim_error_json_other_failures():
+    out = server._nim_error_json("[NIM request failed: boom]")
+    assert out == {"error": "failed", "message": "NIM request failed: boom"}
+
+
+def test_triage_json_bad_input(repo):
+    out = json.loads(
+        _tool(server.nim_triage_log)(str(repo), "nope.log", format="json")
+    )
+    assert out["error"] == "bad_input"
+
+
+def test_triage_format_rejects_unknown(repo):
+    out = _tool(server.nim_triage_log)(str(repo), "x.log", format="xml")
+    assert out.startswith("[Error")
+    start = _tool(server.nim_triage_log_start)
+    assert start(str(repo), "x.log", format="xml").startswith("[Error")
+
+
+def test_triage_start_json_runs_json_runner(stub, repo):
+    (repo / "run.log").write_text("FAIL x\n")
+    stub.queue.append(
+        (200, {}, _completion("failed\n- run.log:1 - x failed - why"))
+    )
+    started = _tool(server.nim_triage_log_start)(
+        str(repo), "run.log", format="json"
+    )
+    out = json.loads(_poll_until_done(_job_id(started)))
+    assert out["verdict"] == "failed" and out["failures"][0]["log_line"] == 1
+
+
+def test_triage_text_default_unchanged(captured, repo):
+    (repo / "run.log").write_text("FAIL x\n")
+    assert _tool(server.nim_triage_log)(str(repo), "run.log") == "ok"
+    assert len(captured) == 1
