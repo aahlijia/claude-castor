@@ -318,12 +318,14 @@ files yourself when the answer is a short list and the reading is bulk:
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
-| Mechanical edit across files (under evaluation, see below) | `nim_edit` |
+| Mechanical edit across files (off unless `CASTOR_NIM_EDIT=1`, see below) | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
 
-`nim_edit` uses the same read-only tools and answers with edit blocks that
-Castor turns into a checked patch; it never writes project files. It is under
-evaluation: its stage 1 gate and live pilot have not passed yet. Read the
+`nim_edit` uses the same read-only tools, records each edit with
+`propose_edit`, and Castor turns them into a checked patch; it never writes
+project files. It is off unless the server runs with `CASTOR_NIM_EDIT=1`: its
+stage 1 gate has not passed (run 6 on 2026-11-04 returned two patches with a
+whitespace mistake out of 33) and its live pilot has not run. Read the
 returned diff in full before `git apply <patch>`, and log each use in
 `.memories/nim-edit-pilot.md`.
 

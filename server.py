@@ -8661,7 +8661,6 @@ def _run_nim_edit(
     return text, stats
 
 
-@mcp.tool()
 def nim_edit(
     task: str,
     cwd: str,
@@ -8729,7 +8728,6 @@ def nim_edit(
     return _dispatch_nim_edit(task, cwd, files, must_cover, model, max_steps)
 
 
-@mcp.tool()
 def nim_edit_start(
     task: str,
     cwd: str,
@@ -8773,6 +8771,22 @@ def nim_edit_start(
         "max_steps": max_steps,
     }
     return _start_agent_job("NIM edit", kwargs, _dispatch_nim_edit)
+
+
+def _register_gated(fns: tuple[Any, ...], env: str) -> None:
+    """Register tools whose eval gate has not passed only when env is "1".
+
+    The functions stay importable either way, so tests and the eval script
+    call them directly.
+    """
+    if os.environ.get(env) == "1":
+        for fn in fns:
+            mcp.tool()(fn)
+
+
+# nim_edit failed its stage 1 gate (run 6, 2026-11-04: two whitespace-wrong
+# patches); it is offered only with CASTOR_NIM_EDIT=1.
+_register_gated((nim_edit, nim_edit_start), "CASTOR_NIM_EDIT")
 
 
 if __name__ == "__main__":

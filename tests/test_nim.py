@@ -635,9 +635,9 @@ def test_all_nim_tools_registered():
         "nim_first_pass_review_start",
         "nim_triage_log",
         "nim_triage_log_start",
-        "nim_edit",
-        "nim_edit_start",
     } <= names
+    if os.environ.get("CASTOR_NIM_EDIT") != "1":
+        assert not {"nim_edit", "nim_edit_start"} & names
 
 
 # --- multiple keys --------------------------------------------------------
@@ -4343,3 +4343,23 @@ def test_edit_tool_errors_come_back_as_tool_errors(repo):
         store, repo, "drop_edit", {"edit": float("inf")}
     )
     assert out.startswith("[tool error:")
+
+
+def test_gated_tools_register_only_with_their_env(monkeypatch):
+    import asyncio
+
+    from fastmcp import FastMCP
+
+    def names():
+        return {t.name for t in asyncio.run(server.mcp.list_tools())}
+
+    monkeypatch.setattr(server, "mcp", FastMCP("gate-off"))
+    monkeypatch.delenv("CASTOR_NIM_EDIT", raising=False)
+    server._register_gated((server.nim_edit,), "CASTOR_NIM_EDIT")
+    assert "nim_edit" not in names()
+    monkeypatch.setattr(server, "mcp", FastMCP("gate-on"))
+    monkeypatch.setenv("CASTOR_NIM_EDIT", "1")
+    server._register_gated(
+        (server.nim_edit, server.nim_edit_start), "CASTOR_NIM_EDIT"
+    )
+    assert {"nim_edit", "nim_edit_start"} <= names()
