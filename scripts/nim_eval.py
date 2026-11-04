@@ -461,10 +461,14 @@ def print_tasks(cases: list[dict], out: Path, server: ModuleType) -> None:
     out.mkdir(parents=True, exist_ok=True)
     index = []
     for case in cases:
-        cwd = snapshot_with_log(case, server)
-        with history_scope(case, {}, server):
-            task, error = build_task(case, cwd, server)
-        entry = {"name": case["name"], "snapshot": str(cwd)}
+        entry: dict[str, str] = {"name": case["name"]}
+        try:
+            cwd = snapshot_with_log(case, server)
+            entry["snapshot"] = str(cwd)
+            with history_scope(case, {}, server):
+                task, error = build_task(case, cwd, server)
+        except Exception as exc:  # one bad case is an entry, not a crash
+            task, error = None, f"[Error: {type(exc).__name__}: {exc}]"
         if task is None:
             entry["error"] = error
         else:

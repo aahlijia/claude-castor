@@ -1169,3 +1169,16 @@ def test_print_tasks_writes_task_files(tmp_path, monkeypatch):
     assert [e["name"] for e in index] == ["h"]
     assert Path(index[0]["snapshot"]).is_dir()
     assert index[0]["task_file"] == str(out / "h.txt")
+
+
+def test_print_tasks_records_a_failing_case_and_goes_on(tmp_path):
+    server = _real_server()
+    root, first = _history_repo(tmp_path)
+    good = _history_case(tmp_path, root, first)
+    bad = {"name": "b", "role": "explain", "_base": str(tmp_path)}
+    bad["dir"] = "src"
+    nim_eval.print_tasks([bad, good], tmp_path / "out", server)
+    index = json.loads((tmp_path / "out" / "index.json").read_text())
+    assert [e["name"] for e in index] == ["b", "h"]
+    assert "error" in index[0] and "task_file" not in index[0]
+    assert "task_file" in index[1]
