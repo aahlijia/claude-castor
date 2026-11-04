@@ -1,7 +1,8 @@
 """Score Castor's NIM roles and plain tools against cases with known answers.
 
 Each case names a role (review, scout or triage for the agent; explain or
-summarize for plain calls; edit for nim_edit), where its code comes from,
+summarize for plain calls; edit for nim_edit; explain_row for the verdict
+row explainer), where its code comes from,
 and the findings, ranges, log lines or key points a good answer holds. The
 script runs every case under every model configuration. Agent answers are
 scored by their path:line citations (lead precision, recall, must-catch
@@ -25,7 +26,7 @@ edits were recorded with propose_edit parses no answer: its row has
 
 Case fields (JSON list of objects):
     name, role                 "review" | "scout" | "triage" | "explain"
-                               | "summarize" | "edit"
+                               | "summarize" | "edit" | "explain_row"
     repo, commit, paths        snapshot source (paths limit the archive)
     apply                      optional diff applied to the snapshot
     dir                        or a fixture directory instead of a repo
@@ -34,6 +35,12 @@ Case fields (JSON list of objects):
     log                        triage input, relative to the case's code
     error_file, files          explain inputs: a file holding the error
                                text, and source files to inline
+    log_file, row, occurrence  explain_row inputs: a log kept outside the
+                               snapshot (relative to the cases file),
+                               copied to `log` in the snapshot; the row
+                               name; which run of a repeated name
+    reading                    explain_row: "harness" or "game", the
+                               reading a good answer gives
     target                     summarize input, relative to the case's code
     task, files, must_cover    edit inputs: the edit as briefed, the scope
                                fence, symbols whose uses must be edited
@@ -84,7 +91,8 @@ DEFAULT_WINDOW = 10
 # edit_refused); any other failure is an error row. A must_cover case
 # under dekko=off is "needs dekko", left out of the correct K/N count.
 # 5: a failed repair run or a stalled answer is an error row as well.
-SCORING_VERSION = 5
+# 6: explain_row role scored by Verdict code site and Reading word.
+SCORING_VERSION = 6
 ROLE_STEPS = {
     "review": "NIM_REVIEW_STEPS",
     "scout": "NIM_SCOUT_STEPS",
@@ -190,6 +198,11 @@ def build_task(
         return task, error or ""
     if role == "scout":
         return server._scout_task(case["question"]), ""
+    if role == "explain_row":
+        task, _, error = server._explain_row_task(
+            str(cwd), case["log"], case["row"], case.get("occurrence", 0)
+        )
+        return task, error or ""
     task, _, error, _ = server._triage_task(
         str(cwd), case["log"], case.get("question")
     )
@@ -293,10 +306,93 @@ def score_plain(case: dict, text: str) -> dict:
     }
 
 
+def copy_log_file(case: dict, cwd: Path) -> None:
+    """Put a case's log_file into the snapshot at its `log` path."""
+    if "log_file" not in case:
+        return
+    source = (Path(case["_base"]) / case["log_file"]).resolve()
+    target = cwd / case["log"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+
+
+def _site_hit(cited: str, case: dict) -> bool:
+    """Whether a path:line citation lands on any expected location."""
+    match = CITE_RE.search(cited)
+    if not match:
+        return False
+    path, line = match.group(1).removeprefix("./"), int(match.group(2))
+    site = case["expected"][0]
+    window = site.get("window", 3)
+    for expected in site["locations"]:
+        low, high = expected["lines"]
+        same = path == expected["file"] or path.endswith(
+            "/" + expected["file"]
+        )
+        if same and low - window <= line <= high + window:
+            return True
+    return False
+
+
+def score_explain_row(answer: str, case: dict) -> dict:
+    """Score an explain_row answer: site hit, reading right or wrong.
+
+    A "Verdict code: not found" is a site miss. An "unclear" or missing
+    reading is neither right nor wrong. A bracketed answer is an error.
+    """
+    if answer.startswith("["):
+        return {
+            "site_hit": False,
+            "reading_right": False,
+            "reading_wrong": False,
+            "error": True,
+        }
+    code = re.search(r"^Verdict code:(.*)$", answer, re.M | re.I)
+    word = re.search(r"^Reading:\s*(harness|game)\b", answer, re.M | re.I)
+    reading = word.group(1).lower() if word else None
+    return {
+        "site_hit": bool(code) and _site_hit(code.group(1), case),
+        "reading_right": reading == case["reading"],
+        "reading_wrong": reading is not None and reading != case["reading"],
+        "error": False,
+    }
+
+
+def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
+    """Run one explain_row case through nim_explain_row and score it."""
+    started = time.monotonic()
+    try:
+        cwd = snapshot(case, server)
+        copy_log_file(case, cwd)
+        text = _tool_fn(server.nim_explain_row)(
+            str(cwd),
+            case["log"],
+            case["row"],
+            case.get("occurrence", 0),
+            "text",
+            config["model"],
+            None,
+        )
+    except Exception as exc:  # a failed run is an error row, not a crash
+        text = f"[Error: {type(exc).__name__}: {exc}]"
+    result = score_explain_row(text, case)
+    result.update(
+        scoring=SCORING_VERSION,
+        case=case["name"],
+        role="explain_row",
+        config=config["label"],
+        seconds=round(time.monotonic() - started, 1),
+        answer=text,
+    )
+    return result
+
+
 def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one case under one configuration and score it."""
     if case["role"] in PLAIN_ROLES:
         return run_plain(case, config, server)
+    if case["role"] == "explain_row":
+        return run_explain_row_case(case, config, server)
     if case["role"] == "edit":
         return run_edit_case(case, config, server)
     with dekko_scope(config, server):
@@ -795,6 +891,13 @@ def summarize(results: list[dict], label: str) -> str:
 
     Precision covers agent roles only; plain roles have no leads.
     """
+    explains = [
+        r
+        for r in results
+        if r["config"] == label and r.get("role") == "explain_row"
+    ]
+    if explains:
+        return summarize_explain_row(explains, label)
     edits = [
         r for r in results if r["config"] == label and r.get("role") == "edit"
     ]
@@ -805,6 +908,18 @@ def summarize(results: list[dict], label: str) -> str:
             return edit_line
         return summarize_rows(rows, label) + "\n" + edit_line
     return summarize_rows(rows, label)
+
+
+def summarize_explain_row(rows: list[dict], label: str) -> str:
+    """One table row for a configuration's explain_row runs."""
+    n = len(rows)
+    return (
+        f"{label:<24} explain_row: "
+        f"site {sum(r['site_hit'] for r in rows)}/{n}, "
+        f"reading right {sum(r['reading_right'] for r in rows)}/{n}, "
+        f"wrong {sum(r['reading_wrong'] for r in rows)}  "
+        f"errors {sum(r['error'] for r in rows)}"
+    )
 
 
 def summarize_edit(rows: list[dict], label: str) -> str:
@@ -885,6 +1000,11 @@ def rescore(path: Path, cases: list[dict]) -> None:
             if case["role"] == "edit":
                 _rescore_edit(r, case)
                 continue
+            if case["role"] == "explain_row":
+                scored = score_explain_row(r["answer"], case)
+                r.update(scored, role="explain_row")
+                r["scoring"] = SCORING_VERSION
+                continue
             scorer = score_plain if case["role"] in PLAIN_ROLES else score
             r.update(scorer(case, r["answer"]), role=case["role"])
             r["scoring"] = SCORING_VERSION
@@ -929,6 +1049,14 @@ def stale_rows(results: list[dict]) -> int:
 def report(results: list[dict], labels: list[str]) -> None:
     """Print one line per run, then one summary row per configuration."""
     for r in results:
+        if r.get("role") == "explain_row":
+            print(
+                f"{r['config']:<24} {r['case']:<22} explain_row "
+                f"site {int(r['site_hit'])} right {int(r['reading_right'])} "
+                f"wrong {int(r['reading_wrong'])} "
+                f"{'ERROR ' if r['error'] else ''}{r['seconds']:.0f}s"
+            )
+            continue
         if r.get("needs_dekko"):
             print(f"{r['config']:<24} {r['case']:<22} edit needs dekko")
             continue

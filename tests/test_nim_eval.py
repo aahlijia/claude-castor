@@ -775,3 +775,84 @@ def test_build_task_triage_case_returns_task(tmp_path):
     case["log"] = "missing.log"
     task, error = nim_eval.build_task(case, tmp_path, server)
     assert task is None and error.startswith("[Error")
+
+
+EXPLAIN_ROW_CASE = {
+    "name": "r",
+    "role": "explain_row",
+    "reading": "harness",
+    "expected": [
+        {
+            "id": "site",
+            "window": 3,
+            "locations": [
+                {"file": "Tools/playtest/flow.sh", "lines": [414, 414]},
+                {"file": "Tools/playtest/flow.sh", "lines": [88, 88]},
+            ],
+        }
+    ],
+}
+
+
+def _row_answer(code: str, reading: str) -> str:
+    return (
+        "Row: runstate equal (FAIL)\n"
+        f"Verdict code: {code}\n"
+        "Precondition: none\n"
+        "Trial lines: run.log:4\n"
+        f"Reading: {reading}\n"
+    )
+
+
+def test_score_explain_row_hit_within_three_lines():
+    answer = _row_answer(
+        "Tools/playtest/flow.sh:91 - cat_verdict", "harness - x"
+    )
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got == {
+        "site_hit": True,
+        "reading_right": True,
+        "reading_wrong": False,
+        "error": False,
+    }
+    far = _row_answer("Tools/playtest/flow.sh:93 - x", "harness - x")
+    assert not nim_eval.score_explain_row(far, EXPLAIN_ROW_CASE)["site_hit"]
+
+
+def test_score_explain_row_wrong_file_is_miss():
+    answer = _row_answer("Tools/playtest/other.sh:414 - x", "harness - x")
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got["site_hit"] is False and got["error"] is False
+    none = _row_answer("not found", "harness - x")
+    got = nim_eval.score_explain_row(none, EXPLAIN_ROW_CASE)
+    assert got["site_hit"] is False and got["error"] is False
+
+
+def test_score_explain_row_unclear_is_neither():
+    answer = _row_answer("Tools/playtest/flow.sh:414 - x", "unclear - x")
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got["reading_right"] is False and got["reading_wrong"] is False
+    assert got["site_hit"] is True
+
+
+def test_score_explain_row_swapped_is_wrong():
+    answer = _row_answer("Tools/playtest/flow.sh:414 - x", "game - x")
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got["reading_right"] is False and got["reading_wrong"] is True
+    err = nim_eval.score_explain_row("[Error: rate limited]", EXPLAIN_ROW_CASE)
+    assert err["error"] is True and err["site_hit"] is False
+
+
+def test_log_file_copied_into_snapshot(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "a.log").write_text("FAIL x\n")
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    case = {
+        "_base": str(tmp_path),
+        "log_file": "logs/a.log",
+        "log": "Library/flow/run.log",
+    }
+    nim_eval.copy_log_file(case, snap)
+    assert (snap / "Library/flow/run.log").read_text() == "FAIL x\n"
+    nim_eval.copy_log_file({"_base": str(tmp_path), "log": "x"}, snap)
