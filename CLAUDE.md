@@ -109,6 +109,8 @@ lists them. Use for long explorations and fan-out. Workers match the NIM gate
 (4 per key, at most 8); jobs are in-memory (lost on restart) and bounded to 50
 (oldest finished evicted, never a running job). A job waits up to
 `NIM_JOB_MAX_WAIT` (300 s) for a NIM slot or key, a foreground call 30 s.
+Set `CASTOR_NIM_JOB_MAX_WAIT` (seconds, clamped to 60..3600, default 300) to
+change the job wait; `nim_status` reports it as `job wait N s`.
 
 ### Sessions
 
@@ -220,7 +222,8 @@ wait would exceed `NIM_MAX_WAIT` (30s; `NIM_JOB_MAX_WAIT`, 300 s, on a job
 worker). Requests share one `httpx.Client` (`_nim_client`). `_classify_nim_status` decides what is
 retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
 http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
-`CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`. NIM session compaction uses NIM
+`CASTOR_NIM_CONCURRENCY`, `CASTOR_NIM_TIMEOUT`, `CASTOR_NIM_JOB_MAX_WAIT`
+(background-job wait for a slot, 60..3600 s, default 300). NIM session compaction uses NIM
 (`_summarize_text_nim`), so NIM-only users never need agy. `gemini_status` adds
 a one-line `nvidia_nim:` summary (no network call).
 

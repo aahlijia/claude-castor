@@ -603,6 +603,38 @@ def test_status_skip_verify_spends_no_completion(stub):
     assert not stub.posts()
 
 
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        (None, 300.0),
+        ("1800", 1800.0),
+        ("5", 60.0),
+        ("99999", 3600.0),
+        ("x", 300.0),
+    ],
+)
+def test_job_max_wait_env(monkeypatch, raw, want):
+    if raw is None:
+        monkeypatch.delenv("CASTOR_NIM_JOB_MAX_WAIT", raising=False)
+    else:
+        monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", raw)
+    assert server._nim_job_max_wait() == want
+
+
+def test_job_worker_uses_env_wait(monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", "900")
+    server._nim_patience.on = True
+    try:
+        assert server._nim_max_wait() == 900.0
+    finally:
+        server._nim_patience.on = False
+
+
+def test_nim_status_reports_job_wait(stub, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", "1200")
+    assert "job wait 1200 s" in _tool(server.nim_status)(verify=False)
+
+
 def test_nim_start_and_poll(stub):
     started = _tool(server.nim_start)("background q", use_cache=False)
     job_id = re.search(r"job (\w+)\.", started).group(1)
