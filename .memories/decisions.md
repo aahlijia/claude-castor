@@ -295,3 +295,23 @@
   instead) and `owner` (triage reads no code; explain-row's `reading`);
   building run/compare as NQC scripts (Claude's recommendation; the user
   wants them in castor); Castor killing or taking the lock (scripts own it).
+
+### 2026-11-04: Ultra is not a fallback for Super
+- **Why:** on 2026-11-03 Ultra was rate limited on 252 of 326 requests while
+  Super ran 556 clean. Counting by local minute over 2026-11-02 and 11-03:
+  10 minutes held an Ultra rate_limit, 2 of them (09:37 and 09:38 on 11-03)
+  also held successful Super requests (26 in all), and 8 had no Super
+  traffic. The 8 are most of the 429s (245 of 257) because the burst ran
+  09:39 to 09:42 after Super traffic stopped, so the log alone cannot show
+  whether Ultra's limit is separate or just hit first at 64 to 81 requests a
+  minute. The overlap is small but real.
+- **How:** GEMINI.md no longer tells Claude to pass Ultra when Super is slow
+  (all three table rows now say "not as a fallback"); for a slow or limited
+  Super it points to the `_start` job form, which waits up to
+  `CASTOR_NIM_JOB_MAX_WAIT`. This amends the 2026-11-02 "limit is per
+  account, not per model" premise: overlap minutes are above 0, so the
+  premise looks wrong for Ultra, and model fallback chains are open again
+  for a later second-provider design. One 2-minute overlap is thin evidence,
+  so treat it as a lead to test before building chains.
+- **Rejected:** keeping Ultra as the fallback for a crawling Super (it adds
+  a tighter limit exactly when load is high).

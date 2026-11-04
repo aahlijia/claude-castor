@@ -364,9 +364,9 @@ Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b`):
 
 | Tool | Default | Pass Ultra when |
 |---|---|---|
-| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | Super is crawling (under ~40 tokens/s in `nim_usage`); Ultra's speed holds steadier under load |
-| `nim_explain_error` | 3.5 Super | as above; Super found every known cause in the eval, Ultra missed one secondary point |
-| `nim_summarize` | 3.5 Super | as above; Ultra dropped must-have key points on 2 of 3 docs |
+| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | not as a fallback: Ultra has its own, tighter rate limit (252 of 326 requests limited on 2026-11-03 while Super ran clean). For a slow or limited Super, use the `_start` job form, which waits up to `CASTOR_NIM_JOB_MAX_WAIT` |
+| `nim_explain_error` | 3.5 Super | not as a fallback (see above); Super found every known cause in the eval, Ultra missed one secondary point |
+| `nim_summarize` | 3.5 Super | not as a fallback (see above); Ultra dropped must-have key points on 2 of 3 docs |
 | `nim_agent`, `nim_scout`, `nim_first_pass_review`, `nim_triage_log` | 3.5 Super | never: Ultra scored the same, spends every step it is given, and is about 2.5x slower |
 
 Rules of thumb:
