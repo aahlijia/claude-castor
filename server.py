@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -6635,6 +6636,18 @@ NIM_EXPLAIN_ROW_MAX_STEPS = 12
 NIM_EXPLAIN_ROW_BLOCK_LINES = 60  # longer blocks keep the first/last half
 NIM_EXPLAIN_ROW_TRIAL_LINES = 6  # trial lines kept in the JSON
 NIM_EXPLAIN_ROW_CANDIDATES = 10  # row names listed in a lookup error
+# The task carries the latest commits to files named like the log's folder
+# (the suite script), so the reading has the script's fix history.
+NIM_EXPLAIN_ROW_HISTORY_COMMITS = 15
+NIM_EXPLAIN_ROW_HISTORY_FILES = 4
+NIM_GIT_TIMEOUT = 10.0  # seconds for one git query
+# _fix_history_source: None reads (project root, "HEAD"); a (repo, rev)
+# pair reads that repo at that revision (the eval's case commit);
+# FIX_HISTORY_OFF leaves the history out.
+FIX_HISTORY_OFF = "off"
+_fix_history_source: contextvars.ContextVar[tuple[Path, str] | str | None] = (
+    contextvars.ContextVar("fix_history_source", default=None)
+)
 NIM_SCOUT_MAX_ITEMS = 15
 NIM_REVIEW_MAX_DIFF_CHARS = 120_000  # roughly 1,500 lines of diff
 NIM_REVIEW_MAX_FILE_BYTES = 2_000_000
@@ -6773,7 +6786,7 @@ script: {script} (the log's folder name, which is the suite script's name)
 {reason}trial lines, numbered with the log's line numbers:
 {block}
 [/ROW]
-
+{history}
 Your job:
 1. Find where this row's verdict is decided: the `verdict` or `check` call,
    or the probe that prints the detail. Use `search` for a distinctive
@@ -6787,7 +6800,9 @@ Your job:
 4. Give one reading: harness (the test, probe or script is wrong), game
    (the game code behaves wrongly) or unclear, in one sentence that cites
    a line. Say unclear unless the code or log lines you read show which
-   side is wrong.
+   side is wrong. A recent commits list, when present, is a prior, not
+   proof: a past fix to test or tooling code points at the harness, a fix
+   to the game code at the game.
 
 Answer in exactly these five lines and nothing else:
 Row: {name} ({status})
@@ -7725,7 +7740,9 @@ def _explain_row_build(
     if error or found is None:
         return None, root, error, {}
     label = str(target.relative_to(root))
-    task = _explain_row_prompt(found, lines, label, target.parent.name)
+    script = target.parent.name
+    history = _explain_row_history(Path(root), script)
+    task = _explain_row_prompt(found, lines, label, script, history)
     facts = {
         "label": label,
         "row_name": found.name,
@@ -7800,8 +7817,90 @@ def _explain_row_lookup_error(
     return f"[Error: {head}. Rows: {shown}{tail}.{ask}]"
 
 
+def _explain_row_history(root: Path, script: str) -> str:
+    """The fix-history block for the task, per `_fix_history_source`."""
+    source = _fix_history_source.get()
+    if source == FIX_HISTORY_OFF:
+        return ""
+    if isinstance(source, tuple):
+        return _script_fix_history(source[0], source[1], script)
+    return _script_fix_history(root, "HEAD", script)
+
+
+def _git_lines(repo: Path, args: list[str]) -> list[str] | None:
+    """A git command's stdout lines in `repo`, or None when git fails."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=NIM_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace").splitlines()
+
+
+def _script_files(repo: Path, rev: str, name: str) -> list[str]:
+    """Tracked files at `rev` whose stem is `name`, sorted, at most 4."""
+    listed = _git_lines(repo, ["ls-tree", "-r", "--name-only", rev]) or []
+    matches = sorted(
+        path
+        for path in listed
+        if PurePosixPath(path).stem == name
+        and PurePosixPath(path).suffix.lower() not in NIM_AGENT_SKIP_EXTENSIONS
+    )
+    return matches[:NIM_EXPLAIN_ROW_HISTORY_FILES]
+
+
+def _script_fix_history(repo: Path, rev: str, name: str) -> str:
+    """The latest commits to the script `name` as of `rev`, or "".
+
+    Args:
+        repo: A git repository.
+        rev: The revision the history ends at (HEAD, or the eval's case
+            commit, so later fixes stay out).
+        name: The script's name: the log's folder, matched to file stems.
+
+    Returns:
+        A header, a files line and one line per commit (newest first),
+        each cut to NIM_AGENT_LINE_CHARS; "" when nothing matches, the
+        folder is not a git repo or git fails.
+    """
+    files = _script_files(repo, rev, name)
+    if not files:
+        return ""
+    commits = _git_lines(
+        repo,
+        [
+            "log",
+            f"-n{NIM_EXPLAIN_ROW_HISTORY_COMMITS}",
+            "--date=short",
+            "--format=%h %ad %s",
+            rev,
+            "--",
+            *files,
+        ],
+    )
+    if not commits:
+        return ""
+    lines = [
+        "Recent commits to this script (newest first, as of the "
+        "checked-out code):",
+        f"files: {', '.join(files)}",
+        *commits,
+    ]
+    return "\n".join(line[:NIM_AGENT_LINE_CHARS] for line in lines) + "\n"
+
+
 def _explain_row_prompt(
-    row: VerdictRow, lines: list[str], label: str, script: str
+    row: VerdictRow,
+    lines: list[str],
+    label: str,
+    script: str,
+    history: str = "",
 ) -> str:
     """Fill NIM_EXPLAIN_ROW_PROMPT for one row of the log."""
     reason = ""
@@ -7815,6 +7914,7 @@ def _explain_row_prompt(
         verdict_line=lines[row.line - 1][:NIM_AGENT_LINE_CHARS],
         script=script,
         reason=reason,
+        history=history,
         block=_explain_row_block(lines, row.block),
     )
 
