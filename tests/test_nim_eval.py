@@ -972,6 +972,8 @@ def _explain_server(seen):
 
     return SimpleNamespace(
         _dekko_override=override,
+        _fix_history_source=contextvars.ContextVar("h", default=None),
+        FIX_HISTORY_OFF="off",
         _dekko_ensure_map=ensure_map,
         _cache_dir=lambda: seen["cache"],
         nim_explain_row=explain_row,
@@ -1005,3 +1007,133 @@ def test_explain_row_case_honours_the_dekko_setting(tmp_path, dekko):
     assert ("map" in seen) is (dekko is True)
     assert result["dekko"] is dekko
     assert server._dekko_override.get() is None
+
+
+# --- explain row: fix history and the reading round's bar ---------------------
+
+
+def test_parse_config_reads_history():
+    assert nim_eval.parse_config("s=m,history=off")["history"] is False
+    assert nim_eval.parse_config("s=m,history=on")["history"] is True
+    assert "history" not in nim_eval.parse_config("s=m")
+    with pytest.raises(ValueError):
+        nim_eval.parse_config("s=m,history=maybe")
+
+
+def test_explain_row_bars_scale():
+    assert nim_eval.explain_row_bars(12) == {
+        "site": 10,
+        "right": 8,
+        "wrong": 1,
+        "errors": 0,
+    }
+    assert nim_eval.explain_row_bars(18) == {
+        "site": 15,
+        "right": 12,
+        "wrong": 2,
+        "errors": 0,
+    }
+    assert nim_eval.explain_row_bars(10) == {
+        "site": 8,
+        "right": 7,
+        "wrong": 1,
+        "errors": 0,
+    }
+
+
+def _run_rows(n: int, site: int, right: int, wrong: int) -> list[dict]:
+    return [
+        {
+            "site_hit": i < site,
+            "reading_right": i < right,
+            "reading_wrong": n - i <= wrong,
+            "error": False,
+        }
+        for i in range(n)
+    ]
+
+
+def test_explain_run_misses_uses_new_bar():
+    assert nim_eval._explain_run_misses(_run_rows(18, 15, 12, 2), 1) == []
+    misses = nim_eval._explain_run_misses(_run_rows(18, 15, 12, 3), 1)
+    assert misses == ["wrong 3 > 2 in run 1"]
+
+
+def _real_server():
+    import importlib
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    return importlib.import_module("server")
+
+
+def _git(root: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _history_repo(tmp_path: Path) -> tuple[Path, str]:
+    """A repo with two commits to Tools/tops.sh and a stamped verdict log.
+
+    Returns the repo and the first commit's hash.
+    """
+    root = tmp_path / "src"
+    (root / "Tools").mkdir(parents=True)
+    (root / "Library" / "tops").mkdir(parents=True)
+    (root / "Library" / "tops" / "r.log").write_text(
+        f"{'FAIL':<13} {'tops: x (host)':<34} 1 of 3\n"
+        "@case 1700000000 FAIL tops: x (host)\n"
+    )
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    for subject in ("fix(playtest): first", "fix(playtest): later"):
+        (root / "Tools" / "tops.sh").write_text(subject + "\n")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", subject)
+    return root, _git(root, "rev-list", "--max-parents=0", "HEAD")
+
+
+def _history_case(tmp_path: Path, root: Path, commit: str) -> dict:
+    return {
+        "name": "h",
+        "role": "explain_row",
+        "_base": str(tmp_path),
+        "repo": str(root),
+        "commit": commit,
+        "log": "Library/tops/r.log",
+        "row": "tops: x (host)",
+    }
+
+
+def test_history_scope_uses_case_commit(tmp_path):
+    server = _real_server()
+    root, first = _history_repo(tmp_path)
+    case = _history_case(tmp_path, root, first)
+    config = {"label": "c", "model": None}
+    with nim_eval.history_scope(case, config, server):
+        task, error = nim_eval.build_task(case, root, server)
+    assert error == "" and task is not None
+    assert "fix(playtest): first" in task and "later" not in task
+    assert server._fix_history_source.get() is None
+
+
+def test_history_scope_off_and_dir_cases(tmp_path):
+    server = _real_server()
+    root, first = _history_repo(tmp_path)
+    case = _history_case(tmp_path, root, first)
+    off = {"label": "c", "model": None, "history": False}
+    with nim_eval.history_scope(case, off, server):
+        task, _ = nim_eval.build_task(case, root, server)
+    assert task is not None and "Recent commits" not in task
+    dir_case = dict(case, dir="src")
+    del dir_case["repo"]
+    with nim_eval.history_scope(dir_case, {"label": "c"}, server):
+        task, _ = nim_eval.build_task(dir_case, root, server)
+    assert task is not None and "Recent commits" not in task
