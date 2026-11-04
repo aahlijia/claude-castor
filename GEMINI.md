@@ -308,16 +308,26 @@ the prompt). So pick the backend by the shape of the task:
 | Compare two models on one question | `gemini_start` + `nim_start`, then `gemini_poll` both |
 
 **Agent mode (`nim_agent`) changes this.** `nim_agent`, `nim_agent_start` and
-the role tools below give NIM read-only `grep`, `read_range` and `list_dir`,
-run by Castor and confined to `cwd`, so it can explore on its own. Prefer them
-over reading files yourself when the answer is a short list and the reading is
-bulk:
+the tools below give NIM read-only tools run by Castor and confined to `cwd`:
+`grep`, `read_range` and `list_dir`, plus dekko's call-graph tools (`callers`,
+`symbol`, `outline`, `context`, `search`, `trace`) when dekko is installed. NIM
+can read the repo on its own but never writes to it. Prefer them over reading
+files yourself when the answer is a short list and the reading is bulk:
 
 | Task | Use |
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+| Mechanical edit across files (off unless `CASTOR_NIM_EDIT=1`, see below) | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
+
+`nim_edit` uses the same read-only tools, records each edit with
+`propose_edit`, and Castor turns them into a checked patch; it never writes
+project files. It is off unless the server runs with `CASTOR_NIM_EDIT=1`: its
+stage 1 gate has not passed (run 6 on 2026-11-04 returned two patches with a
+whitespace mistake out of 33) and its live pilot has not run. Read the
+returned diff in full before `git apply <patch>`, and log each use in
+`.memories/nim-edit-pilot.md`.
 
 **`nim_first_pass_review` (`/castor:first-pass`) is weak; don't build on it.**
 In a five-review pilot on a Unity project (2026-11-02), 5 of its 25 leads held

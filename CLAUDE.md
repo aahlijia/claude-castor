@@ -35,8 +35,12 @@ the system keyring.
 
 ### 3. Install Python dependencies
 
+dekko (the code map behind the NIM agent's call-graph tools and
+`nim_edit`'s `must_cover`) is installed with the server's dependencies:
+`uv` installs it from `pyproject.toml`. With pip, install it yourself:
+
 ```bash
-pip install fastmcp
+pip install fastmcp "dekko[all]>=1.9.35"
 # or, if using uv:
 uv add fastmcp
 ```
@@ -144,24 +148,42 @@ remains. `_dispatch_nim` mirrors `_dispatch` (same `_assemble_prompt`, response 
 | `nim_review` / `nim_security_review` | `(cwd, diff=None, model=None)` | Diff review (defaults to `git diff HEAD`) |
 | `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
-| `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir run by Castor; cited `path:line` are verified |
+| `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir, plus dekko's callers/symbol/outline/context/search/trace when dekko is on, run by Castor; cited `path:line` are verified |
 | `nim_agent_start` | same | Background `nim_agent`; poll with `gemini_poll` |
 | `nim_scout` | `(question, cwd, model=None, max_steps=None)` | Role: the exact `path:start-end` ranges a task needs |
 | `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
 | `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None)` | Role: verdict plus `log:LINE` failures for a log inside `cwd` |
 | `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `gemini_poll` |
+| `nim_edit` | `(task, cwd, files=None, must_cover=None, model=None, max_steps=None)` | Registered only with `CASTOR_NIM_EDIT=1` (its gate has not passed; `_register_gated`). Mechanical edit as a checked patch under `~/.cache/claude-castor/nim-patches/`; NIM never writes files. The model records edits with `propose_edit`/`drop_edit`, each checked on arrival (edit blocks in the answer are the fallback). Each edit's old text must be whole lines matching exactly once inside `cwd` and `files`; `must_cover` (needs dekko) requires every call site and the definition edited, and other mentions inside `files` (ones outside are listed, not refused); one repair round, then a refusal or `git apply --check`. Read the diff, then `git apply <patch>` |
+| `nim_edit_start` | same | Background `nim_edit`; input is checked at start; poll with `gemini_poll` |
 | `nim_models` | `(query=None)` | List served model ids |
 | `nim_usage` | `(days=7)` | Per-day and per-model requests, failures, tokens and agent runs from local records |
 | `nim_status` | `(verify=True)` | Key/model/limits/cooldown per key; `verify` spends one request per key |
 
 `nim_agent` (`_nim_agent_loop`) is confined to `cwd` (symlinks resolved before
-the containment check; `.env*`, key files and `.git` are off limits), reads at
-most 120 lines per call, caps each tool result, and never lets the model edit or
-run anything. Each step is one NIM request (default 12 steps, max 30; reviews
-8). Agent roles default to `NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super);
-`CASTOR_NIM_AGENT_MODEL` overrides it, and a set `CASTOR_NIM_MODEL` is
-followed. `CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another
-model while the agent model answers (scored no better, so unset by default).
+the containment check; `.env*`, key files, `.git` and `.dekko` are off limits),
+reads at most 120 lines per call, caps each tool result, and never lets the
+model edit or run anything. Each step is one NIM request (default 12 steps, max
+30; reviews 8). With dekko >= 1.9.35 installed the loop also offers six dekko
+tools (`callers`, `symbol`, `outline`, `context`, `search`, `trace`; on by
+default, `CASTOR_NIM_DEKKO=0` turns them off). A call to a tool the run did
+not offer gets the unknown-tool reply. To offer them, any agent role builds
+dekko's map in `.dekko/` under `cwd` (`dekko map --if-stale`, at most once a
+minute per root; a failed build is not retried for 30 minutes). It shows in
+`git status` as an untracked directory; Castor never edits the repo's
+`.gitignore`. `nim_edit` reuses the loop with two more tools and returns
+patches Castor checks (`_run_nim_edit`): the model records each edit with
+`propose_edit(path, old, new)` and takes one back with `drop_edit(edit)`.
+Each proposal is checked on arrival against the file and the edits already
+recorded (`_EditStore`), and a refusal comes back with its repair hint.
+Recorded edits are the answer: no answer request is made for them, and the
+repair round keeps and lists them. Edit calls have their own cap
+(`NIM_EDIT_CALLS_PER_STEP`, 16 per step). With nothing recorded, edit blocks
+in the answer are parsed as before (the fallback). Agent roles default to
+`NIM_AGENT_DEFAULT_MODEL` (Nemotron 3.5 Super); `CASTOR_NIM_AGENT_MODEL`
+overrides it, and a set `CASTOR_NIM_MODEL` is followed.
+`CASTOR_NIM_AGENT_STEP_MODEL` can run the tool steps on another model while
+the agent model answers (scored no better, so unset by default).
 `_agent_verify_citations` tags any `path:line` that does not exist as
 `[unverified]` (a bare file name is checked against the one project file with
 that name), and `_agent_check_quotes` checks each cited line's backticked
@@ -294,6 +316,9 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands `server.py` depends on. After an intended agy
   upgrade, update `server.py`, then refresh with `--update-snapshot`.
+- Before a release and after a dekko bump, run `uv run python
+  scripts/check_dekko_surface.py` to catch drift in the dekko flags and JSON
+  fields Castor relies on; `--update-snapshot` refreshes it.
 - The version string lives only in `pyproject.toml`. Work happens on `develop`.
 
 ---

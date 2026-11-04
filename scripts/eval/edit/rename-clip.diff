@@ -1,0 +1,52 @@
+diff --git a/server.py b/server.py
+index 2077b58..593ca7c 100644
+--- a/server.py
++++ b/server.py
+@@ -4688,7 +4688,7 @@ def _agent_resolve(root: Path, raw: str) -> tuple[Path | None, str | None]:
+     return target, None
+ 
+ 
+-def _agent_clip(text: str) -> str:
++def _agent_truncate(text: str) -> str:
+     """Bound one tool result so a single step can't flood the context."""
+     if len(text) <= NIM_AGENT_RESULT_CHARS:
+         return text
+@@ -4732,7 +4732,9 @@ def _agent_read_range(root: Path, raw: str, start: int, end: int) -> str:
+     if start > len(lines) or end < start:
+         return f"[error: file has {len(lines)} lines]"
+     body = "\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1))
+-    return _agent_clip(f"{raw} lines {start}-{end} of {len(lines)}\n{body}")
++    return _agent_truncate(
++        f"{raw} lines {start}-{end} of {len(lines)}\n{body}"
++    )
+ 
+ 
+ def _agent_skipped(name: str) -> bool:
+@@ -4852,7 +4854,7 @@ def _agent_grep(
+         out.append(
+             f"[showing {shown} of {total} matching lines; narrow the search]"
+         )
+-    return _agent_clip("\n".join(out)) if out else "[no matches]"
++    return _agent_truncate("\n".join(out)) if out else "[no matches]"
+ 
+ 
+ def _agent_run_tool(root: Path, name: str, args: dict) -> str:
+@@ -5386,14 +5388,16 @@ def _dekko_tool(root: Path, name: str, args: dict) -> str:
+         return values
+     if name == "callers":
+         sites, text = _dekko_callers(root, values[0])
+-        return _agent_clip(text) if sites is not None else _dekko_error(text)
++        return (
++            _agent_truncate(text) if sites is not None else _dekko_error(text)
++        )
+     ok, text = _dekko_run(root, _dekko_command(name, values))
+     if not ok and name == "trace" and text.startswith("[dekko error: exit 1:"):
+         return "[no call path found]"
+     if not ok:
+         return _dekko_error(text)
+     try:
+-        return _agent_clip(_DEKKO_RENDERERS[name](json.loads(text)))
++        return _agent_truncate(_DEKKO_RENDERERS[name](json.loads(text)))
+     except (ValueError, TypeError, AttributeError, KeyError):
+         return "[tool error: dekko output was unreadable]"
+ 

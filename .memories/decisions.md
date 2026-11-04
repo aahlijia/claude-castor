@@ -190,3 +190,88 @@
 ### 2026-11-02: Unity skip dirs are NIM-agent-only
 - **Why:** the design put `Library`, `Temp`, `obj` in the shared `SKIP_DIRS`,
   but it also ruled out agy-path changes. They live in `NIM_AGENT_SKIP_DIRS`.
+
+### 2026-11-03: dekko agent tools stay on by default (0b gate passed)
+- **Why:** `scripts/nim_eval.py`, Nemotron 3.5 Super, scout/review/triage cases
+  (3 castor + 5 NQC), 2 runs each, configs interleaved in the same window.
+  dekko on vs off: recall 23/62 vs 23/62, must-catch 14/20 vs 13/20, lead
+  precision 57% vs 51%, quotes matched 61/70 vs 52/69, median 52 s vs 65 s,
+  6.2 steps both. The gate (recall and must-catch do not drop; median steps
+  or seconds fall) holds on time. Results:
+  `~/.cache/claude-castor/eval/results-20261103-075502.json`.
+- **Caveat:** two runs per config; NQC review hits move between runs (e.g.
+  M6-nrm-sign found once with dekko off, not with it on). Speed is
+  load-dependent; both configs shared the hour.
+- **Rejected:** shipping dekko off by default (no measured loss to justify it).
+
+### 2026-11-03: Review context keeps grep for call sites (0c gate failed)
+- **Why:** review cases (1 castor + 5 NQC), Super, 2 runs, all in one window,
+  dekko agent tools on in both: dekko-sourced `_review_uses` recall 8/44,
+  must-catch 6/12, precision 26%, median 70 s; grep-sourced recall 12/44,
+  must-catch 6/12, precision 28%, 71 s. Recall dropped and time did not
+  fall. Part of the gap is one long grep-context run on nqc-11d2-3a (28
+  leads), so it may be noise, but nothing showed a gain. Reverted
+  (c8d5d29, bca5f83). Results: `results-20261103-080727.json` (dekko
+  context, with an on/off pair) and `results-20261103-080211.json` (grep
+  context).
+- **Note:** the plan's on/off comparison mixed agent tools and review
+  context; the gate compared dekko-on runs of the two servers instead.
+- **Rejected:** keeping it on the 0b gate's strength (different change).
+
+### 2026-11-03: No `[1m]` NIM model ids; Castor's input cap stays at 300k chars
+- **Why:** the catalog has no `[1m]` ids and the API 404s them (`[1m]` is a
+  Claude Code naming convention). The plain ids already take a ~950k-token
+  needle prompt (Super 109 s, Mistral Large 4 216 s). The 1,048,576 figure
+  NIM reports is a gateway `max_tokens` cap. Castor's 300k-char budget is
+  about answer quality (summaries cover only the start past ~35k tokens),
+  not the window.
+
+### 2026-11-03: Mistral Large 4 stays out (confirmed with an eval)
+- **Why:** `scripts/nim_eval.py`, 14 cases x2 vs Super: 9/28 runs failed
+  (NQC reviews ran 40-60 min), median 1,262 s vs 79 s, recall 62/110 vs
+  64/110, must-catch 27/38 both. It rejects `reasoning_budget` (400);
+  `reasoning_effort: "low"` works but it still ran ~9 tokens/s.
+- **Rejected:** background-only use (no quality gain to pay for the wait).
+
+### 2026-11-03: NIM write access starts as `nim_edit`, staged behind gates (user)
+- **Why:** the review pilot closed negative, so start with mechanical edits
+  only. NIM returns exact-text blocks; Castor checks them, builds the diff,
+  runs `git apply --check`, writes a patch file; Claude reads and applies.
+  Stages after this one (fix rounds, NQC Editor-free tasks, a general edit
+  tool) each need their own spec, eval and pilot. Gates: offline eval
+  (>=90% correct, 0 wrong-but-applies, 0 out-of-scope, refusals refused,
+  >=2 runs), then a 10-edit pilot (>=9 applied as-is).
+- **Rejected:** Castor applying patches or running checks in a worktree;
+  NIM-written unified diffs (fuzzy repair hides misplaced edits); whole-file
+  rewrites; setting the bar after a baseline.
+
+### 2026-11-03: dekko is a declared dependency; Castor builds the map (user)
+- **Why:** the CLI (callers, symbol, outline, context, search, trace) needs
+  a map; a `.dekko/` folder in a project is acceptable. Castor runs its own
+  pinned dekko (`Path(sys.executable).parent / "dekko"`), never PATH's, and
+  `scripts/check_dekko_surface.py` guards the contract. Not used: `dekko
+  sanity` (whole-tree grep ignoring .gitignore and the deny list) and
+  `dekko diff` (needs a rev; eval snapshots have no commits).
+- **Rejected:** existing maps only; waiting for an out-of-tree map option.
+
+### 2026-11-03: must_cover rules for nim_edit
+- **Why:** call sites and the definition must be edited everywhere;
+  grep-only references must be edited inside `files` (all of cwd when
+  absent); references outside `files` are listed in the OK result, not
+  refused, so dated notes can stay unedited and visible. The map and file
+  index are refreshed before every coverage round (a 60 s cache let a new
+  call site slip through). Limitation: dekko does not index module
+  constants, so must_cover cannot be used for them.
+- **Rejected:** every reference everywhere (forces rewriting history or
+  refusing); call sites only (non-call references slipped through).
+
+### 2026-11-04: nim_edit stage 1 gate run 6 failed on two whitespace patches
+- **Why:** after the propose_edit tool (Task 14) and its review fixes,
+  Super with dekko on scored 30/33 (91%) correct, 0 out of scope, 6/6
+  refusals, 0 errors, but 2 wrong patches; dekko off scored 24/24 without
+  the must_cover cases. Both wrong patches are valid edits with a whitespace
+  mistake: a missing blank line (first-pass-docs, 1 of 3) and six lines
+  wrapped that were within 79 columns (rename-test-helper, 1 of 3, as in run
+  2). Results: `~/.cache/claude-castor/eval/results-20261104-075545.json`.
+- **How:** the strict bar (0 wrong applies) stands until the user rules;
+  the next step is theirs.

@@ -1,0 +1,53 @@
+diff --git a/GEMINI.md b/GEMINI.md
+index e79fc4b..a71cc32 100644
+--- a/GEMINI.md
++++ b/GEMINI.md
+@@ -316,16 +316,22 @@ bulk:
+ | Task | Use |
+ |---|---|
+ | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
+-| First-pass review of a diff, with surrounding code | `nim_first_pass_review` (`/castor:first-pass`); pass `rev_range` or `diff_file`, never paste the diff |
+ | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+ | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
+ 
++**`nim_first_pass_review` (`/castor:first-pass`) is weak; don't build on it.**
++In a five-review pilot on a Unity project (2026-11-02), 5 of its 25 leads held
++up, all of them repeats of what the Claude review found, 12 were wrong, and it
++caught none of the three known findings (it called one real bug correct). Use
++it at most as an occasional extra on a small diff, never as a step a review or
++pipeline waits on, and never in place of reading the diff yourself.
++
+ Keep the judgment calls (rulings, design, the final review) for yourself. Each
+ agent step is one NIM request, so prefer a handful of focused tasks to one huge
+ one, and use `nim_agent_start` (or a role's `_start` variant, such as
+ `nim_first_pass_review_start`) to fan out or to keep working while a review
+ runs. Every `path:line` is checked; one
+ tagged `[unverified]` is a hallucination, so discard it.
+ 
+ Rules of thumb:
+ 
+diff --git a/commands/castor/first-pass.md b/commands/castor/first-pass.md
+index 9ec76b9..7836193 100644
+--- a/commands/castor/first-pass.md
++++ b/commands/castor/first-pass.md
+@@ -10,3 +10,5 @@ Call `nim_first_pass_review` with:
+ - `focus`: a few lines of project rules to check, if the project has them ($ARGUMENTS may name them)
+ 
+ Diffs over about 1,500 lines are refused: review those in parts. The result ranks Critical, Important and Minor findings as `path:line - failure - smallest fix`, with citations checked. Treat each as a lead: verify it against the code before reporting or fixing it, and never cite it as evidence. It complements a Claude review, it does not replace one.
++
++Expect a low hit rate. In a five-review pilot on a Unity project, about 1 lead in 5 held up, all repeats of what the Claude review found, and it missed every known real finding. Say so when you report its results, and don't make it a step that other work waits on.
+diff --git a/server.py b/server.py
+index 655142f..c0491e0 100644
+--- a/server.py
++++ b/server.py
+@@ -4822,6 +4822,10 @@ def nim_first_pass_review(
+     lines are used. Its findings are leads to verify, not verdicts. Diffs
+     over about 1,500 lines are refused; review those in parts.
+ 
++    Expect a low hit rate: in a five-review pilot about 1 lead in 5 held
++    up and it missed every known real finding. Use it as an occasional
++    extra, never as a step a review or pipeline waits on.
++
+     Args:
+         cwd: Absolute project root.
+         diff_file: Absolute path of a saved diff. Takes precedence. It

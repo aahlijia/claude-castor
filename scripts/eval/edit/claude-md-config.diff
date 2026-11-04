@@ -1,0 +1,13 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0db3a3d..8e8817f 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -288,7 +288,7 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
+   network, no real key). The agy path has no automated tests.
+ - Before changing a NIM role prompt, the agent loop or a default model, score
+   it: `uv run --with httpx --with fastmcp python scripts/nim_eval.py
+-  scripts/eval/cases.json [private cases] --config label=model[,step=model]`
++  scripts/eval/cases.json [private cases] --config label=model[,step=model][,dekko=on|off]`
+   (needs `NVIDIA_API_KEYS`; spends free-tier requests). It reports lead
+   precision, recall of known findings, must-catch hits, time and steps.
+   `--rescore results.json` re-scores saved answers after editing cases. A

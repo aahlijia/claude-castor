@@ -1,0 +1,12 @@
+diff --git a/GEMINI.md b/GEMINI.md
+index 2454387..39718b5 100644
+--- a/GEMINI.md
++++ b/GEMINI.md
+@@ -389,6 +389,7 @@ Rules of thumb:
+ | Force a fresh run (skip cache) | `gemini_prompt` with `use_cache=False` |
+ | Second opinion on a diff from another model | `nim_review` / `nim_security_review` with `cwd` |
+ | Offload inline-able work to NVIDIA NIM | `nim_prompt` with `files` |
++| Rename or change a signature across files | `nim_edit` with `cwd`, `files` + `must_cover`; read the diff, then `git apply` it |
+ | Check NIM setup | `nim_status` |
+ | Clear all cached responses | `gemini_cache_clear` |
+ | Pick a specific model | `gemini_prompt` with `model=...` |
