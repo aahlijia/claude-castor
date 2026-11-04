@@ -318,6 +318,7 @@ files yourself when the answer is a short list and the reading is bulk:
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
+| Explain a FAIL or NOT ASSESSED row of a playtest log (gated, off unless `CASTOR_NIM_EXPLAIN_ROW=1`, see below) | `nim_explain_row` |
 | Mechanical edit across files (off unless `CASTOR_NIM_EDIT=1`, see below) | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
 
@@ -356,6 +357,18 @@ NOT ASSESSED rows, read by Castor from the log, not the model), `failures`
 confidence or owner field: a self-rated number is not calibrated, and triage
 reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
 are the checks Castor can stand behind.
+
+`nim_explain_row` (and its `_start`) is gated, off unless the server runs
+with `CASTOR_NIM_EXPLAIN_ROW=1`: its eval gate (12 cases from NQC fix
+history) has not run. Give it the log and a row name (or a piece of one);
+Castor finds the row and hands the agent the verdict line, the trial lines
+and the script name, and the agent answers five lines: Row, Verdict code
+(`path:line`), Precondition (what `PRE_OK` tests, or "plain verdict"),
+Trial lines (at most 6) and Reading (harness, game or unclear, with one
+sentence). A PASS row, or a name that matches none or several rows, is an
+input error. `format="json"` returns the same fields parsed by Castor, with
+`verified` and `quote_ok` from the citation checks. Treat the reading as a
+lead: open the verdict code before acting on it.
 
 **Models.** Every `nim_*` tool defaults to Nemotron 3.5 Super
 (`nvidia/nemotron-3.5-super-vl-120b-a12b`); `CASTOR_NIM_MODEL` and
