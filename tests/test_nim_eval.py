@@ -1137,3 +1137,35 @@ def test_history_scope_off_and_dir_cases(tmp_path):
     with nim_eval.history_scope(dir_case, {"label": "c"}, server):
         task, _ = nim_eval.build_task(dir_case, root, server)
     assert task is not None and "Recent commits" not in task
+
+
+def test_print_tasks_writes_task_files(tmp_path, monkeypatch):
+    import sys
+
+    server = _real_server()
+    root, first = _history_repo(tmp_path)
+    case = _history_case(tmp_path, root, first)
+    del case["_base"]
+    cases_file = tmp_path / "cases.json"
+    cases_file.write_text(json.dumps([case]))
+
+    def no_request(*_a, **_k):
+        raise AssertionError("print-tasks made a NIM request")
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(server, "_nim_request", no_request)
+    monkeypatch.setattr(nim_eval, "load_server", lambda _path: server)
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["nim_eval.py", str(cases_file), "--print-tasks", str(out)],
+    )
+    nim_eval.main()
+    text = (out / "h.txt").read_text()
+    assert "tops: x (host)" in text and "fix(playtest): first" in text
+    assert "later" not in text
+    index = json.loads((out / "index.json").read_text())
+    assert [e["name"] for e in index] == ["h"]
+    assert Path(index[0]["snapshot"]).is_dir()
+    assert index[0]["task_file"] == str(out / "h.txt")
