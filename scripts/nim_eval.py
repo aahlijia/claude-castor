@@ -19,7 +19,9 @@ can point at another repo without touching its working tree. Keep cases
 for private repos outside this repo (for example under that cache dir).
 Results are written as JSON beside the snapshots. Edit rows keep the raw
 model answers nim_edit parsed (first answer, then any repair answer) in
-`raw_answers`, so a refusal can be diagnosed from the file.
+`raw_answers`, so a refusal can be diagnosed from the file. A run whose
+edits were recorded with propose_edit parses no answer: its row has
+`edit_tool` true and the refusals propose_edit gave in `edit_refusals`.
 
 Case fields (JSON list of objects):
     name, role                 "review" | "scout" | "triage" | "explain"
@@ -612,6 +614,7 @@ def _run_edit_case(
     if failure is not None:
         row = _edit_error(case, config, failure)
         row.update(scoring=SCORING_VERSION, seconds=seconds, answer=text)
+        row.update(edit_tool_stats(stats))
         return row
     facts = _edit_facts(case, work, expected, reference, stats)
     result = score_edit(case, facts)
@@ -630,8 +633,17 @@ def _run_edit_case(
             "reference_paths": sorted(facts["reference_paths"]),
         },
         answer=text,
+        **edit_tool_stats(stats),
     )
     return result
+
+
+def edit_tool_stats(stats: dict) -> dict:
+    """The run's propose_edit facts for its row (kept, not printed)."""
+    return {
+        "edit_tool": bool(stats.get("edit_tool")),
+        "edit_refusals": list(stats.get("edit_refusals") or []),
+    }
 
 
 def _prepare_copies(
