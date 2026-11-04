@@ -359,8 +359,8 @@ reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
 are the checks Castor can stand behind.
 
 `nim_explain_row` (and its `_start`) is gated, off unless the server runs with
-`CASTOR_NIM_EXPLAIN_ROW=1`: its eval gate (12 cases from NQC fix history) has
-not run. Give it the log and a row name (or a piece of one); Castor finds the
+`CASTOR_NIM_EXPLAIN_ROW=1`: its eval gate (12 cases from NQC fix history) ran
+and failed on the reading (site 23/24, reading right 4/24). Give it the log and a row name (or a piece of one); Castor finds the
 row and hands the agent the verdict line, the trial lines and the script name,
 and the agent answers five lines: Row, Verdict code (`path:line`, or "not
 found"), Precondition (what `PRE_OK` tests, or "plain verdict"), Trial lines
