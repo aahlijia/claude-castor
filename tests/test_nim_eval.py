@@ -398,6 +398,30 @@ def test_run_edit_case_refusal_on_patch_case_is_clean_error(tmp_path):
     assert row["clean_error"] and not row["wrong_applies"]
 
 
+def test_run_edit_case_copies_the_edit_tool_stats(tmp_path, capsys):
+    case, server = _edit_fixture(tmp_path, "two")
+    refusals = ["edit refused: overlaps block 1 in a.txt"]
+    _answer(
+        server,
+        outcome="patch",
+        patch=str(tmp_path / "nim.diff"),
+        steps=2,
+        edit_tool=True,
+        edit_refusals=refusals,
+    )
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert row["correct"]
+    assert row["edit_tool"] is True and row["edit_refusals"] == refusals
+    nim_eval.report([row], ["a"])
+    assert "overlaps block" not in capsys.readouterr().out
+
+
+def test_run_edit_case_defaults_the_edit_tool_stats(tmp_path):
+    case, server = _edit_fixture(tmp_path, "two")
+    row = nim_eval.run_edit_case(case, CONFIG, server)
+    assert row["edit_tool"] is False and row["edit_refusals"] == []
+
+
 def test_run_edit_case_unappliable_patch_is_wrong(tmp_path):
     case, server = _edit_fixture(tmp_path, "two")
     bad = tmp_path / "bad.diff"
