@@ -2731,7 +2731,9 @@ NIM_BACKOFF_JITTER = 1.0
 # free slot before returning a "try again in Ns" error instead. Background
 # jobs block no one, so they wait up to NIM_JOB_MAX_WAIT.
 NIM_MAX_WAIT = 30.0
-NIM_JOB_MAX_WAIT = 300.0
+NIM_JOB_MAX_WAIT = 300.0  # default for CASTOR_NIM_JOB_MAX_WAIT
+NIM_JOB_WAIT_MIN = 60.0
+NIM_JOB_WAIT_MAX = 3600.0
 NIM_MAX_COOLDOWN = 600.0
 NIM_MAX_LISTED_MODELS = 200
 # Reasoning models spend tokens thinking first; 8 left them with no content.
@@ -2971,14 +2973,23 @@ def _nim_gate_size() -> int:
     return int(_nim_env("CASTOR_NIM_CONCURRENCY", scaled))
 
 
+def _nim_job_max_wait() -> float:
+    """Background-job wait from CASTOR_NIM_JOB_MAX_WAIT, clamped to 60..3600 s.
+
+    A non-number or non-positive value falls back to NIM_JOB_MAX_WAIT.
+    """
+    wait = _nim_env("CASTOR_NIM_JOB_MAX_WAIT", NIM_JOB_MAX_WAIT)
+    return min(NIM_JOB_WAIT_MAX, max(NIM_JOB_WAIT_MIN, wait))
+
+
 def _nim_max_wait() -> float:
     """How long this thread may wait for a key or slot.
 
-    NIM_JOB_MAX_WAIT on a background-job worker (_run_job marks it),
+    The job wait on a background-job worker (_run_job marks it),
     NIM_MAX_WAIT otherwise: foreground calls block Claude, so fail fast.
     """
     return (
-        NIM_JOB_MAX_WAIT
+        _nim_job_max_wait()
         if getattr(_nim_patience, "on", False)
         else (NIM_MAX_WAIT)
     )
@@ -4432,7 +4443,8 @@ def nim_status(verify: bool = True) -> str:
     )
     lines.append(
         f"limits: {rpm} req/{int(NIM_RATE_WINDOW)}s per key, "
-        f"concurrency {slots}, max_input {max_in:,} chars"
+        f"concurrency {slots}, max_input {max_in:,} chars, "
+        f"job wait {int(_nim_job_max_wait())} s"
     )
     lines.append(f"keys: {len(keys)} (requests rotate across them)")
     lines.extend(key_lines)
