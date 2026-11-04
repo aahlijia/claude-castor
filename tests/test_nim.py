@@ -4304,3 +4304,42 @@ def test_edit_base_stats_carry_the_edit_tool_keys():
     stats = server._edit_base_stats()
     assert stats["edit_tool"] is False
     assert stats["edit_calls"] == 0 and stats["edit_refusals"] == []
+
+
+def test_cut_reply_with_recorded_edits_keeps_going(stub, repo):
+    (repo / "src" / "b.py").write_text("TARGET = 1\n")
+    _steps(stub, (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),))
+    stub.queue.append((200, {}, _completion("", finish="length")))
+    _steps(stub, (_propose("src/b.py", "TARGET = 1", "TARGET = 2"),), "done")
+    out, _ = server._run_nim_edit("set TARGET", str(repo), max_steps=6)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 2 blocks, repair round: no]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 4
+    assert posts[2][3]["messages"][-1]["content"] == (
+        server.NIM_EDIT_CUT_NUDGE
+    )
+
+
+def test_edit_blocks_beside_recorded_edits_go_to_repair(stub, repo):
+    _steps(
+        stub,
+        (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),),
+        _GOOD_EDIT,
+        "done",
+    )
+    out, _ = server._run_nim_edit("set TARGET", str(repo), max_steps=4)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: yes]"
+    )
+    repair = stub.posts()[2][3]["messages"][1]["content"]
+    assert "edit blocks were ignored" in repair
+
+
+def test_edit_tool_errors_come_back_as_tool_errors(repo):
+    store = server._EditStore(scope=None)
+    out = server._edit_run_tool(
+        store, repo, "drop_edit", {"edit": float("inf")}
+    )
+    assert out.startswith("[tool error:")

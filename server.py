@@ -5731,6 +5731,14 @@ def _agent_answer(
     return ok, text
 
 
+def _agent_last_step_nudge(
+    messages: list[dict], step: int, max_steps: int
+) -> None:
+    """Before the last tool step of a run longer than two, ask for an end."""
+    if step == max_steps - 1 and max_steps > 2:
+        messages.append({"role": "user", "content": NIM_AGENT_LAST_TOOL_NUDGE})
+
+
 def _agent_out_of_tokens(data: Any) -> bool:
     """True when a tool step ran out of tokens (any partial text is cut)."""
     choices = data.get("choices") if isinstance(data, dict) else None
@@ -5797,10 +5805,7 @@ def _nim_agent_loop(
         if used > budget:
             break
         stats["steps"] = step
-        if step == max_steps - 1 and max_steps > 2:
-            messages.append(
-                {"role": "user", "content": NIM_AGENT_LAST_TOOL_NUDGE}
-            )
+        _agent_last_step_nudge(messages, step, max_steps)
         started = time.monotonic()
         data, error, message = _agent_send(
             stepper, messages, max_tokens, tools
@@ -5810,8 +5815,12 @@ def _nim_agent_loop(
         if error:
             return False, error, stats
         if not calls and _edit_recorded(edits):
-            ok, text = _nim_extract_text(data, model)
-            return True, text if ok else "", stats
+            if not _agent_out_of_tokens(data):
+                ok, text = _nim_extract_text(data, model)
+                return True, text if ok else "", stats
+            # A cut reply may have more edits to come: ask for the rest.
+            messages.append({"role": "user", "content": NIM_EDIT_CUT_NUDGE})
+            continue
         if not calls:
             if _agent_out_of_tokens(data) or stepper != model:
                 break
@@ -7798,6 +7807,14 @@ _EDIT_GIT_DETAIL_PREFIXES = ("git check could not run", "git apply --check")
 # --- nim_edit: edits recorded through propose_edit -------------------------
 
 NIM_EDIT_CALLS_PER_STEP = 16
+NIM_EDIT_CUT_NUDGE = (
+    "Your reply was cut off. Record any change still missing with "
+    "propose_edit, or reply done if every change is recorded."
+)
+NIM_EDIT_MIXED_ERROR = (
+    "the reply also held edit blocks, and edit blocks were ignored because "
+    "edits were recorded: record any change they held with propose_edit"
+)
 NIM_EDIT_REFUSAL_CHARS = 300  # per refusal kept in the stats
 NIM_AGENT_EDIT_NOTE = (
     " propose_edit and drop_edit calls count apart from the others: up to "
@@ -7917,10 +7934,12 @@ def _edit_run_tool(
 ) -> str:
     """Run one propose_edit or drop_edit call against the store."""
     store.calls += 1
-    if name == "propose_edit":
-        return _edit_propose(store, root, args)
-
-    return _edit_drop(store, args.get("edit"))
+    try:
+        if name == "propose_edit":
+            return _edit_propose(store, root, args)
+        return _edit_drop(store, args.get("edit"))
+    except (OSError, TypeError, ValueError, OverflowError) as exc:
+        return f"[tool error: {exc}]"
 
 
 def _edit_proposed_block(args: dict, index: int) -> EditBlock | None:
@@ -8375,7 +8394,8 @@ def _edit_answer_blocks(
     """The run's blocks: the recorded edits, else the answer's text blocks."""
     if store.edits:
         store.used = True
-        return _edit_store_blocks(store), []
+        mixed = [NIM_EDIT_MIXED_ERROR] if EDIT_MARKER in answer else []
+        return _edit_store_blocks(store), mixed
 
     blocks, errors = _parse_edit_blocks(answer)
     if not blocks and not errors:
