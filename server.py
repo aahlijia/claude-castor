@@ -6438,22 +6438,34 @@ def _unstamped_status(text: str) -> str | None:
     return None
 
 
-def _unstamped_verdict_lines(lines: list[str]) -> list[tuple[int, str]]:
+def _unstamped_verdict_lines(
+    lines: list[str],
+) -> list[tuple[int, str | None]]:
     """(index, status) of each verdict line outside the summary reprint.
 
-    The reprint runs from `--- verdicts ---` to the totals line.
+    The reprint starts at an unindented `--- verdicts ---` and runs to the
+    totals line, or up to the first line that is neither blank nor a
+    verdict line. Its last line is listed with status None, as a block
+    boundary.
     """
-    found = []
+    found: list[tuple[int, str | None]] = []
     in_reprint = False
     for i, text in enumerate(lines):
-        if text.strip() == _VERDICT_REPRINT:
+        if in_reprint:
+            if _NQC_TOTALS_RE.match(text):
+                found.append((i, None))
+                in_reprint = False
+                continue
+            if not text.strip() or _unstamped_status(text):
+                continue
+            found.append((i - 1, None))
+            in_reprint = False
+        if text.rstrip() == _VERDICT_REPRINT:
             in_reprint = True
-        elif in_reprint:
-            in_reprint = not _NQC_TOTALS_RE.match(text)
-        else:
-            status = _unstamped_status(text)
-            if status:
-                found.append((i, status))
+            continue
+        status = _unstamped_status(text)
+        if status:
+            found.append((i, status))
     return found
 
 
@@ -6464,13 +6476,14 @@ def _unstamped_blocks(
 
     A block runs from the line after the previous verdict line (or line 1)
     to the line before this one; every verdict line is a boundary, even
-    one whose name cannot be read.
+    one whose name cannot be read, and so is the end of a reprint.
     """
     out = []
     prev = -1
     for i, status in _unstamped_verdict_lines(lines):
         first = prev + 2
-        out.append((i, status, (first, i) if first <= i else None))
+        if status is not None:
+            out.append((i, status, (first, i) if first <= i else None))
         prev = i
     return out
 
@@ -6498,21 +6511,44 @@ def _unstamped_rows(lines: list[str]) -> list[VerdictRow]:
     return rows
 
 
-def _unstamped_named_rows(lines: list[str], name: str) -> list[VerdictRow]:
+def _unstamped_named_rows(
+    lines: list[str], name: str
+) -> tuple[list[VerdictRow], str | None]:
     """Rows for verdict lines whose name field starts with exactly `name`.
 
     For names too long for the 34-column field: the caller supplies the
-    full name, and the line must continue with a space or end there.
+    full name, and the line must continue with a space or end there. When
+    the matched lines continue with different words, `name` is only part
+    of their names, so the result is an error listing what follows it.
     """
     rows: list[VerdictRow] = []
+    tails: dict[str, list[str]] = {}
     for i, status, block in _unstamped_blocks(lines):
         rest = lines[i][_VERDICT_NAME_START:]
         after = rest[len(name) :]
         if not rest.startswith(name) or after[:1] not in ("", " "):
             continue
+        words = after.split()
+        tails.setdefault(words[0] if words else "", words[:3])
         detail = after.strip()
         rows.append(VerdictRow(name, status, detail, i + 1, block, len(rows)))
-    return rows
+    if len(tails) > 1:
+        return [], _unstamped_prefix_error(name, list(tails.values()))
+    return rows, None
+
+
+def _unstamped_prefix_error(name: str, tails: list[list[str]]) -> str:
+    """The error for a `name` that begins rows continuing differently."""
+    shown = [
+        repr(" ".join([name, *words]))
+        for words in tails[:NIM_EXPLAIN_ROW_CANDIDATES]
+    ]
+    more = len(tails) - NIM_EXPLAIN_ROW_CANDIDATES
+    tail = f" ({more} more)" if more > 0 else ""
+    return (
+        f"[Error: {name!r} begins {len(tails)} different rows: "
+        f"{', '.join(shown)}{tail}. Pass more of the row name.]"
+    )
 
 
 def _last_nqc_totals(lines: list[str]) -> dict[str, int] | None:
@@ -7711,10 +7747,13 @@ def _explain_row_find(
     matches = [row] if row in names else [n for n in names if row in n]
     if len(matches) > 1:
         return None, _explain_row_lookup_error(row, matches, rows)
+    same: list[VerdictRow] = []
     if matches:
         same = [r for r in rows if r.name == matches[0]]
-    else:
-        same = _unstamped_named_rows(lines, row) if lines and row else []
+    elif lines and row:
+        same, error = _unstamped_named_rows(lines, row)
+        if error:
+            return None, error
     if not same and not rows:
         return None, (
             "[Error: the log has no verdict rows (no @case stamps or pytest "
