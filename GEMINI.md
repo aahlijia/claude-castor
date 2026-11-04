@@ -372,6 +372,8 @@ needs its exact name.
 `verdict` from the row Castor found, `reading` null unless the answer gives
 exactly one reading, and `verified` and `quote_ok` from the citation checks.
 Treat the reading as a lead: open the verdict code before acting on it.
+The prompt tells the agent to use dekko, but in the gate it called a dekko
+tool in 1 of 24 runs (grep and read_range did the work).
 
 **Models.** Every `nim_*` tool defaults to Nemotron 3.5 Super
 (`nvidia/nemotron-3.5-super-vl-120b-a12b`); `CASTOR_NIM_MODEL` and
@@ -380,7 +382,7 @@ Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b`):
 
 | Tool | Default | Pass Ultra when |
 |---|---|---|
-| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | not as a fallback: on 2026-11-03 Ultra was rate-limited on 252 of 326 requests (Super ran 556 requests without a 429 in the same hour; whether Ultra has a separate limit is unconfirmed). For a slow or limited Super, use the `_start` job form, which waits up to `CASTOR_NIM_JOB_MAX_WAIT` |
+| `nim_prompt`, `nim_review`, `nim_security_review` | 3.5 Super | not as a fallback: on 2026-11-03 Ultra was rate-limited on 252 of 326 requests (Super ran 556 requests without a 429 in the same hour, 09:00; Super was itself rate-limited later that day, 158 times at 12:04-12:07; whether Ultra has a separate limit is unconfirmed). For a slow or limited Super, use the `_start` job form, which waits up to `CASTOR_NIM_JOB_MAX_WAIT` |
 | `nim_explain_error` | 3.5 Super | not as a fallback (see above); Super found every known cause in the eval, Ultra missed one secondary point |
 | `nim_summarize` | 3.5 Super | not as a fallback (see above); Ultra dropped must-have key points on 2 of 3 docs |
 | `nim_agent`, `nim_scout`, `nim_first_pass_review`, `nim_triage_log` | 3.5 Super | never: Ultra scored the same, spends every step it is given, and is about 2.5x slower |
