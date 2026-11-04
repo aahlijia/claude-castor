@@ -1565,6 +1565,97 @@ def test_triage_refuses_a_log_over_the_size_cap(captured, repo, monkeypatch):
     assert "split it first" in out and not captured
 
 
+# --- verdict rows ------------------------------------------------------------
+
+
+def _verdict_log(items):
+    """Build suite-log lines in verdict.sh's layout."""
+    lines = []
+    for item in items:
+        if len(item) == 2:
+            lines.append(item[0])
+            continue
+        status, name, detail = item
+        lines.append(f"{status:<13} {name:<34} {detail}")
+        lines.append(f"@case 1700000000 {status.replace(' ', '_')} {name}")
+    return lines
+
+
+def test_verdict_rows_reads_stamped_rows():
+    lines = _verdict_log(
+        [
+            ("trial a1", None),
+            ("PASS", "test standard", "50 ms"),
+            ("  walk trial 1: off after 0.12 s", None),
+            ("FAIL", "tops: walk off (host)", "1 of 3 trials"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.status) for r in rows] == [
+        ("test standard", "PASS"),
+        ("tops: walk off (host)", "FAIL"),
+    ]
+    assert rows[1].detail == "1 of 3 trials"
+    assert rows[1].block == (4, 4)
+    assert rows[0].block == (1, 1)
+
+
+def test_verdict_rows_long_name_splits_on_stamp():
+    name = "tops: a janitor walks off the BedroomWardrobe top (host)"
+    lines = _verdict_log([("PASS", name, "3 of 3 trials")])
+    rows = server._verdict_rows(lines)
+    assert rows[0].name == name and rows[0].detail == "3 of 3 trials"
+
+
+def test_verdict_rows_normalises_not_assessed():
+    lines = _verdict_log([("NOT ASSESSED", "x", "pre not met")])
+    rows = server._verdict_rows(lines)
+    assert rows[0].status == "NOT ASSESSED"
+
+
+def test_verdict_rows_skips_summary_reprint():
+    lines = [
+        *_verdict_log([("FAIL", "x", "d")]),
+        "--- verdicts ---",
+        f"{'FAIL':<13} {'x':<34} d",
+        "total 1, fail 1, not assessed 0",
+    ]
+    assert len(server._verdict_rows(lines)) == 1
+    totals = server._verdict_totals(lines)
+    assert totals == {"total": 1, "fail": 1, "not_assessed": 0}
+
+
+def test_verdict_rows_counts_occurrences():
+    lines = _verdict_log([("PASS", "x", "a"), ("FAIL", "x", "b")])
+    rows = server._verdict_rows(lines)
+    assert [r.occurrence for r in rows] == [0, 1]
+
+
+def test_verdict_rows_pytest_fallback():
+    lines = [
+        "FAILED tests/t.py::test_a - AssertionError",
+        "1 failed, 4 passed in 0.2s",
+    ]
+    rows = server._verdict_rows(lines)
+    assert rows[0].name == "tests/t.py::test_a" and rows[0].status == "FAIL"
+    assert rows[0].block is None
+    totals = server._verdict_totals(lines)
+    assert totals == {"total": 5, "fail": 1, "not_assessed": 0}
+
+
+def test_verdict_rows_crlf_and_none():
+    assert server._verdict_rows(["[12:00:01] door open\r", "ok\r"]) == []
+    assert server._verdict_totals(["nothing"]) is None
+
+
+def test_row_for_line_uses_block_and_verdict_line():
+    lines = _verdict_log([("  trial", None), ("FAIL", "x", "d")])
+    rows = server._verdict_rows(lines)
+    assert server._row_for_line(rows, 1).name == "x"
+    assert server._row_for_line(rows, 2).name == "x"
+    assert server._row_for_line(rows, 99) is None
+
+
 # --- chunked summarize -------------------------------------------------------
 
 
