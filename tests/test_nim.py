@@ -6,6 +6,7 @@ HTTP server that replays scripted responses and records every request.
 
 import importlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -133,6 +135,7 @@ def stub(tmp_path, monkeypatch):
     monkeypatch.delenv("NVIDIA_NIM_API_KEY", raising=False)
     monkeypatch.delenv("CASTOR_NIM_MODEL", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
     # Fast, deterministic backoff.
     monkeypatch.setattr(server, "NIM_BACKOFF_BASE", 0.01)
     monkeypatch.setattr(server, "NIM_BACKOFF_JITTER", 0.0)
@@ -149,6 +152,28 @@ def stub(tmp_path, monkeypatch):
     yield s
     server._nim_reset_state()
     s.close()
+
+
+@pytest.fixture
+def fake_dekko(tmp_path, monkeypatch):
+    """Pretend dekko is installed; `_dekko_run` pops queued results."""
+
+    class Fake:
+        def __init__(self):
+            self.queue = []  # (ok, text) results, popped in order
+            self.calls = []  # the argv of every dekko run
+
+    fake = Fake()
+
+    def run(root, args, timeout=10.0):
+        fake.calls.append(args)
+        return fake.queue.pop(0) if fake.queue else (True, "")
+
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 35))
+    monkeypatch.setattr(server, "_dekko_run", run)
+    return fake
 
 
 # --- classification -------------------------------------------------------
@@ -611,6 +636,8 @@ def test_all_nim_tools_registered():
         "nim_triage_log",
         "nim_triage_log_start",
     } <= names
+    if os.environ.get("CASTOR_NIM_EDIT") != "1":
+        assert not {"nim_edit", "nim_edit_start"} & names
 
 
 # --- multiple keys --------------------------------------------------------
@@ -753,6 +780,25 @@ def test_agent_tools_are_confined_and_skip_secrets(repo):
         assert out.startswith("[error"), bad
     assert "src/" in server._agent_run_tool(repo, "list_dir", {})
     assert ".env" not in server._agent_run_tool(repo, "list_dir", {})
+
+
+def _read(repo, path):
+    return server._agent_run_tool(
+        repo, "read_range", {"path": path, "start": 1, "end": 5}
+    )
+
+
+def test_agent_dekko_folders_are_off_limits(repo):
+    (repo / ".dekko").mkdir()
+    (repo / ".dekko" / "MAP.md").write_text("map of TARGET\n")
+    (repo / "sub" / ".dekko").mkdir(parents=True)
+    (repo / "sub" / ".dekko" / "x").write_text("TARGET\n")
+    assert _read(repo, ".dekko/MAP.md").startswith("[error: path is off")
+    assert _read(repo, "sub/.dekko/x").startswith("[error: path is off")
+    assert ".dekko" not in server._agent_run_tool(repo, "list_dir", {})
+    listing = server._agent_run_tool(repo, "list_dir", {"path": "sub"})
+    assert ".dekko" not in listing
+    assert ".dekko" not in server._agent_grep(repo, "TARGET", ".", None)
 
 
 def test_agent_symlink_out_of_project_is_refused(repo, tmp_path):
@@ -1778,3 +1824,2542 @@ def test_streamed_usage_reaches_the_usage_log(stub, tmp_path):
     _tool(server.nim_prompt)("q", use_cache=False)
     entry = _usage_entries(tmp_path)[-1]
     assert entry["prompt_tokens"] == 11 and entry["completion_tokens"] == 7
+
+
+# --- dekko runner ---------------------------------------------------------
+
+
+def test_dekko_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    assert server._dekko_enabled() is False
+
+
+def test_dekko_override_beats_env(monkeypatch, fake_dekko):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    token = server._dekko_override.set(True)
+    try:
+        assert server._dekko_enabled() is True
+    finally:
+        server._dekko_override.reset(token)
+
+
+def test_dekko_off_without_binary(monkeypatch):
+    monkeypatch.delenv("CASTOR_NIM_DEKKO", raising=False)
+    monkeypatch.setattr(server, "_dekko_bin", lambda: None)
+    assert server._dekko_enabled() is False
+
+
+def test_dekko_off_below_min_version(monkeypatch, fake_dekko):
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 0))
+    assert server._dekko_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("os_name", "python", "dekko", "found"),
+    [
+        ("posix", "bin/python", "bin/dekko", True),
+        ("posix", "bin/python", "bin/dekko.exe", False),
+        ("nt", "Scripts/python.exe", "Scripts/dekko.exe", True),
+        ("nt", "python.exe", "Scripts/dekko.exe", True),
+        ("nt", "python.exe", "other/dekko.exe", False),
+    ],
+)
+def test_dekko_bin_layouts(
+    monkeypatch, tmp_path, os_name, python, dekko, found
+):
+    (tmp_path / dekko).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / dekko).write_text("")
+    monkeypatch.setattr(server.sys, "executable", str(tmp_path / python))
+    # Only _dekko_bin reads server.os here; pathlib keeps the real os.name.
+    monkeypatch.setattr(server, "os", SimpleNamespace(name=os_name))
+    expect = tmp_path / dekko if found else None
+    assert server._dekko_bin() == expect
+
+
+def test_dekko_run_reports_timeout(monkeypatch, tmp_path):
+    def slow(*a, **k):
+        raise server.subprocess.TimeoutExpired(a[0], 10)
+
+    monkeypatch.setattr(server.subprocess, "run", slow)
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    ok, text = server._dekko_run(tmp_path, ["query", "symbol", "x"])
+    assert ok is False and "timed out" in text
+
+
+def test_ensure_map_runs_once_per_ttl(fake_dekko, tmp_path):
+    fake_dekko.queue += [(True, "")]
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert fake_dekko.calls == [["map", "--if-stale", "--quiet"]]
+
+
+def test_ensure_map_failure_is_cached(fake_dekko, tmp_path):
+    fake_dekko.queue += [(False, "[dekko error: timed out]")]
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert len(fake_dekko.calls) == 1
+
+
+def test_ensure_map_disabled_runs_nothing(monkeypatch, fake_dekko, tmp_path):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert fake_dekko.calls == []
+
+
+def test_ensure_map_reset_clears_cache(fake_dekko, tmp_path):
+    assert server._dekko_ensure_map(tmp_path) is True
+    server._nim_reset_state()
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(fake_dekko.calls) == 2
+
+
+def test_ensure_map_ttl_counts_from_build_end(monkeypatch, tmp_path):
+    clock = [1000.0]
+    calls = []
+
+    def slow_build(root, args, timeout=10.0):
+        calls.append(args)
+        clock[0] += server.NIM_DEKKO_MAP_TTL * 3
+        return False, "[dekko error: timed out]"
+
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 35))
+    monkeypatch.setattr(server, "_dekko_run", slow_build)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    assert server._dekko_ensure_map(tmp_path) is False
+    clock[0] += 1
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert len(calls) == 1
+
+
+def _clocked_dekko(monkeypatch, tmp_path, results):
+    """dekko on, a fake clock, and `_dekko_run` popping `results`."""
+    clock = [1000.0]
+    calls = []
+
+    def run(root, args, timeout=10.0):
+        calls.append(args)
+        return results.pop(0)
+
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: tmp_path / "dekko")
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 35))
+    monkeypatch.setattr(server, "_dekko_run", run)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    return clock, calls
+
+
+def test_ensure_map_failure_waits_out_the_fail_ttl(monkeypatch, tmp_path):
+    clock, calls = _clocked_dekko(
+        monkeypatch, tmp_path, [(False, "[dekko error: crash]"), (True, "")]
+    )
+    assert server._dekko_ensure_map(tmp_path) is False
+    clock[0] += server.NIM_DEKKO_MAP_TTL * 2
+    assert server._dekko_ensure_map(tmp_path) is False
+    assert server._dekko_ensure_map(tmp_path, fresh=True) is False
+    assert len(calls) == 1
+    clock[0] += server.NIM_DEKKO_MAP_FAIL_TTL
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(calls) == 2
+
+
+def test_ensure_map_fresh_skips_only_a_cached_success(monkeypatch, tmp_path):
+    clock, calls = _clocked_dekko(
+        monkeypatch, tmp_path, [(True, ""), (True, ""), (True, "")]
+    )
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(calls) == 1
+    assert server._dekko_ensure_map(tmp_path, fresh=True) is True
+    assert len(calls) == 2
+    clock[0] += server.NIM_DEKKO_MAP_TTL
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(calls) == 3
+
+
+def test_ensure_map_reset_clears_a_cached_failure(fake_dekko, tmp_path):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    assert server._dekko_ensure_map(tmp_path) is False
+    server._nim_reset_state()
+    assert server._dekko_ensure_map(tmp_path) is True
+    assert len(fake_dekko.calls) == 2
+
+
+# --- dekko agent tools ----------------------------------------------------
+
+
+def test_agent_offers_dekko_tools_when_map_builds(stub, repo, fake_dekko):
+    fake_dekko.queue += [(True, "")]
+    stub.queue.append((200, {}, _completion("src/a.py:2")))
+    _tool(server.nim_agent)("where?", str(repo))
+    names = [t["function"]["name"] for t in stub.posts()[0][3]["tools"]]
+    assert names == [
+        "grep",
+        "read_range",
+        "list_dir",
+        "callers",
+        "symbol",
+        "outline",
+        "context",
+        "search",
+        "trace",
+    ]
+    assert "Use grep for docs" in stub.posts()[0][3]["messages"][0]["content"]
+
+
+def test_callers_merges_grep_only_sites(repo, fake_dekko):
+    (repo / "src" / "b.py").write_text("from a import f\nf()\n# f() here\n")
+    fake_dekko.queue += [
+        (
+            True,
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "path": "src/b.py",
+                            "line": 1,
+                            "id": "src/b.py::<module>",
+                            "sites": [2],
+                        }
+                    ]
+                }
+            ),
+        )
+    ]
+    text = server._dekko_tool(repo, "callers", {"symbol": "f"})
+    assert "src/b.py:2 in <module>" in text
+    assert "grep-only" in text and "src/b.py:3:# f() here" in text
+    assert "src/b.py:2:f()" not in text
+
+
+def test_agent_run_without_map_uses_grep_tools_only(stub, repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    stub.queue.append((200, {}, _completion("nothing at src/a.py:2")))
+    _tool(server.nim_agent)("where is TARGET?", str(repo))
+    names = [t["function"]["name"] for t in stub.posts()[0][3]["tools"]]
+    assert names == ["grep", "read_range", "list_dir"]
+
+
+def _callers_reply(stub, repo):
+    """Run nim_agent where the model calls `callers`; return the reply."""
+    stub.queue.append((200, {}, _tool_call("callers", {"symbol": "f"})))
+    stub.queue.append((200, {}, _completion("done")))
+    _tool(server.nim_agent)("who calls f?", str(repo))
+    return stub.posts()[1][3]["messages"][-1]["content"]
+
+
+_UNKNOWN_CALLERS = "[error: unknown tool 'callers']"
+
+
+def test_dekko_tool_switched_off_is_an_unknown_tool(
+    stub, repo, fake_dekko, monkeypatch
+):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    assert _callers_reply(stub, repo) == _UNKNOWN_CALLERS
+    assert fake_dekko.calls == []
+
+
+def test_dekko_tool_overridden_off_is_an_unknown_tool(stub, repo, fake_dekko):
+    token = server._dekko_override.set(False)
+    try:
+        assert _callers_reply(stub, repo) == _UNKNOWN_CALLERS
+    finally:
+        server._dekko_override.reset(token)
+    assert fake_dekko.calls == []
+
+
+def test_dekko_tool_without_a_map_is_an_unknown_tool(stub, repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: crash]")]
+    assert _callers_reply(stub, repo) == _UNKNOWN_CALLERS
+    assert fake_dekko.calls == [["map", "--if-stale", "--quiet"]]
+
+
+def test_offered_dekko_tool_runs(stub, repo, fake_dekko):
+    sites = {"results": [], "module_level": []}
+    fake_dekko.queue += [(True, ""), (True, json.dumps(sites))]
+    assert _callers_reply(stub, repo).startswith("callers of f (dekko")
+    assert fake_dekko.calls[1][:3] == ["query", "callers", "f"]
+
+
+def test_run_tool_offers_no_dekko_tool_by_default(repo, fake_dekko):
+    out = server._agent_run_tool(repo, "callers", {"symbol": "f"})
+    assert out == _UNKNOWN_CALLERS and fake_dekko.calls == []
+
+
+def test_dekko_tool_refuses_when_dekko_is_off(repo, fake_dekko, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "0")
+    out = server._dekko_tool(repo, "symbol", {"name": "f"})
+    assert out == "[error: unknown tool 'symbol']" and fake_dekko.calls == []
+
+
+def test_dekko_tool_failure_is_a_tool_error(repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: exit 5]")]
+    assert (
+        server._dekko_tool(repo, "outline", {"path": "src/a.py"})
+        == "[tool error: dekko error: exit 5]"
+    )
+
+
+# Real `dekko ... --json` shapes (1.9.35), trimmed, from a repo with
+# src/a.py (target), src/mod.py (module-level call), and two denied files:
+# src/.env_helpers.py (leaky) and .ssh/tool.py (sshy), both calling target.
+_LEAKY = {
+    "id": "src/.env_helpers.py::leaky",
+    "path": "src/.env_helpers.py",
+    "line": 3,
+    "kind": "function",
+    "signature": "leaky()",
+    "doc": None,
+}
+_SSHY = {
+    "id": ".ssh/tool.py::sshy",
+    "path": ".ssh/tool.py",
+    "line": 3,
+    "kind": "function",
+    "signature": "sshy()",
+    "doc": None,
+}
+_TARGET = {
+    "id": "src/a.py::target",
+    "path": "src/a.py",
+    "line": 1,
+    "kind": "function",
+    "signature": "target()",
+    "doc": None,
+}
+_SECRET_SRC = 'def leaky():\n    SECRET_TOKEN = "abc123"\n    return target()'
+_REAL = {
+    "context_leaky": {
+        "label": "src/.env_helpers.py:leaky",
+        "target": _LEAKY,
+        "file": "src/.env_helpers.py",
+        "imports": [{"name": "target", "source": "src.a.target"}],
+        "neighbors": [{"hop": 1, "direction": "callee", **_TARGET}],
+        "module_callers": [],
+        "source": _SECRET_SRC,
+    },
+    "context_target": {
+        "label": "src/a.py:target",
+        "target": _TARGET,
+        "file": "src/a.py",
+        "imports": [],
+        "neighbors": [
+            {"hop": 1, "direction": "caller", **_SSHY},
+            {"hop": 1, "direction": "caller", **_LEAKY},
+            {
+                "hop": 1,
+                "direction": "caller",
+                "id": "src/mod.py::<module>",
+                "path": "src/mod.py",
+                "line": 3,
+                "kind": "module",
+                "signature": "<anonymous> (src/mod.py)",
+                "doc": None,
+            },
+        ],
+        "module_callers": ["src/mod.py"],
+        "source": "def target():\n    return 1",
+    },
+    "symbol_leaky": {**_LEAKY, "language": "python", "end_line": 5},
+    "symbol_target": {**_TARGET, "language": "python", "end_line": 2},
+    "search_leaky": {"query": "leaky", "hits": [{**_LEAKY, "score": 0.85}]},
+    "outline_src": {
+        "target": "src",
+        "files": [
+            {
+                "path": "src/.env_helpers.py",
+                "language": "python",
+                "symbols": [
+                    {"line": 3, "kind": "function", "signature": "leaky()"}
+                ],
+            },
+            {
+                "path": "src/a.py",
+                "language": "python",
+                "symbols": [
+                    {"line": 1, "kind": "function", "signature": "target()"}
+                ],
+            },
+        ],
+    },
+    "trace_denied": {
+        "from": ".ssh/tool.py::sshy",
+        "to": "src/a.py::target",
+        "paths": [[_SSHY, _TARGET]],
+    },
+    "callers_target": {
+        "action": "callers",
+        "target": "src/a.py::target",
+        "results": [
+            {**_SSHY, "sites": [5]},
+            {**_LEAKY, "sites": [5]},
+        ],
+        "module_level": [
+            {"path": "src/mod.py", "lines": [3]},
+            {"path": ".ssh/tool.py", "lines": [9]},
+        ],
+    },
+}
+_DENIED_WORDS = ("env_helpers", ".ssh", "SECRET_TOKEN", "leaky", "sshy")
+
+
+@pytest.fixture
+def deny_repo(tmp_path):
+    root = tmp_path / "deny"
+    (root / "src").mkdir(parents=True)
+    (root / ".ssh").mkdir()
+    (root / "src" / "a.py").write_text("def target():\n    return 1\n")
+    (root / "src" / "mod.py").write_text(
+        "from src.a import target\n\ntarget()\n"
+    )
+    (root / "src" / ".env_helpers.py").write_text("target()  # SECRET_TOKEN\n")
+    (root / ".ssh" / "tool.py").write_text("target()  # sshy\n")
+    return root.resolve()
+
+
+def _json(key):
+    return (True, json.dumps(_REAL[key]))
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "key", "expect"),
+    [
+        ("context", {"symbol": "target"}, "context_target", "src/mod.py:3"),
+        ("symbol", {"name": "target"}, "symbol_target", "src/a.py:1"),
+        ("outline", {"path": "src"}, "outline_src", "target()"),
+    ],
+)
+def test_dekko_tool_renders_without_denied_files(
+    deny_repo, fake_dekko, name, args, key, expect
+):
+    fake_dekko.queue += [_json(key)]
+    text = server._dekko_tool(deny_repo, name, args)
+    assert expect in text
+    assert not [w for w in _DENIED_WORDS if w in text]
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "key"),
+    [
+        ("context", {"symbol": "leaky"}, "context_leaky"),
+        ("symbol", {"name": "leaky"}, "symbol_leaky"),
+        ("search", {"text": "leaky"}, "search_leaky"),
+    ],
+)
+def test_dekko_tool_denied_target_returns_only_an_error(
+    deny_repo, fake_dekko, name, args, key
+):
+    fake_dekko.queue += [_json(key)]
+    assert server._dekko_tool(deny_repo, name, args) == "[error: denied]"
+
+
+def test_dekko_trace_through_denied_files_shows_no_path(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("trace_denied")]
+    text = server._dekko_tool(
+        deny_repo, "trace", {"source": "sshy", "target": "target"}
+    )
+    assert text == "[no call path found]"
+
+
+def test_dekko_trace_exit_one_is_no_path(deny_repo, fake_dekko):
+    fake_dekko.queue += [(False, '[dekko error: exit 1: {"paths": []}]')]
+    text = server._dekko_tool(
+        deny_repo, "trace", {"source": "a", "target": "b"}
+    )
+    assert text == "[no call path found]"
+
+
+def test_callers_drops_denied_and_keeps_module_level(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("callers_target"), _json("symbol_target")]
+    text = server._dekko_tool(deny_repo, "callers", {"symbol": "target"})
+    assert "src/mod.py:3 in <module>" in text
+    assert "(dekko, 1 sites)" in text
+    assert not [w for w in _DENIED_WORDS if w in text]
+    assert "src/mod.py:3:target()" not in text  # known site, not grep-only
+    assert "src/a.py:1:" not in text  # the definition line is excluded
+    assert "src/mod.py:1:from src.a import target" in text
+
+
+def test_callers_sites_include_module_level(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("callers_target")]
+    sites, _ = server._dekko_callers(deny_repo, "target")
+    assert sites == [("src/mod.py", 3)]
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("callers", {"symbol": "--root"}),
+        ("symbol", {"name": "-x"}),
+        ("outline", {"path": "-h"}),
+        ("context", {"symbol": "--json"}),
+        ("search", {"text": "-q"}),
+        ("trace", {"source": "a", "target": "--no-regen"}),
+    ],
+)
+def test_dekko_tool_rejects_option_like_arguments(
+    deny_repo, fake_dekko, name, args
+):
+    text = server._dekko_tool(deny_repo, name, args)
+    assert text == '[error: argument must not start with "-"]'
+    assert fake_dekko.calls == []
+
+
+def test_dekko_tool_argv(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("symbol_target")] * 6
+    for name, args in [
+        ("symbol", {"name": "target"}),
+        ("outline", {"path": "src/a.py"}),
+        ("context", {"symbol": "target"}),
+        ("search", {"text": "target"}),
+        ("trace", {"source": "a", "target": "b"}),
+    ]:
+        server._dekko_tool(deny_repo, name, args)
+    budget = ["--budget", "1200"]
+    assert fake_dekko.calls == [
+        ["query", "symbol", "target", "--json", "--no-regen", *budget],
+        ["outline", "src/a.py", "--json", "--no-regen", *budget],
+        [
+            "context",
+            "target",
+            "--with-source",
+            "--json",
+            "--no-regen",
+            *budget,
+        ],
+        ["search", "target", "--json", "--no-regen", *budget],
+        ["trace", "a", "b", "--json", "--no-regen"],
+    ]
+
+
+def test_callers_argv_and_definition_query(deny_repo, fake_dekko):
+    fake_dekko.queue += [_json("callers_target"), _json("symbol_target")]
+    server._dekko_tool(deny_repo, "callers", {"symbol": "target"})
+    budget = ["--budget", "1200"]
+    assert fake_dekko.calls == [
+        [
+            "query",
+            "callers",
+            "target",
+            "--sites",
+            "--json",
+            "--no-regen",
+            *budget,
+        ],
+        ["query", "symbol", "target", "--json", "--no-regen", *budget],
+    ]
+
+
+# Real dekko 1.9.35 stderr for a name defined in a denied and an allowed file
+# (exit 4, printed even with --json).
+_AMBIGUOUS = (
+    False,
+    "[dekko error: exit 4: dekko: 'dup' is ambiguous; candidates:\n"
+    "  src/.env_helpers.py:6  dup()\n"
+    "  src/a.py:3  dup()]",
+)
+_AMBIGUOUS_ALL_DENIED = (
+    False,
+    "[dekko error: exit 4: dekko: 'dup' is ambiguous; candidates:\n"
+    "  src/.env_helpers.py:6  dup()\n"
+    "  .ssh/tool.py:2  dup()]",
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("symbol", {"name": "dup"}),
+        ("context", {"symbol": "dup"}),
+        ("callers", {"symbol": "dup"}),
+        ("trace", {"source": "dup", "target": "dup"}),
+        ("search", {"text": "dup"}),
+    ],
+)
+def test_dekko_ambiguity_error_lists_allowed_candidates_only(
+    deny_repo, fake_dekko, name, args
+):
+    fake_dekko.queue += [_AMBIGUOUS]
+    text = server._dekko_tool(deny_repo, name, args)
+    assert "env_helpers" not in text
+    assert "src/a.py:3  dup()" in text and "ambiguous" in text
+
+
+def test_dekko_ambiguity_with_only_denied_candidates(deny_repo, fake_dekko):
+    fake_dekko.queue += [_AMBIGUOUS_ALL_DENIED]
+    text = server._dekko_tool(deny_repo, "symbol", {"name": "dup"})
+    assert text == "[tool error: no symbol matches]"
+
+
+def test_dekko_other_error_lines_naming_denied_paths_are_dropped(
+    deny_repo, fake_dekko
+):
+    fake_dekko.queue += [
+        (False, "[dekko error: exit 5: bad\nsrc/.env_helpers.py broke\nok]")
+    ]
+    text = server._dekko_tool(deny_repo, "outline", {"path": "src/a.py"})
+    assert "env_helpers" not in text and "bad" in text
+
+
+def test_dekko_callers_failure_text_is_scrubbed(deny_repo, fake_dekko):
+    fake_dekko.queue += [_AMBIGUOUS]
+    sites, text = server._dekko_callers(deny_repo, "dup")
+    assert sites is None and "env_helpers" not in text
+
+
+def test_dekko_trace_exit_ten_is_an_error_not_no_path(deny_repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: exit 10: boom]")]
+    text = server._dekko_tool(
+        deny_repo, "trace", {"source": "a", "target": "b"}
+    )
+    assert text == "[tool error: dekko error: exit 10: boom]"
+
+
+def test_parse_edit_blocks_reads_two_blocks():
+    answer = (
+        "Here you go\n<<<EDIT src/a.py\n<<<OLD\nTARGET = 1\n>>>NEW\n"
+        "TARGET = 2\n>>>END\n<<<EDIT b.md\n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+    )
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == []
+    assert blocks[0] == server.EditBlock(
+        1, "src/a.py", "TARGET = 1", "TARGET = 2"
+    )
+    assert blocks[1].path == "b.md"
+
+
+def test_parse_edit_blocks_reports_missing_marker():
+    _, errors = server._parse_edit_blocks("<<<EDIT a.py\n<<<OLD\nx\n>>>END\n")
+    assert errors == ["block 1: missing >>>NEW"]
+
+
+def test_parse_edit_blocks_accepts_an_omitted_old_marker():
+    answer = (
+        "<<<EDIT CLAUDE.md\n  --config label=model`\n  second\n>>>NEW\n"
+        "  --config label=model[,dekko=on|off]`\n>>>END\n"
+    )
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == []
+    assert blocks == [
+        server.EditBlock(
+            1,
+            "CLAUDE.md",
+            "  --config label=model`\n  second",
+            "  --config label=model[,dekko=on|off]`",
+        )
+    ]
+
+
+def test_parse_edit_blocks_ignores_text_before_an_old_marker():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py\nnote\n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+    )
+    assert errors == [] and blocks[0].old == "x"
+
+
+def test_parse_edit_blocks_accepts_trailing_whitespace_on_markers():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py \t\n<<<OLD  \nx \n>>>NEW\t\ny\n>>>END \n"
+    )
+    assert errors == []
+    assert blocks == [server.EditBlock(1, "a.py", "x ", "y")]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "<<<EDIT a.py\n<<<OLD\nx\n<<<NEW\ny\n<<<END\n",
+        ">>>EDIT a.py\n>>>OLD\nx\n>>>NEW\ny\n>>>END\n",
+        "<<<EDIT a.py\n>>>OLD\nx\n<<<NEW\ny\n>>>END\n",
+    ],
+)
+def test_parse_edit_blocks_accepts_either_arrow_on_markers(answer):
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == []
+    assert blocks == [server.EditBlock(1, "a.py", "x", "y")]
+
+
+def test_parse_edit_blocks_leading_space_is_not_a_marker():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py\n<<<OLD\nx\n >>>NEW\ny\n>>>END\n"
+    )
+    assert blocks == [] and errors == ["block 1: missing >>>NEW"]
+
+
+def test_parse_edit_blocks_needs_old_or_new_marker():
+    blocks, errors = server._parse_edit_blocks("<<<EDIT a.py\nx\n>>>END\n")
+    assert blocks == [] and errors == ["block 1: missing >>>NEW"]
+
+
+def test_marker_text_inside_a_line_is_code():
+    answer = "<<<EDIT a.py\n<<<OLD\ns = '>>>END'\n>>>NEW\ns = ''\n>>>END\n"
+    blocks, errors = server._parse_edit_blocks(answer)
+    assert errors == [] and blocks[0].old == "s = '>>>END'"
+
+
+def test_empty_new_text_deletes():
+    blocks, _ = server._parse_edit_blocks(
+        "<<<EDIT a.py\n<<<OLD\nx\n>>>NEW\n>>>END\n"
+    )
+    assert blocks[0].new == ""
+
+
+def test_parse_edit_blocks_reports_missing_end_at_eof():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT a.py\n<<<OLD\nx\n>>>NEW\ny\n"
+    )
+    assert blocks == []
+    assert errors == ["block 1: missing >>>END"]
+
+
+def test_parse_edit_blocks_reports_missing_path():
+    blocks, errors = server._parse_edit_blocks(
+        "<<<EDIT \n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+        "<<<EDIT a.py\n<<<OLD\nx\n>>>NEW\ny\n>>>END\n"
+    )
+    assert errors == ["block 1: missing path"]
+    assert [b.index for b in blocks] == [2]
+
+
+def _blk(index, path, old, new):
+    return server.EditBlock(index, path, old, new)
+
+
+def test_apply_replaces_exactly_once(repo):
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", "TARGET = 1", "TARGET = 2")], repo, None
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "a.py"]
+    assert edit.new == "one\nTARGET = 2\nthree\n"
+    assert edit.original == "one\nTARGET = 1\nthree\n"
+    assert edit.relative == "src/a.py"
+    assert edit.spans == [(2, 2)]
+
+
+def test_apply_rejects_missing_and_duplicate_old_text(repo):
+    (repo / "src" / "d.py").write_text("x\nx\n")
+    changes, errors = server._edit_apply_in_memory(
+        [
+            _blk(3, "src/a.py", "nope", "y"),
+            _blk(4, "src/d.py", "x", "y"),
+            _blk(5, "src/a.py", "", "y"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == [
+        "block 3: old text not found in src/a.py",
+        "block 4: old text matches 2 times in src/d.py (lines 1, 2; "
+        "add a line that tells them apart)",
+        "block 5: old text is empty",
+    ]
+    assert changes == {}
+
+
+def test_apply_counts_overlapping_occurrences(repo):
+    (repo / "src" / "d.py").write_text("aaa")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "aa", "b")], repo, None
+    )
+    assert errors == [
+        "block 1: old text matches 2 times in src/d.py (lines 1, 1; "
+        "add a line that tells them apart)"
+    ]
+
+
+def test_apply_lists_at_most_eight_duplicate_lines(repo):
+    (repo / "src" / "d.py").write_text("x\n" * 10)
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "x", "y")], repo, None
+    )
+    assert errors == [
+        "block 1: old text matches 10 times in src/d.py (lines 1, 2, 3, 4, "
+        "5, 6, 7, 8, ...; add a line that tells them apart)"
+    ]
+
+
+def test_apply_partial_line_quotes_the_full_line(repo):
+    (repo / "src" / "d.py").write_text("a = 1\nTreat each as a lead.\nz\n")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "Treat each as", "Treat each")], repo, None
+    )
+    assert errors == [
+        "block 1: old text must be whole lines (copy each line in full); "
+        "line 2 in full: `Treat each as a lead.`"
+    ]
+
+
+def test_apply_missing_old_text_points_at_its_first_line(repo):
+    (repo / "src" / "d.py").write_text("def f():\n    return 1\n")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "def f():\n    return 2", "y")], repo, None
+    )
+    assert errors == [
+        "block 1: old text not found in src/d.py (its first line is at "
+        "line 1; a later line differs, re-read lines 1-2)"
+    ]
+
+
+def test_apply_missing_old_text_names_the_closest_line(repo):
+    (repo / "src" / "d.py").write_text("a = 1\n    total = compute(x, y)\n")
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/d.py", "    total = compute(x, z)", "q")], repo, None
+    )
+    assert errors == [
+        "block 1: old text not found in src/d.py (closest is line 2: "
+        "`    total = compute(x, y)`)"
+    ]
+
+
+def test_apply_rejects_out_of_scope_denied_and_escaping_paths(repo):
+    (repo / "README.md").write_text("TARGET\n")
+    (repo / "src" / "link.txt").symlink_to(repo.parent / "outside.txt")
+    blocks = [
+        _blk(1, "README.md", "TARGET", "x"),
+        _blk(2, ".env", "TARGET", "x"),
+        _blk(3, "../outside.txt", "TARGET", "x"),
+        _blk(4, "src/link.txt", "TARGET", "x"),
+    ]
+    _, errors = server._edit_apply_in_memory(blocks, repo, ["src"])
+    assert errors == [
+        "block 1: outside scope",
+        "block 2: denied",
+        "block 3: outside cwd",
+        "block 4: outside cwd",
+    ]
+    _, errors = server._edit_apply_in_memory(blocks[:1], repo, ["./src/a.py"])
+    assert errors == ["block 1: outside scope"]
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", "TARGET = 1", "x")], repo, ["./src/"]
+    )
+    assert errors == [] and len(changes) == 1
+
+
+_WHOLE_LINES = "old text must be whole lines (copy each line in full)"
+
+
+@pytest.mark.parametrize(
+    "old", ["TARGET", "= 1", "TARGET = 1\nthr", "ne\nTARGET = 1"]
+)
+def test_apply_refuses_old_text_that_is_not_whole_lines(repo, old):
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", old, "x")], repo, None
+    )
+    assert changes == {} and len(errors) == 1
+    assert errors[0].startswith(f"block 1: {_WHOLE_LINES}")
+
+
+@pytest.mark.parametrize(
+    ("data", "old", "new", "expect"),
+    [
+        (b"a\nlast", "last", "LAST", b"a\nLAST"),
+        (b"a\r\nb\r\nc\r\n", "b", "B", b"a\r\nB\r\nc\r\n"),
+        (b"a\r\nb\r\nc", "b\nc", "C", b"a\r\nC"),
+    ],
+)
+def test_apply_accepts_whole_lines(repo, data, old, new, expect):
+    (repo / "src" / "w.txt").write_bytes(data)
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/w.txt", old, new)], repo, None
+    )
+    assert errors == []
+    assert changes[repo / "src" / "w.txt"].new.encode() == expect
+
+
+def test_nim_edit_repairs_a_mid_line_old_text(stub, repo):
+    _git_init(repo)
+    mid = _edit_answer(("src/a.py", "TARGET = ", "TARGET = 2\n\nTARGET = "))
+    _answers(stub, mid, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: yes]"
+    )
+    repair = stub.posts()[1][3]["messages"][1]["content"]
+    assert f"block 1: {_WHOLE_LINES}" in repair
+
+
+def test_apply_refuses_an_edit_inside_dekko_folder(repo):
+    (repo / ".dekko").mkdir()
+    (repo / ".dekko" / "notes.json").write_text('{"TARGET": 1}\n')
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, ".dekko/notes.json", "TARGET", "x")], repo, None
+    )
+    assert changes == {} and errors == ["block 1: denied"]
+
+
+def test_apply_rejects_overlapping_blocks_even_when_paths_differ_in_form(repo):
+    changes, errors = server._edit_apply_in_memory(
+        [
+            _blk(2, "./src/a.py", "TARGET = 1", "TARGET = 2"),
+            _blk(4, "src/a.py", "TARGET = 1\nthree", "OTHER"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == ["block 4: overlaps block 2 in src/a.py"]
+    assert changes == {}
+
+
+def test_apply_applies_several_blocks_in_one_pass(repo):
+    changes, errors = server._edit_apply_in_memory(
+        [
+            _blk(1, "src/a.py", "three", "3\n3"),
+            _blk(2, "src/a.py", "one", "1"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "a.py"]
+    assert edit.new == "1\nTARGET = 1\n3\n3\n"
+    assert sorted(edit.spans) == [(1, 1), (3, 3)]
+
+
+def test_apply_keeps_crlf(repo):
+    (repo / "src" / "b.py").write_bytes(b"a\r\nTARGET = 1\r\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/b.py", "a\nTARGET = 1", "a\nTARGET = 2\nz")], repo, None
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "b.py"]
+    assert edit.new.encode() == b"a\r\nTARGET = 2\r\nz\r\n"
+    assert edit.spans == [(1, 2)]
+
+
+def test_apply_handles_non_ascii(repo):
+    text = "café\nnaïve “quote”\nend\n"
+    (repo / "src" / "u.py").write_bytes(text.encode())
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/u.py", "naïve “quote”", "plain")],
+        repo,
+        None,
+    )
+    assert errors == []
+    edit = changes[repo / "src" / "u.py"]
+    assert edit.new.encode() == "café\nplain\nend\n".encode()
+    assert edit.original.encode() == text.encode()
+
+
+def test_apply_refuses_new_files_binary_and_bad_utf8(repo):
+    (repo / "src" / "bad.txt").write_bytes(b"caf\xe9 TARGET\n")
+    _, errors = server._edit_apply_in_memory(
+        [
+            _blk(1, "src/new.py", "x", "y"),
+            _blk(2, "src/blob.bin", "TARGET", "y"),
+            _blk(3, "src", "x", "y"),
+            _blk(4, "src/bad.txt", "TARGET", "y"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == [
+        "block 1: file creation is not supported",
+        "block 2: binary file",
+        "block 3: file creation is not supported",
+        "block 4: not UTF-8",
+    ]
+
+
+def test_apply_span_excludes_leading_and_trailing_terminators(repo):
+    def span(name, data, old):
+        (repo / "src" / name).write_bytes(data)
+        changes, errors = server._edit_apply_in_memory(
+            [_blk(1, f"src/{name}", old, "X")], repo, None
+        )
+        assert errors == []
+        return changes[repo / "src" / name].spans
+
+    # Whole-line old text may start or end with an empty line's terminator.
+    assert span("s1.py", b"one\n\nTARGET\n", "\nTARGET") == [(3, 3)]
+    assert span("s2.py", b"one\r\n\r\nTARGET\r\n", "\nTARGET") == [(3, 3)]
+    assert span("s3.py", b"one\nTARGET\n\nx\n", "TARGET\n") == [(2, 2)]
+    assert span("s4.py", b"one\ntwo\nthree\n", "two\nthree") == [(2, 3)]
+
+
+def test_apply_rejects_identical_old_and_new(repo):
+    _, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/a.py", "three", "three")], repo, None
+    )
+    assert errors == ["block 1: old and new text are identical"]
+
+
+def test_apply_mixed_endings_convert_whole_block_to_crlf(repo):
+    (repo / "src" / "m.py").write_bytes(b"a\nb\r\nc\r\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "src/m.py", "b\nc", "b\nx\nc")], repo, None
+    )
+    assert errors == []
+    assert changes[repo / "src" / "m.py"].new.encode() == b"a\nb\r\nx\r\nc\r\n"
+
+
+def test_apply_reports_a_file_that_cannot_be_read_per_block(repo):
+    (repo / "src" / "bad.txt").write_bytes(b"caf\xe9\n")
+    _, errors = server._edit_apply_in_memory(
+        [
+            _blk(1, "src/bad.txt", "x", "y"),
+            _blk(2, "src/bad.txt", "x", "z"),
+        ],
+        repo,
+        None,
+    )
+    assert errors == ["block 1: not UTF-8", "block 2: not UTF-8"]
+
+
+def test_apply_file_scope_is_exact(repo):
+    (repo / "src" / "a.py.bak").write_text("TARGET = 1\n")
+    blocks = [
+        _blk(1, "src/a.py", "TARGET = 1", "x"),
+        _blk(2, "src/a.py.bak", "TARGET = 1", "x"),
+    ]
+    changes, errors = server._edit_apply_in_memory(
+        blocks, repo, ["./src/a.py"]
+    )
+    assert errors == ["block 2: outside scope"]
+    assert list(changes) == [repo / "src" / "a.py"]
+    changes, errors = server._edit_apply_in_memory(
+        blocks[:1], repo, ["./src/a.py"]
+    )
+    assert errors == [] and list(changes) == [repo / "src" / "a.py"]
+
+
+def _delete(index, path, old):
+    return server.EditBlock(index, path, old, "", deletes=True)
+
+
+def _after_delete(repo, data, old):
+    (repo / "src" / "d.md").write_bytes(data)
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", old)], repo, None
+    )
+    assert errors == []
+    return changes[repo / "src" / "d.md"].new.encode()
+
+
+@pytest.mark.parametrize(
+    ("data", "old", "expect"),
+    [
+        (
+            b"| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n",
+            "| 1 | 2 |",
+            b"| a | b |\n|---|---|\n| 3 | 4 |\n",
+        ),
+        (b"x\ny\n", "y", b"x\n"),
+        (b"x\ny", "y", b"x"),
+        (b"a\r\nb\r\nc\r\n", "b", b"a\r\nc\r\n"),
+        (b"a\r\nb", "b", b"a"),
+        (b"only\n", "only", b""),
+    ],
+)
+def test_delete_block_takes_the_whole_line(repo, data, old, expect):
+    assert _after_delete(repo, data, old) == expect
+
+
+@pytest.mark.parametrize("eol", ["\r\n", "\n"])
+def test_deleting_a_last_line_marks_only_that_line(repo, eol):
+    data = f"keep old_name(){eol}last".encode()
+    (repo / "src" / "d.py").write_bytes(data)
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.py", "last")], repo, None
+    )
+    edit = changes[repo / "src" / "d.py"]
+    assert errors == [] and edit.new == "keep old_name()"
+    assert sorted(edit.touched.changed) == [2]
+    assert edit.touched.inserts == set()
+    assert not server._edit_covered(
+        {"src/d.py": edit}, "src/d.py", 1, "call site"
+    )
+
+
+def test_delete_span_and_adjacent_deletes_use_the_extended_range(repo):
+    (repo / "src" / "d.md").write_text("a\nb\nc\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "b")], repo, None
+    )
+    assert errors == [] and changes[repo / "src" / "d.md"].spans == [(2, 2)]
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "b"), _delete(2, "src/d.md", "c")],
+        repo,
+        None,
+    )
+    assert errors == [] and changes[repo / "src" / "d.md"].new == "a\n"
+
+
+def test_a_delete_that_is_not_whole_lines_is_refused(repo):
+    (repo / "src" / "d.md").write_text("keep me\n")
+    changes, errors = server._edit_apply_in_memory(
+        [_delete(1, "src/d.md", "me")], repo, None
+    )
+    assert changes == {} and len(errors) == 1
+    assert errors[0].startswith(f"block 1: {_WHOLE_LINES}")
+
+
+def test_zero_line_new_deletes_and_one_empty_line_blanks(repo):
+    zero, _ = server._parse_edit_blocks(
+        "<<<EDIT src/d.md\n<<<OLD\nb\n>>>NEW\n>>>END\n"
+    )
+    blank, _ = server._parse_edit_blocks(
+        "<<<EDIT src/d.md\n<<<OLD\nb\n>>>NEW\n\n>>>END\n"
+    )
+    assert zero[0].deletes and not blank[0].deletes
+    (repo / "src" / "d.md").write_text("a\nb\nc\n")
+    results = []
+    for blocks in (zero, blank):
+        changes, _ = server._edit_apply_in_memory(blocks, repo, None)
+        results.append(changes[repo / "src" / "d.md"].new)
+    assert results == ["a\nc\n", "a\n\nc\n"]
+
+
+def _patch_repo(tmp_path, files):
+    root = tmp_path / "gitrepo"
+    root.mkdir()
+    for rel, data in files.items():
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(data)
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "init"],
+    ):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True)
+    return root
+
+
+def _apply_edits(tmp_path, monkeypatch, files, blocks):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = _patch_repo(tmp_path, files)
+    changes, errors = server._edit_apply_in_memory(blocks, root, None)
+    assert errors == []
+    diff, checked, detail = server._edit_make_patch(changes, root)
+    assert (checked, detail) == (True, "")
+    patch = server._edit_write_patch(diff)
+    subprocess.run(["git", "-C", str(root), "apply", str(patch)], check=True)
+    return root, changes, diff
+
+
+def test_diff_round_trips_through_git_apply(tmp_path, monkeypatch):
+    root, changes, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"src/a.py": b"one\nTARGET = 1\nthree\n"},
+        [_blk(1, "src/a.py", "TARGET = 1", "TARGET = 2")],
+    )
+    edit = changes[root / "src" / "a.py"]
+    assert (root / "src" / "a.py").read_text() == edit.new
+
+
+def test_delete_patch_passes_git_apply(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"t.md": b"| h |\n|---|\n| 1 |\n| 2 |\n"},
+        [_delete(1, "t.md", "| 1 |")],
+    )
+    added = [x for x in diff.splitlines() if x.startswith("+")]
+    assert "-| 1 |\n" in diff and added == ["+++ b/t.md"]
+    assert (root / "t.md").read_text() == "| h |\n|---|\n| 2 |\n"
+
+
+def test_diff_keeps_a_missing_final_newline(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"src/a.py": b"a\nTARGET = 1"},
+        [_blk(1, "src/a.py", "TARGET = 1", "TARGET = 2")],
+    )
+    assert (root / "src" / "a.py").read_bytes() == b"a\nTARGET = 2"
+    assert "\\ No newline at end of file" in diff
+
+
+def test_diff_handles_a_path_with_a_space(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"docs/my notes.md": b"x\nold\n"},
+        [_blk(1, "docs/my notes.md", "old", "new")],
+    )
+    assert (root / "docs" / "my notes.md").read_text() == "x\nnew\n"
+    assert '--- "a/docs/my notes.md"' in diff
+
+
+def test_diff_quotes_non_ascii_paths(tmp_path, monkeypatch):
+    root, _, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"docs/café.md": b"old\n"},
+        [_blk(1, "docs/café.md", "old", "new")],
+    )
+    assert (root / "docs" / "café.md").read_text() == "new\n"
+
+
+def test_diff_keeps_crlf_bytes(tmp_path, monkeypatch):
+    root, _, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"w.txt": b"a\r\nold\r\nc\r\n"},
+        [_blk(1, "w.txt", "old", "new")],
+    )
+    assert (root / "w.txt").read_bytes() == b"a\r\nnew\r\nc\r\n"
+
+
+def test_diff_with_two_files_is_sorted(tmp_path, monkeypatch):
+    root, _, diff = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"b.py": b"x = 1\n", "a.py": b"y = 1\n"},
+        [_blk(1, "b.py", "x = 1", "x = 2"), _blk(2, "a.py", "y = 1", "y = 2")],
+    )
+    assert diff.index("a/a.py") < diff.index("a/b.py")
+    assert (root / "a.py").read_text() == "y = 2\n"
+    assert (root / "b.py").read_text() == "x = 2\n"
+
+
+def test_git_check_reports_a_failing_patch(tmp_path):
+    root = _patch_repo(tmp_path, {"a.py": b"one\n"})
+    edit = server.FileEdit(root / "a.py", "a.py", "zzz\n", "yyy\n", [(1, 1)])
+    _, ok, err = server._edit_make_patch({root / "a.py": edit}, root)
+    assert ok is False and err
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_git_check_closes_and_removes_its_temp_patch(
+    tmp_path, monkeypatch, fail
+):
+    seen = {}
+
+    def run(args, **kwargs):
+        path = Path(args[-1])
+        seen["path"], seen["text"] = path, path.read_text()
+        if fail:
+            raise subprocess.TimeoutExpired(args, 30)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    ok, _ = server._edit_apply_check("the diff\n", tmp_path)
+    assert ok is not fail
+    assert seen["text"] == "the diff\n" and not seen["path"].exists()
+
+
+def test_git_check_outside_a_repo_returns_none(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert server._edit_git_check("", plain) == (None, "")
+
+
+def test_patch_file_written_and_pruned(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    old = server._edit_write_patch("old\n")
+    age = time.time() - 31 * 86400
+    os.utime(old, (age, age))
+    new = server._edit_write_patch("new\n")
+    assert not old.exists() and new.exists()
+    assert new.parent.name == server.NIM_EDIT_PATCH_DIR
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}\.diff", new.name)
+    assert new.read_bytes() == b"new\n"
+
+
+def test_diff_from_a_subdirectory_root_uses_the_repo_top_level(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    top = _patch_repo(
+        tmp_path, {"f.txt": b"top\nold\n", "pkg/f.txt": b"pkg\nold\n"}
+    )
+    root = top / "pkg"
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "f.txt", "old", "new")], root, None
+    )
+    assert errors == []
+    tree, reason = server._edit_work_tree(root)
+    assert reason is None and tree.resolve() == top.resolve()
+    prefix = server._edit_repo_prefix(root, tree)
+    assert prefix == "pkg/"
+    diff = server._edit_build_diff(changes, prefix)
+    assert "--- a/pkg/f.txt" in diff
+    assert server._edit_git_check(diff, root) == (True, "")
+    patch = server._edit_write_patch(diff)
+    subprocess.run(["git", "-C", str(top), "apply", str(patch)], check=True)
+    assert (top / "pkg" / "f.txt").read_text() == "pkg\nnew\n"
+    assert (top / "f.txt").read_text() == "top\nold\n"
+
+
+def test_git_check_fails_on_a_skipped_patch(tmp_path, monkeypatch):
+    top = _patch_repo(tmp_path, {"f.txt": b"old\n"})
+    real = server.subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "apply"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, "", "Skipped patch 'f.txt'."
+            )
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    ok, message = server._edit_git_check("x", top)
+    assert ok is False and "Skipped patch" in message
+
+
+def test_git_check_says_when_git_could_not_run(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(server.subprocess, "run", boom)
+    ok, message = server._edit_git_check("x", tmp_path)
+    assert ok is False
+    assert message.startswith("git check could not run:")
+
+
+def test_diff_keeps_form_feed_and_lone_cr(tmp_path, monkeypatch):
+    root, _, _ = _apply_edits(
+        tmp_path,
+        monkeypatch,
+        {"w.txt": b"a\x0cb\rc\nold\nz\n"},
+        [_blk(1, "w.txt", "old", "new")],
+    )
+    assert (root / "w.txt").read_bytes() == b"a\x0cb\rc\nnew\nz\n"
+
+
+def test_prune_continues_past_a_failing_unlink(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    folder = server._cache_dir() / server.NIM_EDIT_PATCH_DIR
+    folder.mkdir(parents=True)
+    age = time.time() - 31 * 86400
+    files = [folder / "a.diff", folder / "b.diff"]
+    for f in files:
+        f.write_text("x")
+        os.utime(f, (age, age))
+    real = Path.unlink
+    calls = []
+
+    def flaky(self, *args, **kwargs):
+        calls.append(self.name)
+        if len(calls) == 1:
+            raise PermissionError("no")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    server._edit_prune_patches()
+    assert len(calls) == 2
+    assert sum(f.exists() for f in files) == 1
+
+
+def test_make_patch_from_a_subdirectory_with_a_decoy(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    top = _patch_repo(
+        tmp_path, {"f.txt": b"top\nold\n", "pkg/f.txt": b"pkg\nold\n"}
+    )
+    changes, errors = server._edit_apply_in_memory(
+        [_blk(1, "f.txt", "old", "new")], top / "pkg", None
+    )
+    assert errors == []
+    diff, checked, detail = server._edit_make_patch(changes, top / "pkg")
+    assert (checked, detail) == (True, "")
+    assert "--- a/pkg/f.txt" in diff
+    patch = server._edit_write_patch(diff)
+    subprocess.run(["git", "-C", str(top), "apply", str(patch)], check=True)
+    assert (top / "pkg" / "f.txt").read_text() == "pkg\nnew\n"
+    assert (top / "f.txt").read_text() == "top\nold\n"
+
+
+def test_build_diff_requires_a_prefix():
+    with pytest.raises(TypeError):
+        server._edit_build_diff({})
+
+
+def test_make_patch_outside_a_repo_is_unchecked(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "a.txt").write_text("old\n")
+    changes, _ = server._edit_apply_in_memory(
+        [_blk(1, "a.txt", "old", "new")], plain, None
+    )
+    diff, checked, detail = server._edit_make_patch(changes, plain)
+    assert checked is None and "patch -p1" in detail
+    assert "--- a/a.txt" in diff
+
+
+def test_work_tree_ignores_the_locale(tmp_path, monkeypatch):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    assert server._edit_work_tree(plain) == (None, None)
+
+
+def test_make_patch_refuses_a_root_outside_the_top(tmp_path, monkeypatch):
+    top = _patch_repo(tmp_path, {"a.py": b"one\n"})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(server, "_edit_work_tree", lambda root: (top, None))
+    diff, checked, detail = server._edit_make_patch({}, elsewhere)
+    assert (diff, checked) == ("", False)
+    assert detail.startswith("git check could not run: cwd is not inside")
+
+
+def test_main_guard_is_the_last_top_level_statement():
+    import ast
+
+    tree = ast.parse(Path(server.__file__).read_text())
+    last = tree.body[-1]
+    assert isinstance(last, ast.If)
+    assert ast.unparse(last.test) == "__name__ == '__main__'"
+
+
+# --- nim_edit (check, repair, patch) ----------------------------------------
+
+
+def _edit_answer(*blocks):
+    """An answer with one edit block per (path, old, new)."""
+    parts = [
+        f"<<<EDIT {path}\n<<<OLD\n{old}\n>>>NEW\n{new}\n>>>END"
+        for path, old, new in blocks
+    ]
+    return "\n".join(parts)
+
+
+_GOOD_EDIT = _edit_answer(("src/a.py", "TARGET = 1", "TARGET = 2"))
+_BAD_EDIT = _edit_answer(("src/a.py", "TARGET = 9", "TARGET = 2"))
+
+
+def _git_init(root):
+    """Turn the `repo` fixture into a real git repo with one commit."""
+    import shutil
+
+    shutil.rmtree(root / ".git")
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "init"],
+    ):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True)
+
+
+def _patches():
+    folder = server._cache_dir() / server.NIM_EDIT_PATCH_DIR
+    return sorted(folder.glob("*.diff")) if folder.is_dir() else []
+
+
+def _answers(stub, *texts):
+    for text in texts:
+        stub.queue.append((200, {}, _completion(text)))
+
+
+def test_nim_edit_returns_a_checked_patch(stub, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    (patch,) = _patches()
+    assert lines[1] == f"patch: {patch}"
+    assert patch.is_absolute()
+    assert lines[2] == f"base: {server._repo_fingerprint(str(repo))}"
+    assert lines[3] == "checked: git apply --check passed"
+    assert "-TARGET = 1\n+TARGET = 2\n" in out
+    assert patch.read_text() == "\n".join(lines[4:])
+    assert (repo / "src" / "a.py").read_text() == "one\nTARGET = 1\nthree\n"
+    assert len(stub.posts()) == 1
+    request = stub.posts()[0][3]
+    assert "<<<EDIT" in request["messages"][0]["content"]
+    assert "set TARGET to 2" in request["messages"][1]["content"]
+
+
+def test_nim_edit_outside_git_is_not_checked(stub, tmp_path):
+    plain = tmp_path / "plain"
+    (plain / "src").mkdir(parents=True)
+    (plain / "src" / "a.py").write_text("one\nTARGET = 1\nthree\n")
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(plain))
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    assert lines[2] == "base: none"
+    assert lines[3] == "checked: not checked by git (apply with patch -p1)"
+
+
+def test_nim_edit_repairs_once_then_succeeds(stub, repo):
+    _git_init(repo)
+    _answers(stub, _BAD_EDIT, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: yes]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 2
+    repair = posts[1][3]["messages"][1]["content"]
+    assert "set TARGET to 2" in repair
+    assert "TARGET = 9" in repair
+    assert "block 1: old text not found in src/a.py" in repair
+    assert len(_patches()) == 1
+
+
+def test_nim_edit_refuses_after_failed_repair(stub, repo):
+    _answers(stub, _BAD_EDIT, _BAD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 1: old text not found in src/a.py "
+        "(closest is line 2: `TARGET = 1`)",
+    ]
+    assert len(stub.posts()) == 2
+    assert _patches() == []
+
+
+def test_nim_edit_refuses_an_answer_without_blocks(stub, repo):
+    _answers(stub, "I could not find it.", "Still nothing.")
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- no edit blocks in the answer",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_enforces_the_files_scope(stub, repo):
+    (repo / "docs").mkdir()
+    (repo / "docs" / "x.md").write_text("TARGET\n")
+    _answers(stub, _GOOD_EDIT, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET", str(repo), files=["docs"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 1: outside scope",
+    ]
+    assert "docs" in stub.posts()[0][3]["messages"][1]["content"]
+    assert _patches() == []
+
+
+def _cover_repo(repo):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "use.py").write_text(
+        "def go():\n    return old_name() + 1\n\n\n"
+        "def stay():\n    return old_name() + 2\n"
+    )
+
+
+def _cover_dekko():
+    callers = {
+        "results": [
+            {"path": "src/use.py", "id": "src/use.py::go", "sites": [2]},
+            {"path": "src/use.py", "id": "src/use.py::stay", "sites": [6]},
+        ]
+    }
+    symbol = {"path": "src/lib.py", "line": 1}
+    return [
+        (True, ""),  # the coverage check's fresh map build
+        (True, json.dumps(callers)),
+        (True, json.dumps(symbol)),
+    ]
+
+
+def test_nim_edit_must_cover_flags_an_unedited_site(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    answer = _edit_answer(
+        ("src/lib.py", "def old_name():", "def new_name():"),
+        (
+            "src/use.py",
+            "    return old_name() + 1",
+            "    return new_name() + 1",
+        ),
+    )
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- call site src/use.py:6 of old_name not edited",
+    ]
+    assert "old_name" in stub.posts()[0][3]["messages"][1]["content"]
+    assert _patches() == []
+
+
+def test_nim_edit_must_cover_flags_an_unedited_definition(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    answer = _edit_answer(
+        (
+            "src/use.py",
+            "    return old_name() + 1",
+            "    return new_name() + 1",
+        ),
+        (
+            "src/use.py",
+            "    return old_name() + 2",
+            "    return new_name() + 2",
+        ),
+    )
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- definition src/lib.py:1 of old_name not edited",
+    ]
+
+
+def test_nim_edit_must_cover_passes_when_every_site_is_edited(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    answer = _edit_answer(
+        ("src/lib.py", "def old_name():", "def new_name():"),
+        (
+            "src/use.py",
+            "    return old_name() + 1",
+            "    return new_name() + 1",
+        ),
+        (
+            "src/use.py",
+            "    return old_name() + 2",
+            "    return new_name() + 2",
+        ),
+    )
+    _answers(stub, answer)
+    out = _tool(server.nim_edit)(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 3 blocks, repair round: no]"
+    )
+
+
+def _coverage_errors(repo, fake_dekko, blocks, sites, definition):
+    """Apply `blocks` in memory and check old_name's coverage."""
+    callers = {
+        "results": [
+            {"path": path, "id": f"{path}::go", "sites": [line]}
+            for path, line in sites
+        ]
+    }
+    symbol = {"path": definition[0], "line": definition[1]}
+    fake_dekko.queue += [
+        (True, ""),
+        (True, json.dumps(callers)),
+        (True, json.dumps(symbol)),
+    ]
+    changes, errors = server._edit_apply_in_memory(blocks, repo, None)
+    assert errors == []
+    return server._edit_check_coverage(changes, repo, ["old_name"])[0]
+
+
+_LIB = ("src/lib.py", "def old_name():", "def new_name():")
+
+
+def test_coverage_refuses_a_wide_block_that_keeps_the_call(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "w.py").write_text(
+        "def go():\n    x = 1\n    return old_name()\n"
+    )
+    wide = _blk(
+        2,
+        "src/w.py",
+        "    x = 1\n    return old_name()",
+        "    x = 2\n    return old_name()",
+    )
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [_blk(1, *_LIB), wide],
+        [("src/w.py", 3)],
+        ("src/lib.py", 1),
+    )
+    assert errors == ["call site src/w.py:3 of old_name not edited"]
+
+
+def test_coverage_counts_an_argument_added_inside_a_call(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "w.py").write_text(
+        "def go():\n    return old_name(\n        1,\n    )\n"
+    )
+    added = _blk(
+        2, "src/w.py", "        1,\n    )", "        1,\n        2,\n    )"
+    )
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [_blk(1, *_LIB), added],
+        [("src/w.py", 2)],
+        ("src/lib.py", 1),
+    )
+    assert errors == []
+
+
+def test_coverage_counts_a_single_line_rename(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text("def old_name():\n    return 1\n")
+    (repo / "src" / "w.py").write_text("def go():\n    return old_name()\n")
+    rename = _blk(
+        2, "src/w.py", "    return old_name()", "    return new_name()"
+    )
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [_blk(1, *_LIB), rename],
+        [("src/w.py", 2)],
+        ("src/lib.py", 1),
+    )
+    assert errors == []
+
+
+def test_coverage_counts_a_later_line_of_a_signature(repo, fake_dekko):
+    (repo / "src" / "lib.py").write_text(
+        "def old_name(\n    a,\n    b,\n):\n    return a\n"
+    )
+    (repo / "src" / "w.py").write_text(
+        "def go():\n    return old_name(1, 2)\n"
+    )
+    signature = _blk(1, "src/lib.py", "    b,\n):", "    b: int,\n):")
+    call = _blk(
+        2,
+        "src/w.py",
+        "    return old_name(1, 2)",
+        "    return old_name(1, b=2)",
+    )
+    errors = _coverage_errors(
+        repo,
+        fake_dekko,
+        [signature, call],
+        [("src/w.py", 2)],
+        ("src/lib.py", 1),
+    )
+    assert errors == []
+
+
+def test_statement_end_balances_brackets_outside_strings():
+    lines = [
+        "x = f(",
+        '    ")",',
+        "    [1, 2],",
+        ")",
+        "y = 1",
+    ]
+    assert server._edit_statement_end(lines, 1) == 4
+    assert server._edit_statement_end(lines, 5) == 5
+    assert server._edit_statement_end(["f("] * 40, 1) == 20
+
+
+_PROSE = (
+    "Use `old_name` (Castor's helper) to build the map.\n"
+    "It runs once per root.\n"
+    "See `old_name` again here.\n"
+    "More prose.\n"
+)
+
+
+def _prose_edit(old, new):
+    """The FileEdit for one block on _PROSE, keyed for _edit_covered."""
+    start = _PROSE.index(old)
+    touched = server.LineChanges()
+    server._edit_line_changes(_PROSE, start, start + len(old), new, touched)
+    return {"d.md": server.FileEdit(None, "d.md", _PROSE, "", [], touched)}
+
+
+def test_reference_is_covered_only_by_an_edit_to_its_own_line():
+    other = _prose_edit("See `old_name` again", "See `new_name` again")
+    assert not server._edit_covered(other, "d.md", 1, "reference")
+    own = _prose_edit("Use `old_name`", "Use `new_name`")
+    assert server._edit_covered(own, "d.md", 1, "reference")
+
+
+def test_reference_line_is_not_covered_by_an_insertion_after_it():
+    edits = _prose_edit(
+        "It runs once per root.", "Inserted.\nIt runs once per root."
+    )
+    assert not server._edit_covered(edits, "d.md", 1, "reference")
+
+
+def test_apostrophe_inside_a_word_is_not_a_quote():
+    lines = _PROSE.split("\n")
+    assert server._edit_statement_end(lines, 1) == 1
+    code = ["x = old_name(  # don't", "    1,", ")", "y = 2"]
+    assert server._edit_statement_end(code, 1) == 3
+    assert server._edit_bracket_balance("f('(')") == 0
+
+
+def test_nim_edit_must_cover_dekko_failure_is_an_error(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    boom = (False, "[dekko error: boom]")
+    fake_dekko.queue += [(True, ""), (True, ""), boom, (True, ""), boom]
+    answer = _edit_answer(("src/lib.py", "def old_name():", "def new():"))
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- must_cover: dekko could not list callers of old_name",
+    ]
+
+
+def test_nim_edit_must_cover_needs_dekko(stub, repo):
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["x"])
+    assert out == (
+        "[Error: must_cover needs the dekko map: dekko is switched off]"
+    )
+    assert not stub.posts()
+
+
+def test_nim_edit_must_cover_needs_a_map_that_builds(stub, repo, fake_dekko):
+    fake_dekko.queue += [(False, "[dekko error: exit 2: no parser]")]
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["x"])
+    assert out == (
+        "[Error: must_cover needs the dekko map: the dekko map build "
+        "failed: exit 2: no parser]"
+    )
+    assert not stub.posts()
+
+
+def test_nim_edit_rejects_a_flag_like_must_cover_symbol(
+    stub, repo, fake_dekko
+):
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["-x"])
+    assert out == "[Error: invalid must_cover symbol: -x]"
+    assert not stub.posts() and not fake_dekko.calls
+
+
+def test_nim_edit_rejects_bad_input(stub, repo, tmp_path):
+    edit = _tool(server.nim_edit)
+    assert edit("  ", str(repo)) == "[Error: task is empty.]"
+    assert edit("t", str(tmp_path / "nope")).startswith("[Error: cwd ")
+    assert edit("t", str(repo), files=["-x"]) == (
+        "[Error: invalid files entry: -x]"
+    )
+    assert edit("t", str(repo), must_cover=[""]) == (
+        "[Error: invalid must_cover symbol: ]"
+    )
+    assert not stub.posts()
+
+
+def test_nim_edit_refuses_an_oversized_patch(stub, repo, monkeypatch):
+    _git_init(repo)
+    monkeypatch.setattr(server, "NIM_REVIEW_MAX_DIFF_CHARS", 10)
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED]",
+        "- patch too large for a mechanical edit (1 files, +1 -1 lines)",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_refuses_a_failed_git_check(stub, repo, monkeypatch):
+    _git_init(repo)
+    monkeypatch.setattr(
+        server,
+        "_edit_make_patch",
+        lambda changes, root: ("diff", False, "error: patch failed"),
+    )
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED]",
+        "- git apply --check failed: error: patch failed",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_reports_a_failed_nim_run(stub, repo):
+    stub.queue.append((401, {}, {"error": "bad key"}))
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.startswith("[") and not out.startswith("[nim_edit: OK")
+    assert _patches() == []
+
+
+def test_nim_edit_writes_a_trace(stub, tmp_path, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    _tool(server.nim_edit)("trace this edit", str(repo))
+    folder = tmp_path / "cache" / "claude-castor" / server.NIM_TRACES_DIR
+    (path,) = folder.glob("*.json")
+    trace = json.loads(path.read_text())
+    assert trace["task_head"] == "trace this edit"
+    assert trace["outcome"] == "patch"
+    assert trace["patch"] == str(_patches()[0])
+    assert (trace["blocks"], trace["files"], trace["repair"]) == (1, 1, False)
+
+
+def test_nim_edit_start_and_poll(stub, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    started = _tool(server.nim_edit_start)("set TARGET to 2", str(repo))
+    job_id = _job_id(started)
+    for _ in range(200):
+        out = _tool(server.gemini_poll)(job_id)
+        if "still running" not in out:
+            break
+        time.sleep(0.05)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+
+
+def test_nim_edit_start_reports_bad_input_at_once(stub, repo):
+    start = _tool(server.nim_edit_start)
+    assert start("rename", str(repo), must_cover=["a b"]) == (
+        "[Error: invalid must_cover symbol: a b]"
+    )
+    assert not stub.posts()
+
+
+_FULL_COVER = _edit_answer(
+    ("src/lib.py", "def old_name():", "def new_name():"),
+    ("src/use.py", "    return old_name() + 1", "    return new_name() + 1"),
+    ("src/use.py", "    return old_name() + 2", "    return new_name() + 2"),
+)
+
+
+def test_nim_edit_coverage_refreshes_a_warm_map(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    assert server._dekko_ensure_map(repo) is True  # an earlier agent run
+    _answers(stub, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 3 blocks, repair round: no]"
+    )
+    assert [c[:2] for c in fake_dekko.calls] == [
+        ["map", "--if-stale"],
+        ["map", "--if-stale"],
+        ["query", "callers"],
+        ["query", "symbol"],
+    ]
+
+
+def test_nim_edit_failed_map_refresh_refuses(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    crash = (False, "[dekko error: crash]")
+    fake_dekko.queue += [(True, ""), crash, crash]
+    assert server._dekko_ensure_map(repo) is True
+    _answers(stub, _FULL_COVER, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- must_cover: dekko could not refresh the map (the dekko map "
+        "build failed: crash)",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_must_cover_flags_a_grep_only_reference(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    _git_init(repo)
+    assert "src/reg.py" not in server._agent_index(repo)  # warm, pre-file
+    (repo / "src" / "reg.py").write_text("HANDLERS = [\n    old_name,\n]\n")
+    (repo / ".dekko").mkdir()
+    (repo / ".dekko" / "MAP.md").write_text("old_name\n")
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    _answers(stub, _FULL_COVER, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- reference src/reg.py:2 of old_name not edited",
+    ]
+
+
+def test_callers_tool_lists_grep_only_references(repo, fake_dekko):
+    _cover_repo(repo)
+    (repo / "src" / "reg.py").write_text("HANDLERS = [old_name]\n")
+    fake_dekko.queue += _cover_dekko()[1:]
+    text = server._dekko_tool(repo, "callers", {"symbol": "old_name"})
+    assert "src/use.py:2 in go" in text
+    assert "grep-only" in text and "src/reg.py:1:HANDLERS = [old_name]" in text
+    assert "src/lib.py:1:" not in text and "src/use.py:6:" not in text
+
+
+def test_nim_edit_start_rejects_must_cover_without_dekko(stub, repo):
+    start = _tool(server.nim_edit_start)
+    assert start("rename", str(repo), must_cover=["x"]) == (
+        "[Error: must_cover needs the dekko map: dekko is switched off]"
+    )
+    assert not stub.posts()
+
+
+def test_nim_edit_start_says_dekko_is_missing(stub, repo, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_DEKKO", "1")
+    monkeypatch.setattr(server, "_dekko_bin", lambda: None)
+    out = _tool(server.nim_edit_start)("rename", str(repo), must_cover=["x"])
+    assert out == (
+        "[Error: must_cover needs the dekko map: dekko is not installed "
+        "beside the server's Python]"
+    )
+
+
+def test_nim_edit_start_names_an_old_dekko(
+    stub, repo, fake_dekko, monkeypatch
+):
+    monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 0))
+    out = _tool(server.nim_edit_start)("rename", str(repo), must_cover=["x"])
+    assert out == (
+        "[Error: must_cover needs the dekko map: dekko 1.9.0 is below 1.9.35]"
+    )
+
+
+def test_nim_edit_refuses_parse_errors_beside_a_valid_block(stub, repo):
+    broken = _GOOD_EDIT + "\n<<<EDIT src/a.py\n<<<OLD\nthree\n>>>END"
+    _answers(stub, broken, broken)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 2: missing >>>NEW",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_failed_repair_run_refuses(stub, repo):
+    _answers(stub, _BAD_EDIT)
+    stub.queue.append((401, {}, {"error": "bad key"}))
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    lines = out.split("\n")
+    assert lines[:2] == [
+        "[nim_edit: REFUSED after repair round]",
+        "- block 1: old text not found in src/a.py "
+        "(closest is line 2: `TARGET = 1`)",
+    ]
+    assert len(lines) == 3 and lines[2].startswith("- repair run failed: [")
+    assert _patches() == []
+
+
+def test_nim_edit_start_refusal_polls_as_a_failed_job(stub, repo):
+    _answers(stub, _BAD_EDIT, _BAD_EDIT)
+    job_id = _job_id(_tool(server.nim_edit_start)("t", str(repo)))
+    for _ in range(200):
+        out = _tool(server.gemini_poll)(job_id)
+        if "still running" not in out:
+            break
+        time.sleep(0.05)
+    head, rest = out.split("\n", 1)
+    assert head.startswith(f"[Job {job_id} failed after ")
+    assert rest.startswith("[nim_edit: REFUSED after repair round]")
+
+
+def test_nim_edit_early_returns_carry_all_stats(stub, repo):
+    keys = {"blocks": 0, "files": 0, "repair": False, "outcome": "refused"}
+    for args, kwargs in (
+        (("  ", str(repo)), {}),
+        (("t", str(repo)), {"must_cover": ["x"]}),
+    ):
+        _, stats = server._run_nim_edit(*args, **kwargs)
+        assert keys.items() <= stats.items() and stats["patch"] is None
+
+
+def test_nim_edit_patch_path_is_absolute_with_a_relative_cache(
+    stub, repo, tmp_path, monkeypatch
+):
+    _git_init(repo)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", "relcache")
+    _answers(stub, _GOOD_EDIT)
+    out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    path = Path(out.split("\n")[1].removeprefix("patch: "))
+    assert path.is_absolute() and path.is_file()
+    assert path.is_relative_to(tmp_path.resolve() / "relcache")
+
+
+def _notes_repo(repo):
+    _cover_repo(repo)
+    (repo / "notes").mkdir()
+    (repo / "notes" / "plan.md").write_text(
+        "# Plan\n    We renamed old_name last week.  \n"
+    )
+
+
+def test_nim_edit_lists_references_outside_files(stub, repo, fake_dekko):
+    _notes_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    _answers(stub, _FULL_COVER)
+    out, stats = server._run_nim_edit(
+        "rename", str(repo), files=["src"], must_cover=["old_name"]
+    )
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: OK, 2 files, 3 blocks, repair round: no]"
+    assert lines[4:6] == [
+        "unedited references outside files:",
+        "- notes/plan.md:2: We renamed old_name last week.",
+    ]
+    assert lines[6].startswith("diff --git ")
+    (patch,) = _patches()
+    assert patch.read_text() == "\n".join(lines[6:])
+    assert stats["unedited_references"] == 1
+    assert stats["outcome"] == "patch"
+
+
+def test_nim_edit_refuses_an_unedited_reference_without_files(
+    stub, repo, fake_dekko
+):
+    _notes_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    _answers(stub, _FULL_COVER, _FULL_COVER)
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- reference notes/plan.md:2 of old_name not edited",
+    ]
+
+
+def test_nim_edit_refuses_a_call_site_outside_files(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    answer = _edit_answer(("src/lib.py", "def old_name():", "def new():"))
+    _answers(stub, answer, answer)
+    out = _tool(server.nim_edit)(
+        "rename", str(repo), files=["src/lib.py"], must_cover=["old_name"]
+    )
+    assert out.split("\n") == [
+        "[nim_edit: REFUSED after repair round]",
+        "- call site src/use.py:2 of old_name not edited",
+        "- call site src/use.py:6 of old_name not edited",
+    ]
+    assert _patches() == []
+
+
+def test_nim_edit_reports_zero_unedited_references_by_default(stub, repo):
+    _git_init(repo)
+    _answers(stub, _GOOD_EDIT)
+    out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
+    assert "unedited references" not in out
+    assert stats["unedited_references"] == 0
+
+
+# --- nim_edit: edits recorded through propose_edit ---------------------------
+
+
+def _step(*calls):
+    """One step's reply holding several tool calls, each (name, args)."""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(args),
+                            },
+                        }
+                        for i, (name, args) in enumerate(calls)
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+
+def _propose(path, old, new):
+    return ("propose_edit", {"path": path, "old": old, "new": new})
+
+
+def _steps(stub, *replies):
+    """Queue step replies: a tuple of calls is a tool step, a str a text."""
+    for reply in replies:
+        body = _completion(reply) if isinstance(reply, str) else _step(*reply)
+        stub.queue.append((200, {}, body))
+
+
+def _tool_replies(post):
+    """The tool results a request carried, in order."""
+    return [m["content"] for m in post[3]["messages"] if m["role"] == "tool"]
+
+
+def _tool_names(post):
+    return [t["function"]["name"] for t in post[3].get("tools") or []]
+
+
+def _store(scope=None):
+    return server._EditStore(scope=scope)
+
+
+def _propose_in(store, repo, path, old, new):
+    args = {"path": path, "old": old, "new": new}
+    return server._edit_run_tool(store, repo, "propose_edit", args)
+
+
+def test_propose_edit_patch_equals_the_text_block_patch(stub, repo):
+    _git_init(repo)
+    _steps(stub, (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),), "done")
+    tool_out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    _answers(stub, _GOOD_EDIT)
+    text_out = _tool(server.nim_edit)("set TARGET to 2", str(repo))
+    head = "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    assert tool_out.split("\n")[0] == head == text_out.split("\n")[0]
+    assert tool_out.split("\n")[4:] == text_out.split("\n")[4:]
+    first, second = stub.posts()[:2]
+    assert _tool_names(first)[-2:] == ["propose_edit", "drop_edit"]
+    assert "propose_edit, drop_edit" in first[3]["messages"][0]["content"]
+    assert _tool_replies(second) == ["edit 1 recorded: src/a.py lines 2-2"]
+    assert (repo / "src" / "a.py").read_text() == "one\nTARGET = 1\nthree\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "error"),
+    [
+        (
+            "src/a.py",
+            "TARGET = 9",
+            "old text not found in src/a.py (closest is line 2: `TARGET = 1`)",
+        ),
+        (
+            "src/d.py",
+            "x = 1",
+            "old text matches 2 times in src/d.py (lines 1, 2; add a line "
+            "that tells them apart)",
+        ),
+        (
+            "src/a.py",
+            "TARGET",
+            "old text must be whole lines (copy each line in full); line 2 "
+            "in full: `TARGET = 1`",
+        ),
+        ("docs/x.md", "TARGET", "outside scope"),
+        (".env", "TARGET=secret-value", "denied"),
+        ("../outside.txt", "TARGET outside", "outside cwd"),
+    ],
+)
+def test_propose_edit_refusal_records_nothing(repo, path, old, error):
+    (repo / "src" / "d.py").write_text("x = 1\nx = 1\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "x.md").write_text("TARGET\n")
+    store = _store(scope=["src", ".env", "../outside.txt"])
+    out = _propose_in(store, repo, path, old, "changed")
+    assert out == f"edit refused: {error}"
+    assert store.edits == {} and store.refusals == [out]
+    good = _propose_in(store, repo, "src/a.py", "TARGET = 1", "TARGET = 2")
+    assert good == "edit 1 recorded: src/a.py lines 2-2"
+    assert [b.index for b in server._edit_store_blocks(store)] == [1]
+
+
+def test_drop_edit_removes_an_edit_and_never_reuses_its_number(repo):
+    store = _store()
+    assert _propose_in(store, repo, "src/a.py", "one", "ONE").startswith(
+        "edit 1 recorded"
+    )
+    assert _propose_in(store, repo, "src/a.py", "three", "3").startswith(
+        "edit 2 recorded"
+    )
+    drop = server._edit_run_tool
+    assert drop(store, repo, "drop_edit", {"edit": 1}) == "edit 1 dropped"
+    assert drop(store, repo, "drop_edit", {"edit": 1}) == (
+        "[error: no recorded edit 1]"
+    )
+    assert drop(store, repo, "drop_edit", {"edit": 7}) == (
+        "[error: no recorded edit 7]"
+    )
+    again = _propose_in(store, repo, "src/a.py", "one", "ONE")
+    assert again == "edit 3 recorded: src/a.py lines 1-1"
+    assert [b.index for b in server._edit_store_blocks(store)] == [2, 3]
+
+
+def test_drop_edit_leaves_the_edit_out_of_the_patch(stub, repo):
+    _steps(
+        stub,
+        (
+            _propose("src/a.py", "one", "ONE"),
+            _propose("src/a.py", "three", "3"),
+        ),
+        (("drop_edit", {"edit": 1}),),
+        "done",
+    )
+    out = _tool(server.nim_edit)("change three", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+    assert "-three\n+3\n" in out and "+ONE" not in out
+    assert _tool_replies(stub.posts()[2])[-1] == "edit 1 dropped"
+
+
+def test_propose_edit_refuses_an_overlap_with_a_recorded_edit(repo):
+    store = _store()
+    _propose_in(store, repo, "src/a.py", "TARGET = 1", "TARGET = 2")
+    out = _propose_in(store, repo, "./src/a.py", "TARGET = 1\nthree", "x")
+    assert out == "edit refused: overlaps block 1 in src/a.py"
+    assert list(store.edits) == [1]
+
+
+@pytest.mark.parametrize(
+    ("new", "result"),
+    [("", "one\nthree\n"), ("\n", "one\n\nthree\n")],
+)
+def test_propose_edit_empty_new_deletes_the_lines(repo, new, result):
+    store = _store()
+    out = _propose_in(store, repo, "src/a.py", "TARGET = 1\n", new)
+    assert out == "edit 1 recorded: src/a.py lines 2-2"
+    blocks = server._edit_store_blocks(store)
+    changes, errors = server._edit_apply_in_memory(blocks, repo, None)
+    assert errors == []
+    assert changes[repo / "src" / "a.py"].new == result
+
+
+def test_recorded_edits_skip_the_answer_request(stub, repo):
+    _steps(stub, (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),))
+    out, stats = server._run_nim_edit("set TARGET", str(repo), max_steps=2)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 1 and all("tools" in p[3] for p in posts)
+    assert stats["steps"] == 1
+
+
+def test_text_blocks_still_work_when_nothing_is_recorded(stub, repo):
+    _answers(stub, _GOOD_EDIT)
+    out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: no]"
+    )
+    assert "propose_edit" in _tool_names(stub.posts()[0])
+    assert stats["edit_tool"] is False and stats["edit_calls"] == 0
+
+
+def _call(name, args, call_id):
+    return {
+        "id": call_id,
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+def _offered():
+    return frozenset(
+        [*server.NIM_AGENT_TOOL_NAMES, *server.NIM_EDIT_TOOL_NAMES]
+    )
+
+
+def test_edit_calls_have_their_own_step_cap(repo):
+    rows = [f"item {i:02d}" for i in range(20)]
+    (repo / "src" / "many.py").write_text("\n".join(rows) + "\n")
+    calls = [
+        _call(
+            "propose_edit",
+            {"path": "src/many.py", "old": row, "new": row + "!"},
+            f"e{i}",
+        )
+        for i, row in enumerate(rows[:17])
+    ]
+    store = _store()
+    out = server._agent_step_results(repo, calls, set(), _offered(), store)
+    contents = [m["content"] for m in out]
+    assert all(c.startswith("edit ") for c in contents[:16])
+    assert contents[16] == "[skipped: too many tool calls in one step]"
+    assert len(store.edits) == server.NIM_EDIT_CALLS_PER_STEP == 16
+
+
+def test_read_and_edit_calls_share_a_step(repo):
+    reads = [
+        ("list_dir", {}),
+        ("list_dir", {"path": "src"}),
+        ("read_range", {"path": "src/a.py", "start": 1, "end": 3}),
+        ("grep", {"pattern": "TARGET"}),
+    ]
+    edits = [
+        ("propose_edit", {"path": "src/a.py", "old": old, "new": "x"})
+        for old in ("one", "TARGET = 1", "three")
+    ]
+    mixed = [reads[0], edits[0], reads[1], edits[1], reads[2], edits[2]]
+    mixed += [reads[3], ("list_dir", {"path": "."})]
+    calls = [_call(n, a, f"c{i}") for i, (n, a) in enumerate(mixed)]
+    out = server._agent_step_results(repo, calls, set(), _offered(), _store())
+    contents = [m["content"] for m in out]
+    assert "skipped" not in " ".join(contents[:7])
+    assert contents[7] == "[skipped: too many tool calls in one step]"
+    assert [c for c in contents if c.startswith("edit ")] == [
+        "edit 1 recorded: src/a.py lines 1-1",
+        "edit 2 recorded: src/a.py lines 2-2",
+        "edit 3 recorded: src/a.py lines 3-3",
+    ]
+
+
+def test_propose_edit_runs_again_after_a_drop(repo):
+    store = _store()
+    seen = set()
+    args = {"path": "src/a.py", "old": "TARGET = 1", "new": "TARGET = 2"}
+    propose = _call("propose_edit", args, "p")
+    drop = _call("drop_edit", {"edit": 1}, "d")
+
+    def run(call):
+        out = server._agent_step_results(repo, [call], seen, _offered(), store)
+        return out[0]["content"]
+
+    assert run(propose) == "edit 1 recorded: src/a.py lines 2-2"
+    assert "already ran" in run(propose)
+    assert run(drop) == "edit 1 dropped"
+    assert run(propose) == "edit 2 recorded: src/a.py lines 2-2"
+
+
+def test_repair_round_keeps_and_lists_recorded_edits(stub, repo, fake_dekko):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko(), *_cover_dekko()]
+    _steps(
+        stub,
+        (
+            _propose("src/lib.py", "def old_name():", "def new_name():"),
+            _propose(
+                "src/use.py",
+                "    return old_name() + 1",
+                "    return new_name() + 1",
+            ),
+        ),
+        "all recorded, done",
+        (
+            _propose(
+                "src/use.py",
+                "    return old_name() + 2",
+                "    return new_name() + 2",
+            ),
+        ),
+        "done",
+    )
+    out, stats = server._run_nim_edit(
+        "rename old_name to new_name", str(repo), must_cover=["old_name"]
+    )
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 3 blocks, repair round: yes]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 4
+    repair = posts[2][3]["messages"][1]["content"]
+    assert "- edit 1: src/lib.py lines 1-1" in repair
+    assert "- edit 2: src/use.py lines 2-2" in repair
+    assert "- call site src/use.py:6 of old_name not edited" in repair
+    assert "propose_edit" in repair and "drop_edit" in repair
+    assert "all recorded" not in repair
+    assert "previous answer" not in repair
+    assert _tool_replies(posts[3])[-1] == (
+        "edit 3 recorded: src/use.py lines 6-6"
+    )
+    assert stats["edit_tool"] is True and stats["edit_calls"] == 3
+
+
+def test_repair_run_failure_with_recorded_edits_refuses(
+    stub, repo, fake_dekko
+):
+    _cover_repo(repo)
+    fake_dekko.queue += [(True, ""), *_cover_dekko()]
+    _steps(
+        stub,
+        (_propose("src/lib.py", "def old_name():", "def new_name():"),),
+        "done",
+    )
+    stub.queue.append((401, {}, {"error": "bad key"}))
+    out = _tool(server.nim_edit)("rename", str(repo), must_cover=["old_name"])
+    lines = out.split("\n")
+    assert lines[0] == "[nim_edit: REFUSED after repair round]"
+    assert lines[-1].startswith("- repair run failed: [")
+    assert _patches() == []
+
+
+def test_agent_roles_never_offer_the_edit_tools(stub, repo):
+    _answers(stub, "agent answer", "scout answer")
+    _tool(server.nim_agent)("where is TARGET?", str(repo))
+    _tool(server.nim_scout)("find TARGET", str(repo))
+    posts = stub.posts()
+    assert len(posts) == 2
+    for post in posts:
+        assert _tool_names(post) == ["grep", "read_range", "list_dir"]
+        assert "propose_edit" not in post[3]["messages"][0]["content"]
+
+
+def test_nim_edit_reports_edit_tool_stats(stub, repo):
+    _steps(
+        stub,
+        (
+            _propose("src/a.py", "TARGET = 9", "TARGET = 2"),
+            _propose("src/a.py", "TARGET = 1", "TARGET = 2"),
+        ),
+        "done",
+    )
+    out, stats = server._run_nim_edit("set TARGET to 2", str(repo))
+    assert out.startswith("[nim_edit: OK")
+    assert stats["edit_tool"] is True
+    assert stats["edit_calls"] == 2
+    assert stats["edit_refusals"] == [
+        "edit refused: old text not found in src/a.py "
+        "(closest is line 2: `TARGET = 1`)"
+    ]
+
+
+def test_edit_refusals_are_clipped_in_the_stats(repo):
+    line = "x = '" + "a" * 500 + "'"
+    (repo / "src" / "long.py").write_text(line + "\n")
+    store = _store()
+    out = _propose_in(store, repo, "src/long.py", line[:30], "y")
+    assert out.startswith("edit refused: old text must be whole lines")
+    assert len(out) > 300
+    (clipped,) = server._edit_store_stats(store)["edit_refusals"]
+    assert clipped == out[:300]
+
+
+def test_edit_base_stats_carry_the_edit_tool_keys():
+    stats = server._edit_base_stats()
+    assert stats["edit_tool"] is False
+    assert stats["edit_calls"] == 0 and stats["edit_refusals"] == []
+
+
+def test_cut_reply_with_recorded_edits_keeps_going(stub, repo):
+    (repo / "src" / "b.py").write_text("TARGET = 1\n")
+    _steps(stub, (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),))
+    stub.queue.append((200, {}, _completion("", finish="length")))
+    _steps(stub, (_propose("src/b.py", "TARGET = 1", "TARGET = 2"),), "done")
+    out, _ = server._run_nim_edit("set TARGET", str(repo), max_steps=6)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 2 files, 2 blocks, repair round: no]"
+    )
+    posts = stub.posts()
+    assert len(posts) == 4
+    assert posts[2][3]["messages"][-1]["content"] == (
+        server.NIM_EDIT_CUT_NUDGE
+    )
+
+
+def test_edit_blocks_beside_recorded_edits_go_to_repair(stub, repo):
+    _steps(
+        stub,
+        (_propose("src/a.py", "TARGET = 1", "TARGET = 2"),),
+        _GOOD_EDIT,
+        "done",
+    )
+    out, _ = server._run_nim_edit("set TARGET", str(repo), max_steps=4)
+    assert out.split("\n")[0] == (
+        "[nim_edit: OK, 1 files, 1 blocks, repair round: yes]"
+    )
+    repair = stub.posts()[2][3]["messages"][1]["content"]
+    assert "edit blocks were ignored" in repair
+
+
+def test_edit_tool_errors_come_back_as_tool_errors(repo):
+    store = server._EditStore(scope=None)
+    out = server._edit_run_tool(
+        store, repo, "drop_edit", {"edit": float("inf")}
+    )
+    assert out.startswith("[tool error:")
+
+
+def test_gated_tools_register_only_with_their_env(monkeypatch):
+    import asyncio
+
+    from fastmcp import FastMCP
+
+    def names():
+        return {t.name for t in asyncio.run(server.mcp.list_tools())}
+
+    monkeypatch.setattr(server, "mcp", FastMCP("gate-off"))
+    monkeypatch.delenv("CASTOR_NIM_EDIT", raising=False)
+    server._register_gated((server.nim_edit,), "CASTOR_NIM_EDIT")
+    assert "nim_edit" not in names()
+    monkeypatch.setattr(server, "mcp", FastMCP("gate-on"))
+    monkeypatch.setenv("CASTOR_NIM_EDIT", "1")
+    server._register_gated(
+        (server.nim_edit, server.nim_edit_start), "CASTOR_NIM_EDIT"
+    )
+    assert {"nim_edit", "nim_edit_start"} <= names()

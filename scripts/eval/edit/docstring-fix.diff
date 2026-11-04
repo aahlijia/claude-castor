@@ -1,0 +1,17 @@
+diff --git a/server.py b/server.py
+index 2077b58..da19280 100644
+--- a/server.py
++++ b/server.py
+@@ -5908,7 +5908,11 @@ def _dispatch_nim_agent(
+     max_steps: int | None = None,
+     max_tokens: int | None = None,
+ ) -> str:
+-    """Run a read-only NIM investigation of `cwd` and verify its citations.
++    """Run a read-only NIM investigation of `cwd` and check what it cites.
++
++    Every `path:line` the answer cites is checked to exist
++    (_agent_verify_citations), and each cited line's backticked quote is
++    checked against the file (_agent_check_quotes).
+ 
+     Returns:
+         The answer with a one-line footer, or a bracketed error.

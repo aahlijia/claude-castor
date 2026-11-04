@@ -1,0 +1,81 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0db3a3d..adf4d5d 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -198,7 +198,7 @@ Resilience lives in `_nim_request`: a client-side sliding-window limiter
+ (`_nim_gate_size`: 4 per key, at most 12, or `CASTOR_NIM_CONCURRENCY`), retry
+ with exponential backoff + jitter on 429/5xx/network (one timeout retry),
+ `Retry-After` honored, a per-key cooldown after a 429 (other keys keep going), and a fail-fast "try again in Ns" error once the
+-wait would exceed `NIM_MAX_WAIT` (30s; `NIM_JOB_MAX_WAIT`, 300 s, on a job
++wait would exceed `NIM_CALL_MAX_WAIT` (30s; `NIM_JOB_MAX_WAIT`, 300 s, on a job
+ worker). Requests share one `httpx.Client` (`_nim_client`). `_classify_nim_status` decides what is
+ retryable. Other knobs: `CASTOR_NIM_MODEL`, `CASTOR_NIM_BASE_URL` (https only;
+ http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
+diff --git a/server.py b/server.py
+index 2077b58..85e6cb7 100644
+--- a/server.py
++++ b/server.py
+@@ -2730,7 +2730,7 @@ NIM_BACKOFF_JITTER = 1.0
+ # Longest Castor blocks Claude waiting on its own limiter, a cooldown or a
+ # free slot before returning a "try again in Ns" error instead. Background
+ # jobs block no one, so they wait up to NIM_JOB_MAX_WAIT.
+-NIM_MAX_WAIT = 30.0
++NIM_CALL_MAX_WAIT = 30.0
+ NIM_JOB_MAX_WAIT = 300.0
+ NIM_MAX_COOLDOWN = 600.0
+ NIM_MAX_LISTED_MODELS = 200
+@@ -2975,12 +2975,12 @@ def _nim_max_wait() -> float:
+     """How long this thread may wait for a key or slot.
+ 
+     NIM_JOB_MAX_WAIT on a background-job worker (_run_job marks it),
+-    NIM_MAX_WAIT otherwise: foreground calls block Claude, so fail fast.
++    NIM_CALL_MAX_WAIT otherwise: foreground calls block Claude, so fail fast.
+     """
+     return (
+         NIM_JOB_MAX_WAIT
+         if getattr(_nim_patience, "on", False)
+-        else (NIM_MAX_WAIT)
++        else (NIM_CALL_MAX_WAIT)
+     )
+ 
+ 
+diff --git a/tests/test_nim.py b/tests/test_nim.py
+index 44c4279..25840a2 100644
+--- a/tests/test_nim.py
++++ b/tests/test_nim.py
+@@ -238,7 +238,7 @@ def test_sliding_window_limiter():
+ 
+ 
+ def test_admit_fails_fast_when_wait_too_long(monkeypatch):
+-    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
++    monkeypatch.setattr(server, "NIM_CALL_MAX_WAIT", 0.05)
+     server._nim_reset_state()
+     server._nim_set_cooldown(30, KEY)
+     key, err = server._nim_admit([KEY])
+@@ -440,7 +440,7 @@ def test_api_key_is_redacted_from_errors(stub):
+ 
+ 
+ def test_429_sets_cooldown_that_fails_fast(stub, monkeypatch):
+-    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
++    monkeypatch.setattr(server, "NIM_CALL_MAX_WAIT", 0.05)
+     for _ in range(10):
+         stub.queue.append((429, {"Retry-After": "120"}, {"detail": "no"}))
+     out = _tool(server.nim_prompt)("q", use_cache=False)
+@@ -684,7 +684,7 @@ def test_429_fails_over_to_other_key_immediately(two_keys):
+ 
+ 
+ def test_all_keys_limited_fails_fast(two_keys, monkeypatch):
+-    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
++    monkeypatch.setattr(server, "NIM_CALL_MAX_WAIT", 0.05)
+     for _ in range(10):
+         two_keys.queue.append((429, {"Retry-After": "120"}, {"detail": "no"}))
+     out = _tool(server.nim_prompt)("q", use_cache=False)
+@@ -1686,7 +1686,7 @@ def test_background_job_waits_for_a_slot_a_foreground_call_does_not(
+     stub, monkeypatch
+ ):
+     monkeypatch.setenv("CASTOR_NIM_CONCURRENCY", "1")
+-    monkeypatch.setattr(server, "NIM_MAX_WAIT", 0.05)
++    monkeypatch.setattr(server, "NIM_CALL_MAX_WAIT", 0.05)
+     monkeypatch.setattr(server, "NIM_JOB_MAX_WAIT", 5.0)
+     server._nim_reset_state()
+     gate = server._nim_gate()

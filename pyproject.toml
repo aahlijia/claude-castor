@@ -8,12 +8,17 @@ requires-python = ">=3.10"
 dependencies = [
     "fastmcp",
     "httpx",
+    "dekko[all]>=1.9.35",
 ]
 
 [project.urls]
 Homepage = "https://github.com/aahlijia/claude-castor"
 Repository = "https://github.com/aahlijia/claude-castor"
 Changelog = "https://github.com/aahlijia/claude-castor/blob/main/CHANGELOG.md"
+
+# Temporary: points at the local checkout until dekko 1.9.35 is on PyPI.
+[tool.uv.sources]
+dekko = { path = "/Users/austinahlijian/Projects/dekko" }
 
 [dependency-groups]
 dev = [
