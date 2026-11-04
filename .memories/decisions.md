@@ -275,3 +275,23 @@
   2). Results: `~/.cache/claude-castor/eval/results-20261104-075545.json`.
 - **How:** the strict bar (0 wrong applies) stands until the user rules;
   the next step is theirs.
+
+### 2026-11-04: NQC asks go in two phases; run and compare live in castor (user)
+- **Why:** the NQC orchestrator's five asks after the 2026-11-03 night.
+  Sonnet runners cost ~300K tokens a night babysitting `Tools/playtest`
+  commands, and unaligned reruns cost ~1.5 h of fix rounds. Design and
+  plans: `.docs/nqc-asks-design-2026-11-04.md`, `nqc-asks-plan-phase1-` and
+  `-phase2-2026-11-04.md`; NQC handoff `.docs/castor-for-nqc-2026-11-04.md`.
+- **How:** phase 1 = triage `format="json"` (Castor parses the model's text,
+  plus a shared `@case` verdict-row parser), `CASTOR_NIM_JOB_MAX_WAIT`,
+  GEMINI.md drops Ultra as a fallback, gated `nim_explain_row` (after
+  `feature/nim-edit` merges; bar set before baseline). Phase 2 =
+  `castor_run_start` (allowlist in a committed `.castor/run.json` plus
+  `CASTOR_RUN_ROOTS` in the registration; never kills; records on disk) and
+  `castor_compare_runs` (deterministic, `same_code` flag, optional reading).
+  This supersedes, for `castor_run_*` only, "nim_agent is read-only" and the
+  `nim_edit` rejection of Castor running checks.
+- **Rejected:** triage `confidence` (uncalibrated; `verified`/`quote_ok`
+  instead) and `owner` (triage reads no code; explain-row's `reading`);
+  building run/compare as NQC scripts (Claude's recommendation; the user
+  wants them in castor); Castor killing or taking the lock (scripts own it).
