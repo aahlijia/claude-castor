@@ -264,3 +264,14 @@
   constants, so must_cover cannot be used for them.
 - **Rejected:** every reference everywhere (forces rewriting history or
   refusing); call sites only (non-call references slipped through).
+
+### 2026-11-04: nim_edit stage 1 gate run 6 failed on two whitespace patches
+- **Why:** after the propose_edit tool (Task 14) and its review fixes,
+  Super with dekko on scored 30/33 (91%) correct, 0 out of scope, 6/6
+  refusals, 0 errors, but 2 wrong patches; dekko off scored 24/24 without
+  the must_cover cases. Both wrong patches are valid edits with a whitespace
+  mistake: a missing blank line (first-pass-docs, 1 of 3) and six lines
+  wrapped that were within 79 columns (rename-test-helper, 1 of 3, as in run
+  2). Results: `~/.cache/claude-castor/eval/results-20261104-075545.json`.
+- **How:** the strict bar (0 wrong applies) stands until the user rules;
+  the next step is theirs.
