@@ -6305,6 +6305,12 @@ _PYTEST_ROW_RE = re.compile(r"^(FAILED|ERROR) (\S+)(?: - (.*))?$")
 _NQC_TOTALS_RE = re.compile(r"^total (\d+), fail (\d+), not assessed (\d+)$")
 _PYTEST_TOTALS_RE = re.compile(r"\d+ (?:failed|passed|errors?)\b.* in [\d.]+s")
 _PYTEST_COUNT_RE = re.compile(r"(\d+) (failed|passed|errors?)\b")
+# Unstamped verdict lines: `%-13s %-34s %s`, so the name field is columns
+# 14 to 48 and column 48 is the space before the detail.
+_VERDICT_STATUSES = ("PASS", "FAIL", "NOT ASSESSED")
+_VERDICT_NAME_START = 14
+_VERDICT_NAME_END = 48
+_VERDICT_REPRINT = "--- verdicts ---"
 
 
 @dataclass(frozen=True)
@@ -6402,7 +6408,9 @@ def _pytest_rows(lines: list[str]) -> list[VerdictRow]:
 def _verdict_rows(lines: list[str]) -> list[VerdictRow]:
     """Parses verdict rows from log lines.
 
-    Stamped rows win; the pytest fallback runs only when none matched.
+    Stamped rows win when the log has any stamp. A log without stamps
+    (verdict.sh before 2026-11-03) is read from its verdict lines. The
+    pytest fallback runs only when neither found a row.
 
     Args:
         lines: The log, one string per line.
@@ -6411,7 +6419,100 @@ def _verdict_rows(lines: list[str]) -> list[VerdictRow]:
         The rows in log order, empty when the log has none.
     """
     cleaned = _clean_lines(lines)
-    return _stamped_rows(cleaned) or _pytest_rows(cleaned)
+    if _has_case_stamps(cleaned):
+        return _stamped_rows(cleaned) or _pytest_rows(cleaned)
+    return _unstamped_rows(cleaned) or _pytest_rows(cleaned)
+
+
+def _has_case_stamps(lines: list[str]) -> bool:
+    """True when any line is an `@case` stamp."""
+    return any(_CASE_RE.match(text) for text in lines)
+
+
+def _unstamped_status(text: str) -> str | None:
+    """A verdict line's status (padded to 13 columns), else None."""
+    head = text[:_VERDICT_NAME_START]
+    for status in _VERDICT_STATUSES:
+        if head == status.ljust(_VERDICT_NAME_START - 1) + " ":
+            return status
+    return None
+
+
+def _unstamped_verdict_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """(index, status) of each verdict line outside the summary reprint.
+
+    The reprint runs from `--- verdicts ---` to the totals line.
+    """
+    found = []
+    in_reprint = False
+    for i, text in enumerate(lines):
+        if text.strip() == _VERDICT_REPRINT:
+            in_reprint = True
+        elif in_reprint:
+            in_reprint = not _NQC_TOTALS_RE.match(text)
+        else:
+            status = _unstamped_status(text)
+            if status:
+                found.append((i, status))
+    return found
+
+
+def _unstamped_blocks(
+    lines: list[str],
+) -> list[tuple[int, str, tuple[int, int] | None]]:
+    """(index, status, block) of each verdict line outside the reprint.
+
+    A block runs from the line after the previous verdict line (or line 1)
+    to the line before this one; every verdict line is a boundary, even
+    one whose name cannot be read.
+    """
+    out = []
+    prev = -1
+    for i, status in _unstamped_verdict_lines(lines):
+        first = prev + 2
+        out.append((i, status, (first, i) if first <= i else None))
+        prev = i
+    return out
+
+
+def _unstamped_rows(lines: list[str]) -> list[VerdictRow]:
+    """Reads verdict lines without stamps; overflowing names are skipped.
+
+    The name field is columns 14 to 48. A name longer than 34 characters
+    runs into the detail, so its line is left out (an overflowing name
+    with a space at column 48 is misread; accepted).
+    """
+    rows: list[VerdictRow] = []
+    counts: dict[str, int] = {}
+    for i, status, block in _unstamped_blocks(lines):
+        text = lines[i]
+        if len(text) > _VERDICT_NAME_END and text[_VERDICT_NAME_END] != " ":
+            continue
+        name = text[_VERDICT_NAME_START:_VERDICT_NAME_END].rstrip()
+        if not name:
+            continue
+        detail = text[_VERDICT_NAME_END + 1 :].strip()
+        occurrence = counts.get(name, 0)
+        counts[name] = occurrence + 1
+        rows.append(VerdictRow(name, status, detail, i + 1, block, occurrence))
+    return rows
+
+
+def _unstamped_named_rows(lines: list[str], name: str) -> list[VerdictRow]:
+    """Rows for verdict lines whose name field starts with exactly `name`.
+
+    For names too long for the 34-column field: the caller supplies the
+    full name, and the line must continue with a space or end there.
+    """
+    rows: list[VerdictRow] = []
+    for i, status, block in _unstamped_blocks(lines):
+        rest = lines[i][_VERDICT_NAME_START:]
+        after = rest[len(name) :]
+        if not rest.startswith(name) or after[:1] not in ("", " "):
+            continue
+        detail = after.strip()
+        rows.append(VerdictRow(name, status, detail, i + 1, block, len(rows)))
+    return rows
 
 
 def _last_nqc_totals(lines: list[str]) -> dict[str, int] | None:
@@ -7578,7 +7679,10 @@ def _explain_row_build(
     if data is None:
         return None, root, f"[Error: {log_path!r} is unreadable.]", {}
     lines = _clean_lines(data.decode("utf-8", errors="replace").splitlines())
-    found, error = _explain_row_find(_verdict_rows(lines), row, occurrence)
+    unstamped = None if _has_case_stamps(lines) else lines
+    found, error = _explain_row_find(
+        _verdict_rows(lines), row, occurrence, unstamped
+    )
     if error or found is None:
         return None, root, error, {}
     label = str(target.relative_to(root))
@@ -7592,22 +7696,42 @@ def _explain_row_build(
 
 
 def _explain_row_find(
-    rows: list[VerdictRow], row: str, occurrence: int
+    rows: list[VerdictRow],
+    row: str,
+    occurrence: int,
+    lines: list[str] | None = None,
 ) -> tuple[VerdictRow | None, str | None]:
-    """The row to explain: exact name, else the one name holding `row`."""
-    if not rows:
+    """The row to explain: exact name, else the one name holding `row`.
+
+    `lines` is the log when it has no stamps: a `row` that matches no
+    parsed row is then looked up by exact name on the verdict lines,
+    which finds names too long for verdict.sh's name column.
+    """
+    names = list(dict.fromkeys(r.name for r in rows))
+    matches = [row] if row in names else [n for n in names if row in n]
+    if len(matches) > 1:
+        return None, _explain_row_lookup_error(row, matches, rows)
+    if matches:
+        same = [r for r in rows if r.name == matches[0]]
+    else:
+        same = _unstamped_named_rows(lines, row) if lines and row else []
+    if not same and not rows:
         return None, (
             "[Error: the log has no verdict rows (no @case stamps or pytest "
             "FAILED lines).]"
         )
-    names = list(dict.fromkeys(r.name for r in rows))
-    matches = [row] if row in names else [n for n in names if row in n]
-    if len(matches) != 1:
-        return None, _explain_row_lookup_error(row, matches, rows)
-    same = [r for r in rows if r.name == matches[0]]
+    if not same:
+        return None, _explain_row_lookup_error(row, [], rows)
+    return _explain_row_pick(same, occurrence)
+
+
+def _explain_row_pick(
+    same: list[VerdictRow], occurrence: int
+) -> tuple[VerdictRow | None, str | None]:
+    """Run `occurrence` of one row name; a PASS run is refused."""
     if not 0 <= occurrence < len(same):
         return None, (
-            f"[Error: row {matches[0]!r} occurs {len(same)} time(s); "
+            f"[Error: row {same[0].name!r} occurs {len(same)} time(s); "
             f"occurrence must be 0 to {len(same) - 1}, not {occurrence}.]"
         )
     found = same[occurrence]

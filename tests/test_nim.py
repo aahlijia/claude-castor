@@ -4985,3 +4985,124 @@ def test_explain_row_registers_only_with_its_env(monkeypatch):
 def test_explain_row_unregistered_on_the_real_server():
     assert "nim_explain_row" not in _registered_tool_names()
     assert "nim_explain_row_start" not in _registered_tool_names()
+
+
+# --- verdict rows without case stamps ----------------------------------------
+
+LONG_ROW = "tops: a tier-1 hover lifts off BookcaseE1 (host)"
+
+
+def _unstamped_log(items):
+    """verdict.sh lines as written before NQC added @case stamps."""
+    return [ln for ln in _verdict_log(items) if not ln.startswith("@case ")]
+
+
+def test_verdict_rows_reads_unstamped_lines():
+    lines = _unstamped_log(
+        [
+            ("start", None),
+            ("PASS", "test standard", "50 ms"),
+            ("  walk trial 1: off after 0.12 s", None),
+            ("  walk trial 2: off after none s", None),
+            ("FAIL", "tops: walk off (host)", "1 of 3 trials"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.status, r.detail, r.line, r.block) for r in rows] == [
+        ("test standard", "PASS", "50 ms", 2, (1, 1)),
+        ("tops: walk off (host)", "FAIL", "1 of 3 trials", 5, (3, 4)),
+    ]
+    assert [r.occurrence for r in rows] == [0, 0]
+
+
+def test_verdict_rows_unstamped_skips_reprint():
+    items = [
+        ("  trial a", None),
+        ("FAIL", "tops: x", "1 of 3"),
+        ("NOT ASSESSED", "tops: y", "no host"),
+    ]
+    summary = [
+        "--- verdicts ---",
+        *_unstamped_log(items[1:]),
+        "total 2, fail 1, not assessed 1",
+        "log: Library/tops/a.log",
+    ]
+    rows = server._verdict_rows([*_unstamped_log(items), *summary])
+    assert [(r.name, r.status, r.line) for r in rows] == [
+        ("tops: x", "FAIL", 2),
+        ("tops: y", "NOT ASSESSED", 3),
+    ]
+    assert rows[1].block is None
+
+
+def test_verdict_rows_unstamped_overflowing_name_skipped():
+    assert len(LONG_ROW) == 48
+    lines = _unstamped_log(
+        [("  hover trial 1", None), ("FAIL", LONG_ROW, "x")]
+    )
+    assert server._verdict_rows(lines) == []
+
+
+def test_verdict_rows_unstamped_occurrence_counts_repeats():
+    lines = _unstamped_log(
+        [("FAIL", "tops: x", "1 of 3"), ("FAIL", "tops: x", "2 of 3")]
+    )
+    assert [r.occurrence for r in server._verdict_rows(lines)] == [0, 1]
+
+
+def test_explain_row_finds_unstamped_long_name(captured, repo):
+    (repo / "Library" / "tops").mkdir(parents=True)
+    log = repo / "Library" / "tops" / "old.log"
+    items = [
+        ("PASS", "test standard", "50 ms"),
+        ("  hover host trial 1: rise 0.02 m", None),
+        ("FAIL", LONG_ROW, "10 of 10 stuck on the top"),
+        ("  hover client trial 1: rise 0.01 m", None),
+        ("FAIL", LONG_ROW.replace("(host)", "(client)"), "9 of 10 stuck"),
+    ]
+    summary = ["--- verdicts ---", *_unstamped_log(items[::2])]
+    lines = [
+        *_unstamped_log(items),
+        *summary,
+        "total 3, fail 2, not assessed 0",
+    ]
+    log.write_text("\n".join(lines) + "\n")
+    assert server.nim_explain_row(str(repo), str(log), LONG_ROW) == "ok"
+    task = captured[0]["task"]
+    assert f"row: {LONG_ROW} (FAIL)" in task
+    assert "verdict line 3:" in task and "10 of 10 stuck on the top" in task
+    assert "2:   hover host trial 1: rise 0.02 m" in task
+    assert "client trial" not in task
+
+
+def test_explain_row_unstamped_long_name_needs_exact_name(captured, repo):
+    (repo / "old.log").write_text(
+        "\n".join(_unstamped_log([("FAIL", LONG_ROW, "x")])) + "\n"
+    )
+    out = server.nim_explain_row(str(repo), "old.log", "hover lifts")
+    assert out.startswith("[Error") and captured == []
+
+
+def test_explain_row_unstamped_refuses_pass_long_name(captured, repo):
+    (repo / "old.log").write_text(
+        "\n".join(_unstamped_log([("PASS", LONG_ROW, "x")])) + "\n"
+    )
+    out = server.nim_explain_row(str(repo), "old.log", LONG_ROW)
+    assert out == f"[Error: row {LONG_ROW!r} passed; nothing to explain.]"
+
+
+def test_verdict_rows_stamped_unchanged():
+    lines = _verdict_log(
+        [
+            ("PASS", "test standard", "50 ms"),
+            ("FAIL", "tops: unstamped looking", "1 of 3"),
+            ("  trial 1", None),
+            ("FAIL", "tops: x", "2 of 3"),
+        ]
+    )
+    del lines[3]  # the second row's stamp: its line now looks unstamped
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.line, r.block) for r in rows] == [
+        ("test standard", 1, None),
+        ("tops: x", 5, (3, 4)),
+    ]
