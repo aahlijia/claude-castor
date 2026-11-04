@@ -760,3 +760,18 @@ def test_summarize_edit_counts_error_rows():
     ]
     line = nim_eval.summarize(rows, "a")
     assert "errors 1" in line and "correct 1/1" in line
+
+
+def test_build_task_triage_case_returns_task(tmp_path):
+    import importlib
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    server = importlib.import_module("server")
+    (tmp_path / "run.log").write_text("FAIL x\n")
+    case = {"_base": str(tmp_path), "role": "triage", "log": "run.log"}
+    task, error = nim_eval.build_task(case, tmp_path, server)
+    assert error == "" and task is not None and "run.log" in task
+    case["log"] = "missing.log"
+    task, error = nim_eval.build_task(case, tmp_path, server)
+    assert task is None and error.startswith("[Error")
