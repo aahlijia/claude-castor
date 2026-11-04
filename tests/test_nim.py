@@ -4722,6 +4722,158 @@ def test_explain_row_task_carries_row_and_block(captured, repo):
     assert captured[0]["steps"] == server.NIM_EXPLAIN_ROW_STEPS
 
 
+# --- explain row: the script's fix history -----------------------------------
+
+HISTORY_HEADER = (
+    "Recent commits to this script (newest first, as of the checked-out code):"
+)
+
+
+def _empty_git_repo(root):
+    """An empty real git repo at `root`."""
+    root.mkdir(parents=True, exist_ok=True)
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+    ):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True)
+    return root
+
+
+def _commit(root, path, text, subject):
+    """Write `path` under `root`, commit it, return the commit's hash."""
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-qm", subject], check=True
+    )
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_script_fix_history_lists_commits_to_the_script(tmp_path):
+    root = _empty_git_repo(tmp_path / "r")
+    _commit(root, "Tools/tops.sh", "1\n", "fix(playtest): a")
+    _commit(root, "Assets/x.cs", "1\n", "fix(jobs): b")
+    _commit(root, "Tools/tops.sh", "2\n", "fix(playtest): c")
+    out = server._script_fix_history(root, "HEAD", "tops")
+    assert out.splitlines()[0] == HISTORY_HEADER
+    assert "files: Tools/tops.sh" in out
+    assert "fix(playtest): a" in out and "fix(jobs): b" not in out
+    assert out.index("fix(playtest): c") < out.index("fix(playtest): a")
+
+
+def test_script_fix_history_stops_at_rev(tmp_path):
+    root = _empty_git_repo(tmp_path / "r")
+    first = _commit(root, "Tools/tops.sh", "1\n", "fix(playtest): first")
+    _commit(root, "Tools/tops.sh", "2\n", "fix(playtest): later")
+    out = server._script_fix_history(root, first, "tops")
+    assert "fix(playtest): first" in out
+    assert "later" not in out
+
+
+def test_script_fix_history_caps_commits(tmp_path):
+    root = _empty_git_repo(tmp_path / "r")
+    for i in range(17):
+        _commit(root, "Tools/tops.sh", f"{i}\n", f"fix: change {i}")
+    lines = server._script_fix_history(root, "HEAD", "tops").splitlines()
+    assert len(lines) == 2 + server.NIM_EXPLAIN_ROW_HISTORY_COMMITS == 17
+
+
+def test_script_fix_history_caps_and_sorts_files(tmp_path):
+    root = _empty_git_repo(tmp_path / "r")
+    for path in (
+        "e/tops.md",
+        "f/tops.meta",
+        "c/tops.py",
+        "a/tops.sh",
+        "d/tops.txt",
+        "b/tops.cs",
+    ):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("x\n")
+    _commit(root, "other.txt", "x\n", "init")
+    out = server._script_fix_history(root, "HEAD", "tops")
+    assert "files: a/tops.sh, b/tops.cs, c/tops.py, d/tops.txt\n" in out
+
+
+def test_script_fix_history_empty_cases(tmp_path, monkeypatch):
+    root = _empty_git_repo(tmp_path / "r")
+    _commit(root, "Tools/tops.sh", "1\n", "fix: a")
+    assert server._script_fix_history(root, "HEAD", "doors") == ""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert server._script_fix_history(plain, "HEAD", "tops") == ""
+
+    def slow(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 10)
+
+    monkeypatch.setattr(server.subprocess, "run", slow)
+    assert server._script_fix_history(root, "HEAD", "tops") == ""
+
+
+def test_script_fix_history_keeps_braces_and_cuts_long_lines(captured, repo):
+    _explain_log(repo, [("FAIL", "tops: x (host)", "1 of 3")])
+    (repo / "Tools").mkdir()
+    (repo / "Tools" / "tops.sh").write_text("1\n")
+    _git_init(repo)
+    _commit(repo, "Tools/tops.sh", "2\n", "fix: {x} and {}")
+    _commit(repo, "Tools/tops.sh", "3\n", "fix: " + "y" * 400)
+    out = server._script_fix_history(repo, "HEAD", "tops")
+    assert max(map(len, out.splitlines())) <= server.NIM_AGENT_LINE_CHARS
+    server.nim_explain_row(
+        str(repo), "Library/tops/a-20261104-024904.log", "tops: x (host)"
+    )
+    assert "fix: {x} and {}" in captured[0]["task"]
+
+
+def test_explain_row_task_carries_fix_history(captured, repo):
+    log = _explain_log(repo, [("FAIL", "tops: x (host)", "1 of 3")])
+    (repo / "Tools").mkdir()
+    (repo / "Tools" / "tops.sh").write_text("1\n")
+    _git_init(repo)
+    _commit(repo, "Tools/tops.sh", "2\n", "fix(playtest): reset the janitor")
+    server.nim_explain_row(str(repo), str(log), "tops: x (host)")
+    task = captured[0]["task"]
+    assert HISTORY_HEADER in task
+    assert "fix(playtest): reset the janitor" in task
+    assert "fix to test or tooling code" in task
+
+
+def test_explain_row_task_without_history_has_no_block(captured, repo):
+    log = _explain_log(repo, [("FAIL", "tops: x (host)", "1 of 3")])
+    assert server.nim_explain_row(str(repo), str(log), "tops: x (host)")
+    assert "Recent commits" not in captured[0]["task"]
+    assert "tops: x (host)" in captured[0]["task"]
+
+
+def test_fix_history_source_override(captured, repo, tmp_path):
+    log = _explain_log(repo, [("FAIL", "tops: x (host)", "1 of 3")])
+    other = _empty_git_repo(tmp_path / "other")
+    first = _commit(other, "Tools/tops.sh", "1\n", "fix: from the source")
+    _commit(other, "Tools/tops.sh", "2\n", "fix: after the case")
+    token = server._fix_history_source.set((other, first))
+    try:
+        server.nim_explain_row(str(repo), str(log), "tops: x (host)")
+    finally:
+        server._fix_history_source.reset(token)
+    assert "fix: from the source" in captured[0]["task"]
+    assert "after the case" not in captured[0]["task"]
+    token = server._fix_history_source.set(server.FIX_HISTORY_OFF)
+    try:
+        server.nim_explain_row(str(repo), str(log), "tops: x (host)")
+    finally:
+        server._fix_history_source.reset(token)
+    assert "Recent commits" not in captured[1]["task"]
+
+
 def test_explain_row_substring_and_ambiguity(captured, repo):
     log = _explain_log(
         repo,
