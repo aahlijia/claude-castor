@@ -6975,6 +6975,7 @@ def nim_triage_log(
     question: str | None = None,
     model: str | None = None,
     max_steps: int | None = None,
+    format: str = "text",  # noqa: A002 (the tool arg is named format)
 ) -> str:
     """Boil a long log down to its failures with a free NIM agent.
 
@@ -6991,17 +6992,25 @@ def nim_triage_log(
         model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
             Super).
         max_steps: Request budget (default 3).
+        format: "text" (default) or "json". JSON is Castor's parse of the
+            answer: verdict, the log's FAIL and NOT ASSESSED rows, failures
+            with their row and check flags, marker counts and agent stats.
 
     Returns:
         A verdict line and "log:LINE - what failed - likely cause" items,
-        or a bracketed error.
+        or a bracketed error. In JSON mode, one JSON object (errors are
+        {"error": ..., "message": ...}).
     """
-    task, root, error = _triage_task(cwd, log_path, question)
-    if error or task is None:
-        return error or "[Error: no log.]"
-    return _dispatch_nim_agent(
-        task, root, model, max_steps or NIM_TRIAGE_STEPS
-    )
+    if format not in TRIAGE_FORMATS:
+        return TRIAGE_FORMAT_ERROR
+    task, root, error, log = _triage_task(cwd, log_path, question)
+    if error or task is None or log is None:
+        return _triage_bad_input(error, format)
+    steps = max_steps or NIM_TRIAGE_STEPS
+    if format == "json":
+        label = str(log.relative_to(root))
+        return _dispatch_triage_json(task, root, model, steps, label, log)
+    return _dispatch_nim_agent(task, root, model, steps)
 
 
 @mcp.tool()
@@ -7011,6 +7020,7 @@ def nim_triage_log_start(
     question: str | None = None,
     model: str | None = None,
     max_steps: int | None = None,
+    format: str = "text",  # noqa: A002 (the tool arg is named format)
 ) -> str:
     """Start nim_triage_log in the background; collect it with gemini_poll.
 
@@ -7020,30 +7030,51 @@ def nim_triage_log_start(
         question: See nim_triage_log.
         model: See nim_triage_log.
         max_steps: See nim_triage_log.
+        format: See nim_triage_log. A JSON job's response is the JSON
+            object, including an error object (the job still reads "done").
 
     Returns:
         A message with the job id to pass to gemini_poll, or a bracketed
         error.
     """
-    task, root, error = _triage_task(cwd, log_path, question)
-    if error or task is None:
-        return error or "[Error: no log.]"
+    if format not in TRIAGE_FORMATS:
+        return TRIAGE_FORMAT_ERROR
+    task, root, error, log = _triage_task(cwd, log_path, question)
+    if error or task is None or log is None:
+        return _triage_bad_input(error, format)
     kwargs = {
         "task": task,
         "cwd": root,
         "model": model,
         "max_steps": max_steps or NIM_TRIAGE_STEPS,
     }
+    if format == "json":
+        kwargs["label"] = str(log.relative_to(root))
+        kwargs["log"] = log
+        return _start_agent_job(
+            "NIM log triage", kwargs, _dispatch_triage_json
+        )
     return _start_agent_job("NIM log triage", kwargs)
+
+
+def _triage_bad_input(error: str | None, fmt: str) -> str:
+    """A triage input error, as an object in JSON mode."""
+    text = error or "[Error: no log.]"
+    if fmt != "json":
+        return text
+    return json.dumps(
+        {"error": "bad_input", "message": text.strip("[]")},
+        ensure_ascii=False,
+    )
 
 
 def _triage_task(
     cwd: str, log_path: str, question: str | None
-) -> tuple[str | None, str, str | None]:
-    """The triage role's task text: (task, resolved root, error)."""
+) -> tuple[str | None, str, str | None, Path | None]:
+    """The triage role's task: (task, resolved root, error, log path)."""
     root = Path(cwd).expanduser()
     if not root.is_dir():
-        return None, cwd, f"[Error: cwd {cwd!r} is not a directory.]"
+        return None, cwd, f"[Error: cwd {cwd!r} is not a directory.]", None
     root = root.resolve()
     target, error = _agent_resolve(root, log_path)
     if error or target is None or not target.is_file():
@@ -7054,6 +7085,7 @@ def _triage_task(
                 f"[Error: log_path must be a readable file inside cwd "
                 f"({error or 'not a file'}).]"
             ),
+            None,
         )
     if target.stat().st_size > NIM_TRIAGE_MAX_LOG_BYTES:
         return (
@@ -7063,13 +7095,163 @@ def _triage_task(
                 f"[Error: {log_path!r} is over "
                 f"{NIM_TRIAGE_MAX_LOG_BYTES:,} bytes; split it first.]"
             ),
+            None,
         )
     extra = f"\nAlso determine: {question.strip()}\n" if question else ""
     label = str(target.relative_to(root))
     task = NIM_TRIAGE_PROMPT.format(
         log=label, question=extra, context=_triage_context(target, label)
     )
-    return task, str(root), None
+    return task, str(root), None, target
+
+
+# A triage answer's check tags and footer, as the agent loop appends them.
+TRIAGE_FORMATS = ("text", "json")
+TRIAGE_FORMAT_ERROR = '[Error: format must be "text" or "json".]'
+_TRIAGE_TAG_RE = re.compile(
+    r"\s*\[(unverified|quote is at line \d+|quote not in file)\]"
+)
+_TRIAGE_FOOTER_RE = re.compile(r"^\s*\[nim_agent:.*\]\s*$")
+_TRIAGE_VERDICT_RE = re.compile(
+    r"\b(passed|failed|inconclusive)\b", re.IGNORECASE
+)
+_NIM_RATE_LIMIT_RE = re.compile(r"rate-limited: try again in ~(\d+)s")
+
+
+def _nim_error_json(text: str) -> dict:
+    """A bracketed NIM error as an object: rate_limited or failed."""
+    message = text.strip().strip("[]")
+    wait = _NIM_RATE_LIMIT_RE.search(text)
+    if wait:
+        return {
+            "error": "rate_limited",
+            "retry_after_s": int(wait.group(1)),
+            "message": message,
+        }
+    return {"error": "failed", "message": message}
+
+
+def _strip_check_tags(text: str) -> tuple[str, bool, bool | None]:
+    """Remove Castor's check tags: (clean text, verified, quote_ok).
+
+    quote_ok is None when no quote tag is present (a matched quote is
+    untagged, so it cannot be told from no quote), False on either tag.
+    """
+    tags = [m.group(1) for m in _TRIAGE_TAG_RE.finditer(text)]
+    verified = "unverified" not in tags
+    quote_ok = False if any(t.startswith("quote") for t in tags) else None
+    return _TRIAGE_TAG_RE.sub("", text).strip(), verified, quote_ok
+
+
+def _answer_lines(answer: str) -> list[str]:
+    """The answer's lines without the `[nim_agent: ...]` footer."""
+    return [
+        ln for ln in answer.splitlines() if not _TRIAGE_FOOTER_RE.match(ln)
+    ]
+
+
+def _triage_verdict(lines: list[str]) -> str | None:
+    """passed / failed / inconclusive from a `Verdict` or the first line."""
+    first = next((ln for ln in lines if ln.strip()), "")
+    candidates = [
+        ln for ln in lines if ln.lstrip().lower().startswith("verdict")
+    ]
+    for line in [*candidates, first]:
+        found = _TRIAGE_VERDICT_RE.search(line)
+        if found:
+            return found.group(1).lower()
+    return None
+
+
+def _triage_item(line: str, label: str) -> dict | None:
+    """One `<log>:LINE - what - cause` item, or None for other lines."""
+    pattern = re.compile(
+        rf"^[\s*-]*{re.escape(label)}:(\d+)\s+-\s+(.+?)(?:\s+-\s+(.+))?$"
+    )
+    clean, verified, quote_ok = _strip_check_tags(line)
+    match = pattern.match(clean)
+    if not match:
+        return None
+    cause = (match.group(3) or "").strip()
+    shown = bool(cause) and cause.lower().rstrip(".") != "cause not shown"
+    return {
+        "log_line": int(match.group(1)),
+        "what": match.group(2).strip(),
+        "cause_hint": cause if shown else "",
+        "cause_shown": shown,
+        "verified": verified,
+        "quote_ok": quote_ok,
+    }
+
+
+def _triage_failures(
+    lines: list[str], label: str, rows: list[VerdictRow]
+) -> list[dict]:
+    """The answer's items, each tied to the verdict row that holds its line."""
+    failures = []
+    for line in lines:
+        item = _triage_item(line, label)
+        if item is None:
+            continue
+        row = _row_for_line(rows, item["log_line"])
+        failures.append({"row": row.name if row else None, **item})
+    return failures
+
+
+def _triage_json(
+    answer: str, stats: dict, label: str, lines: list[str]
+) -> dict:
+    """Castor's JSON reading of a triage answer.
+
+    Args:
+        answer: The agent's answer, tags and footer included.
+        stats: The run's stats (model, steps, seconds).
+        label: The log's path relative to the project root.
+        lines: The log, one string per line.
+
+    Returns:
+        The object described in the NQC asks design, section 4.
+    """
+    rows = _verdict_rows(lines)
+    _, markers = _triage_hits(lines)
+    body = _answer_lines(answer)
+    return {
+        "log": label,
+        "verdict": _triage_verdict(body),
+        "totals": _verdict_totals(lines),
+        "rows": [
+            {
+                "row": r.name,
+                "verdict": r.status,
+                "detail": r.detail,
+                "log_line": r.line,
+            }
+            for r in rows
+            if r.status != "PASS"
+        ],
+        "failures": _triage_failures(body, label, rows),
+        "markers": markers,
+        "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
+    }
+
+
+def _dispatch_triage_json(
+    task: str,
+    cwd: str,
+    model: str | None,
+    max_steps: int | None,
+    label: str,
+    log: Path,
+) -> str:
+    """Run the triage agent and return its answer as a JSON object string."""
+    text, stats = _run_nim_agent(task, cwd, model, max_steps)
+    if text.startswith("["):
+        return json.dumps(_nim_error_json(text), ensure_ascii=False)
+    data = _read_bytes(log) or b""
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    return json.dumps(
+        _triage_json(text, stats, label, lines), ensure_ascii=False
+    )
 
 
 def _triage_context(log: Path, label: str) -> str:
