@@ -760,3 +760,248 @@ def test_summarize_edit_counts_error_rows():
     ]
     line = nim_eval.summarize(rows, "a")
     assert "errors 1" in line and "correct 1/1" in line
+
+
+def test_build_task_triage_case_returns_task(tmp_path):
+    import importlib
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    server = importlib.import_module("server")
+    (tmp_path / "run.log").write_text("FAIL x\n")
+    case = {"_base": str(tmp_path), "role": "triage", "log": "run.log"}
+    task, error = nim_eval.build_task(case, tmp_path, server)
+    assert error == "" and task is not None and "run.log" in task
+    case["log"] = "missing.log"
+    task, error = nim_eval.build_task(case, tmp_path, server)
+    assert task is None and error.startswith("[Error")
+
+
+EXPLAIN_ROW_CASE = {
+    "name": "r",
+    "role": "explain_row",
+    "reading": "harness",
+    "expected": [
+        {
+            "id": "site",
+            "window": 3,
+            "locations": [
+                {"file": "Tools/playtest/flow.sh", "lines": [414, 414]},
+                {"file": "Tools/playtest/flow.sh", "lines": [88, 88]},
+            ],
+        }
+    ],
+}
+
+
+def _row_answer(code: str, reading: str) -> str:
+    return (
+        "Row: runstate equal (FAIL)\n"
+        f"Verdict code: {code}\n"
+        "Precondition: none\n"
+        "Trial lines: run.log:4\n"
+        f"Reading: {reading}\n"
+    )
+
+
+def test_score_explain_row_hit_within_three_lines():
+    answer = _row_answer(
+        "Tools/playtest/flow.sh:91 - cat_verdict", "harness - x"
+    )
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got == {
+        "site_hit": True,
+        "reading_right": True,
+        "reading_wrong": False,
+        "error": False,
+    }
+    far = _row_answer("Tools/playtest/flow.sh:93 - x", "harness - x")
+    assert not nim_eval.score_explain_row(far, EXPLAIN_ROW_CASE)["site_hit"]
+
+
+def test_score_explain_row_wrong_file_is_miss():
+    answer = _row_answer("Tools/playtest/other.sh:414 - x", "harness - x")
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got["site_hit"] is False and got["error"] is False
+    none = _row_answer("not found", "harness - x")
+    got = nim_eval.score_explain_row(none, EXPLAIN_ROW_CASE)
+    assert got["site_hit"] is False and got["error"] is False
+
+
+def test_score_explain_row_unclear_is_neither():
+    answer = _row_answer("Tools/playtest/flow.sh:414 - x", "unclear - x")
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got["reading_right"] is False and got["reading_wrong"] is False
+    assert got["site_hit"] is True
+
+
+def test_score_explain_row_swapped_is_wrong():
+    answer = _row_answer("Tools/playtest/flow.sh:414 - x", "game - x")
+    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
+    assert got["reading_right"] is False and got["reading_wrong"] is True
+    err = nim_eval.score_explain_row("[Error: rate limited]", EXPLAIN_ROW_CASE)
+    assert err["error"] is True and err["site_hit"] is False
+
+
+def test_log_file_copied_into_snapshot(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "a.log").write_text("FAIL x\n")
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    case = {
+        "_base": str(tmp_path),
+        "log_file": "logs/a.log",
+        "log": "Library/flow/run.log",
+    }
+    nim_eval.copy_log_file(case, snap)
+    assert (snap / "Library/flow/run.log").read_text() == "FAIL x\n"
+    nim_eval.copy_log_file({"_base": str(tmp_path), "log": "x"}, snap)
+
+
+def _hit(code: str, reading: str = "harness - x") -> dict:
+    return nim_eval.score_explain_row(
+        _row_answer(code, reading), EXPLAIN_ROW_CASE
+    )
+
+
+def test_explain_row_range_overlap_hit_and_miss():
+    assert _hit("Tools/playtest/flow.sh:80-85 - x")["site_hit"]
+    assert _hit("Tools/playtest/flow.sh:416-430 - x")["site_hit"]
+    assert not _hit("Tools/playtest/flow.sh:92-100 - x")["site_hit"]
+
+
+def test_explain_row_not_found_with_citation_is_miss():
+    got = _hit("not found (see Tools/playtest/flow.sh:414)")
+    assert got["site_hit"] is False and got["error"] is False
+
+
+def test_explain_row_first_citation_counts_and_bare_name_hits():
+    assert not _hit("other.sh:1 then Tools/playtest/flow.sh:414")["site_hit"]
+    assert _hit("flow.sh:91 - x")["site_hit"]
+    assert not _hit("playtest/flow2.sh:91 - x")["site_hit"]
+
+
+def _rows(
+    run: int, site: int, right: int, wrong: int, errors: int = 0
+) -> list[dict]:
+    return [
+        {
+            "config": "c",
+            "role": "explain_row",
+            "run": run,
+            "site_hit": i < site,
+            "reading_right": i < right,
+            "reading_wrong": 12 - i <= wrong,
+            "error": i < errors,
+        }
+        for i in range(12)
+    ]
+
+
+def test_explain_row_summary_per_run_and_gate_pass():
+    rows = _rows(1, 10, 8, 1) + _rows(2, 12, 12, 0)
+    lines = nim_eval.summarize(rows, "c").splitlines()
+    assert (
+        "explain_row run 1: site 10/12, reading right 8/12, wrong 1"
+        in (lines[0])
+    )
+    assert "run 2: site 12/12" in lines[1]
+    assert lines[2].endswith("explain_row gate: pass")
+
+
+def test_explain_row_summary_gate_fail_names_bar_and_run():
+    rows = _rows(1, 12, 12, 0) + _rows(2, 9, 12, 0)
+    last = nim_eval.summarize(rows, "c").splitlines()[-1]
+    assert "gate: fail (site 9 < 10 in run 2)" in last
+    rows = _rows(1, 12, 12, 2, errors=1)
+    last = nim_eval.summarize(rows, "c").splitlines()[-1]
+    assert "wrong 2 > 1 in run 1" in last and "errors 1 > 0 in run 1" in last
+
+
+def test_snapshot_with_log_leaves_base_untouched(tmp_path):
+    server = SimpleNamespace(_cache_dir=lambda: tmp_path / "cache")
+    fixture = tmp_path / "fx"
+    fixture.mkdir()
+    (fixture / "a.sh").write_text("check\n")
+    (tmp_path / "x.log").write_text("FAIL x\n")
+    case = {
+        "_base": str(tmp_path),
+        "dir": "fx",
+        "log_file": "x.log",
+        "log": "Library/flow/r.log",
+    }
+    snap = nim_eval.snapshot_with_log(case, server)
+    assert snap != fixture
+    assert (snap / "Library/flow/r.log").read_text() == "FAIL x\n"
+    assert not (fixture / "Library").exists()
+    assert nim_eval.snapshot_with_log(case, server) == snap
+
+
+def test_summary_keeps_main_lines_beside_explain_row():
+    review = {
+        "config": "c",
+        "role": "review",
+        "leads": 2,
+        "matched": 1,
+        "hit": ["x"],
+        "known": 1,
+        "must_hit": [],
+        "musts": 0,
+        "quotes": [0, 0],
+        "seconds": 3.0,
+        "steps": 2,
+        "failed": False,
+    }
+    text = nim_eval.summarize([review, *_rows(1, 12, 12, 0)], "c")
+    lines = text.splitlines()
+    assert "precision" in lines[0] and "explain_row" not in lines[0]
+    assert "explain_row run 1" in lines[1]
+    assert lines[-1].endswith("explain_row gate: pass")
+
+
+def _explain_server(seen):
+    override = contextvars.ContextVar("o", default=None)
+
+    def explain_row(*_a):
+        seen["at_run"] = override.get()
+        return "[Error: x]"
+
+    def ensure_map(root):
+        seen["map"] = root
+        return True
+
+    return SimpleNamespace(
+        _dekko_override=override,
+        _dekko_ensure_map=ensure_map,
+        _cache_dir=lambda: seen["cache"],
+        nim_explain_row=explain_row,
+    )
+
+
+def _explain_case(tmp_path):
+    (tmp_path / "fx").mkdir()
+    return {
+        "name": "e",
+        "role": "explain_row",
+        "dir": "fx",
+        "_base": str(tmp_path),
+        "log": "r.log",
+        "row": "x",
+        "expected_site": {"file": "a.sh", "lines": [1, 2]},
+    }
+
+
+@pytest.mark.parametrize("dekko", [True, False, None])
+def test_explain_row_case_honours_the_dekko_setting(tmp_path, dekko):
+    seen = {"cache": tmp_path / "cache"}
+    server = _explain_server(seen)
+    config = {"label": "c", "model": None}
+    if dekko is not None:
+        config["dekko"] = dekko
+    result = nim_eval.run_explain_row_case(
+        _explain_case(tmp_path), config, server
+    )
+    assert seen["at_run"] is dekko
+    assert ("map" in seen) is (dekko is True)
+    assert result["dekko"] is dekko
+    assert server._dekko_override.get() is None
