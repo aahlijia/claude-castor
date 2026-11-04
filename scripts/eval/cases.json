@@ -522,5 +522,34 @@
     ]
    }
   ]
+ },
+ {
+  "name": "explain-row-fixture",
+  "role": "explain_row",
+  "dir": "fixtures/explain_row",
+  "log": "Library/flow/run-1.log",
+  "row": "wallet seed",
+  "occurrence": 0,
+  "reading": "game",
+  "expected": [
+   {
+    "id": "site",
+    "must": true,
+    "window": 3,
+    "keywords": [
+     "check",
+     "wallet"
+    ],
+    "locations": [
+     {
+      "file": "Tools/flow.sh",
+      "lines": [
+       6,
+       6
+      ]
+     }
+    ]
+   }
+  ]
  }
 ]

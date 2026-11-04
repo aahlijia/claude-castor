@@ -1,0 +1,14 @@
+[0s] bring-up: start.sh Demo
+[2s] WALLET 500 -> wallet=0 host=True
+FAIL          wallet seed                        wallet read back as 0
+@case 1793787056 FAIL wallet seed
+[3s] TIER 3 -> tier=3 host=True
+PASS          tier seed                          tier read back
+@case 1793787057 PASS tier seed
+--- verdicts ---
+FAIL          wallet seed                        wallet read back as 0
+@case 1793787056 FAIL wallet seed
+PASS          tier seed                          tier read back
+@case 1793787057 PASS tier seed
+total 2, fail 1, not assessed 0
+log: Library/flow/run-1.log
