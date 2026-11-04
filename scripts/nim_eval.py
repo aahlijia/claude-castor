@@ -190,7 +190,7 @@ def build_task(
         return task, error or ""
     if role == "scout":
         return server._scout_task(case["question"]), ""
-    task, _, error = server._triage_task(
+    task, _, error, _ = server._triage_task(
         str(cwd), case["log"], case.get("question")
     )
     return task, error or ""
