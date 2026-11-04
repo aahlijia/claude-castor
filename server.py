@@ -6280,6 +6280,190 @@ def _start_agent_job(
 
 
 # ---------------------------------------------------------------------------
+# Verdict rows
+#
+# A deterministic reader for suite logs. NQC's verdict.sh prints each row as
+# `%-13s %-34s %s` (STATUS NAME DETAIL) followed by a stamp line
+# `@case <epoch> <STATUS_> <NAME>`; the stamp is the reliable split because
+# a long name overflows its column. Plain pytest output is the fallback.
+# ---------------------------------------------------------------------------
+
+_CASE_RE = re.compile(r"^@case \d+ (PASS|FAIL|NOT_ASSESSED) (.+)$")
+_PYTEST_ROW_RE = re.compile(r"^(FAILED|ERROR) (\S+)(?: - (.*))?$")
+_NQC_TOTALS_RE = re.compile(r"^total (\d+), fail (\d+), not assessed (\d+)$")
+_PYTEST_TOTALS_RE = re.compile(r"\d+ (?:failed|passed|errors?)\b.* in [\d.]+s")
+_PYTEST_COUNT_RE = re.compile(r"(\d+) (failed|passed|errors?)\b")
+
+
+@dataclass(frozen=True)
+class VerdictRow:
+    """One test verdict found in a suite log.
+
+    Attributes:
+        name: The test name.
+        status: "PASS", "FAIL" or "NOT ASSESSED".
+        detail: The text after the name on the verdict line.
+        line: 1-based line number of the verdict line.
+        block: 1-based inclusive range of the lines printed for this test
+            before its verdict, or None when there are none.
+        occurrence: 0-based count of earlier rows with the same name.
+    """
+
+    name: str
+    status: str
+    detail: str
+    line: int
+    block: tuple[int, int] | None
+    occurrence: int
+
+
+def _clean_lines(lines: list[str]) -> list[str]:
+    """Strips carriage returns so CRLF logs match like LF ones."""
+    return [ln.replace("\r", "") for ln in lines]
+
+
+def _verdict_line_index(lines: list[str], stamp: int) -> int | None:
+    """Finds the nearest non-empty line above a stamp line."""
+    for i in range(stamp - 1, -1, -1):
+        if lines[i].strip():
+            return i
+    return None
+
+
+def _stamped_row(
+    lines: list[str], stamp: int, prev_stamp: int, counts: dict[str, int]
+) -> VerdictRow | None:
+    """Builds the row for one stamp line, or None if its verdict is absent."""
+    match = _CASE_RE.match(lines[stamp])
+    if not match:
+        return None
+    status = match.group(1).replace("_", " ")
+    name = match.group(2)
+    idx = _verdict_line_index(lines, stamp)
+    if idx is None or idx <= prev_stamp:
+        return None
+    text = lines[idx]
+    if not text.startswith(status):
+        return None
+    at = text.find(name, len(status))
+    if at < 0:
+        return None
+    detail = text[at + len(name) :].strip()
+    first = prev_stamp + 2
+    block = (first, idx) if first <= idx else None
+    occurrence = counts.get(name, 0)
+    counts[name] = occurrence + 1
+    return VerdictRow(name, status, detail, idx + 1, block, occurrence)
+
+
+def _stamped_rows(lines: list[str]) -> list[VerdictRow]:
+    """Reads every stamped verdict row, in log order."""
+    rows: list[VerdictRow] = []
+    counts: dict[str, int] = {}
+    prev_stamp = -1
+    for i, text in enumerate(lines):
+        if not _CASE_RE.match(text):
+            continue
+        row = _stamped_row(lines, i, prev_stamp, counts)
+        if row:
+            rows.append(row)
+        prev_stamp = i
+    return rows
+
+
+def _pytest_rows(lines: list[str]) -> list[VerdictRow]:
+    """Reads pytest `FAILED`/`ERROR` summary lines as FAIL rows."""
+    rows: list[VerdictRow] = []
+    counts: dict[str, int] = {}
+    for i, text in enumerate(lines):
+        match = _PYTEST_ROW_RE.match(text)
+        if not match:
+            continue
+        name = match.group(2)
+        occurrence = counts.get(name, 0)
+        counts[name] = occurrence + 1
+        detail = (match.group(3) or "").strip()
+        rows.append(VerdictRow(name, "FAIL", detail, i + 1, None, occurrence))
+    return rows
+
+
+def _verdict_rows(lines: list[str]) -> list[VerdictRow]:
+    """Parses verdict rows from log lines.
+
+    Stamped rows win; the pytest fallback runs only when none matched.
+
+    Args:
+        lines: The log, one string per line.
+
+    Returns:
+        The rows in log order, empty when the log has none.
+    """
+    cleaned = _clean_lines(lines)
+    return _stamped_rows(cleaned) or _pytest_rows(cleaned)
+
+
+def _last_nqc_totals(lines: list[str]) -> dict[str, int] | None:
+    """Returns the last `total N, fail N, not assessed N` line, if any."""
+    found = None
+    for text in lines:
+        match = _NQC_TOTALS_RE.match(text)
+        if match:
+            total, fail, na = (int(g) for g in match.groups())
+            found = {"total": total, "fail": fail, "not_assessed": na}
+    return found
+
+
+def _last_pytest_totals(lines: list[str]) -> dict[str, int] | None:
+    """Returns totals from the last pytest result line, if any."""
+    found = None
+    for text in lines:
+        if not _PYTEST_TOTALS_RE.search(text):
+            continue
+        counts = {"failed": 0, "passed": 0, "error": 0}
+        for num, word in _PYTEST_COUNT_RE.findall(text):
+            counts[word.rstrip("s")] += int(num)
+        fail = counts["failed"] + counts["error"]
+        found = {
+            "total": fail + counts["passed"],
+            "fail": fail,
+            "not_assessed": 0,
+        }
+    return found
+
+
+def _verdict_totals(lines: list[str]) -> dict[str, int] | None:
+    """Reads the suite totals line.
+
+    Args:
+        lines: The log, one string per line.
+
+    Returns:
+        A dict with `total`, `fail` and `not_assessed`, or None when the
+        log has no totals line. The last match wins.
+    """
+    cleaned = _clean_lines(lines)
+    return _last_nqc_totals(cleaned) or _last_pytest_totals(cleaned)
+
+
+def _row_for_line(rows: list[VerdictRow], n: int) -> VerdictRow | None:
+    """Finds the row whose block or verdict line holds line `n`.
+
+    Args:
+        rows: Rows from `_verdict_rows`.
+        n: A 1-based log line number.
+
+    Returns:
+        The matching row, or None.
+    """
+    for row in rows:
+        if row.line == n:
+            return row
+        if row.block and row.block[0] <= n <= row.block[1]:
+            return row
+    return None
+
+
+# ---------------------------------------------------------------------------
 # NIM agent roles
 #
 # Thin task wrappers over _dispatch_nim_agent. Each bakes in the prompt and
