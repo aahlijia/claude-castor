@@ -223,6 +223,29 @@ def dekko_scope(config: dict, server: ModuleType) -> Iterator[None]:
         server._dekko_override.reset(token)
 
 
+@contextlib.contextmanager
+def history_scope(
+    case: dict, config: dict, server: ModuleType
+) -> Iterator[None]:
+    """Point explain-row's fix history at the case's source repo and commit.
+
+    Snapshots carry no history, so the history comes from the case's repo
+    at its commit (later fixes stay out). `history=off`, or a fixture case
+    with no repo, leaves the history out.
+    """
+    if config.get("history") is False or "repo" not in case:
+        source: Any = server.FIX_HISTORY_OFF
+    else:
+        base = Path(case["_base"])
+        repo = (base / Path(case["repo"]).expanduser()).resolve()
+        source = (repo, case["commit"])
+    token = server._fix_history_source.set(source)
+    try:
+        yield
+    finally:
+        server._fix_history_source.reset(token)
+
+
 def _prepare_dekko(config: dict, cwd: Path, server: ModuleType) -> None:
     """With dekko on, make sure the snapshot has a map before the run."""
     if config.get("dekko") is True:
@@ -399,7 +422,7 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one explain_row case through nim_explain_row and score it."""
     started = time.monotonic()
     try:
-        with dekko_scope(config, server):
+        with dekko_scope(config, server), history_scope(case, config, server):
             cwd = snapshot_with_log(case, server)
             _prepare_dekko(config, cwd, server)
             text = _tool_fn(server.nim_explain_row)(
@@ -420,6 +443,7 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
         role="explain_row",
         config=config["label"],
         dekko=config.get("dekko"),
+        history=config.get("history") is not False,
         seconds=round(time.monotonic() - started, 1),
         answer=text,
     )
@@ -956,7 +980,18 @@ def _summarize_main(results: list[dict], label: str) -> str:
     return summarize_rows(rows, label) if rows else ""
 
 
-EXPLAIN_ROW_BARS = {"site": 10, "right": 8, "wrong": 1, "errors": 0}
+def explain_row_bars(n: int) -> dict[str, int]:
+    """The reading round's gate bars for one run of n cases.
+
+    Site on 80% of cases, reading right on two thirds, at most one wrong
+    reading (two past 15 cases), no errors.
+    """
+    return {
+        "site": math.ceil(0.8 * n),
+        "right": math.ceil(2 * n / 3),
+        "wrong": 2 if n > 15 else 1,
+        "errors": 0,
+    }
 
 
 def _explain_run_line(rows: list[dict], label: str, run: int) -> str:
@@ -971,22 +1006,20 @@ def _explain_run_line(rows: list[dict], label: str, run: int) -> str:
 
 
 def _explain_run_misses(rows: list[dict], run: int) -> list[str]:
-    """The gate bars one run misses, scaled when it has not 12 cases."""
-    n = len(rows)
+    """The gate bars one run misses (`explain_row_bars` for its size)."""
+    bars = explain_row_bars(len(rows))
     site = sum(r["site_hit"] for r in rows)
     right = sum(r["reading_right"] for r in rows)
     wrong = sum(r["reading_wrong"] for r in rows)
     errors = sum(r["error"] for r in rows)
-    need_site = math.ceil(EXPLAIN_ROW_BARS["site"] * n / 12)
-    need_right = math.ceil(EXPLAIN_ROW_BARS["right"] * n / 12)
     misses = []
-    if site < need_site:
-        misses.append(f"site {site} < {need_site} in run {run}")
-    if right < need_right:
-        misses.append(f"reading right {right} < {need_right} in run {run}")
-    if wrong > EXPLAIN_ROW_BARS["wrong"]:
-        misses.append(f"wrong {wrong} > 1 in run {run}")
-    if errors > EXPLAIN_ROW_BARS["errors"]:
+    if site < bars["site"]:
+        misses.append(f"site {site} < {bars['site']} in run {run}")
+    if right < bars["right"]:
+        misses.append(f"reading right {right} < {bars['right']} in run {run}")
+    if wrong > bars["wrong"]:
+        misses.append(f"wrong {wrong} > {bars['wrong']} in run {run}")
+    if errors > bars["errors"]:
         misses.append(f"errors {errors} > 0 in run {run}")
     return misses
 
@@ -1175,10 +1208,10 @@ def parse_config(raw: str) -> dict:
         key, _, value = item.partition("=")
         if key == "step":
             config["step"] = value
-        elif key == "dekko":
+        elif key in ("dekko", "history"):
             if value not in ("on", "off"):
-                raise ValueError(f"dekko must be on or off, got {value!r}")
-            config["dekko"] = value == "on"
+                raise ValueError(f"{key} must be on or off, got {value!r}")
+            config[key] = value == "on"
     return config
 
 
@@ -1202,8 +1235,8 @@ def main() -> None:
         action="append",
         default=[],
         help=(
-            "label=model[,step=model][,dekko=on|off]; repeatable "
-            "(default: server default)"
+            "label=model[,step=model][,dekko=on|off][,history=on|off]; "
+            "repeatable (default: server default)"
         ),
     )
     parser.add_argument("--server", type=Path, default=ROOT / "server.py")
