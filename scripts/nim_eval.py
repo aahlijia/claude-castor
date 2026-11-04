@@ -450,6 +450,32 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
     return result
 
 
+def print_tasks(cases: list[dict], out: Path, server: ModuleType) -> None:
+    """Write each case's task text and snapshot path; no NIM requests.
+
+    For the explain-row blind screen: `out/<name>.txt` holds the task the
+    agent would get (fix history as of the case commit), and
+    `out/index.json` lists `{name, snapshot, task_file}` per case, with
+    `error` in place of `task_file` when the task cannot be built.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    index = []
+    for case in cases:
+        cwd = snapshot_with_log(case, server)
+        with history_scope(case, {}, server):
+            task, error = build_task(case, cwd, server)
+        entry = {"name": case["name"], "snapshot": str(cwd)}
+        if task is None:
+            entry["error"] = error
+        else:
+            task_file = out / f"{case['name']}.txt"
+            task_file.write_text(task)
+            entry["task_file"] = str(task_file)
+        index.append(entry)
+    (out / "index.json").write_text(json.dumps(index, indent=1))
+    print(f"tasks: {out} ({len(index)} cases)")
+
+
 def run_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one case under one configuration and score it."""
     if case["role"] in PLAIN_ROLES:
@@ -1250,6 +1276,11 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument(
+        "--print-tasks",
+        type=Path,
+        help="write each case's task text to this folder; no requests",
+    )
+    parser.add_argument(
         "--rescore",
         type=Path,
         help="re-score a saved results file against the cases; no requests",
@@ -1264,6 +1295,9 @@ def main() -> None:
             case["_base"] = str(path.resolve().parent)
             cases.append(case)
     cases = select_cases(cases, args.only, args.role)
+    if args.print_tasks:
+        print_tasks(cases, args.print_tasks.expanduser(), server)
+        return
     if args.rescore:
         rescore(args.rescore, cases)
         return
