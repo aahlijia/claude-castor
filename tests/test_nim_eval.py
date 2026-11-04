@@ -856,3 +856,82 @@ def test_log_file_copied_into_snapshot(tmp_path):
     nim_eval.copy_log_file(case, snap)
     assert (snap / "Library/flow/run.log").read_text() == "FAIL x\n"
     nim_eval.copy_log_file({"_base": str(tmp_path), "log": "x"}, snap)
+
+
+def _hit(code: str, reading: str = "harness - x") -> dict:
+    return nim_eval.score_explain_row(
+        _row_answer(code, reading), EXPLAIN_ROW_CASE
+    )
+
+
+def test_explain_row_range_overlap_hit_and_miss():
+    assert _hit("Tools/playtest/flow.sh:80-85 - x")["site_hit"]
+    assert _hit("Tools/playtest/flow.sh:416-430 - x")["site_hit"]
+    assert not _hit("Tools/playtest/flow.sh:92-100 - x")["site_hit"]
+
+
+def test_explain_row_not_found_with_citation_is_miss():
+    got = _hit("not found (see Tools/playtest/flow.sh:414)")
+    assert got["site_hit"] is False and got["error"] is False
+
+
+def test_explain_row_first_citation_counts_and_bare_name_hits():
+    assert not _hit("other.sh:1 then Tools/playtest/flow.sh:414")["site_hit"]
+    assert _hit("flow.sh:91 - x")["site_hit"]
+    assert not _hit("playtest/flow2.sh:91 - x")["site_hit"]
+
+
+def _rows(
+    run: int, site: int, right: int, wrong: int, errors: int = 0
+) -> list[dict]:
+    return [
+        {
+            "config": "c",
+            "role": "explain_row",
+            "run": run,
+            "site_hit": i < site,
+            "reading_right": i < right,
+            "reading_wrong": 12 - i <= wrong,
+            "error": i < errors,
+        }
+        for i in range(12)
+    ]
+
+
+def test_explain_row_summary_per_run_and_gate_pass():
+    rows = _rows(1, 10, 8, 1) + _rows(2, 12, 12, 0)
+    lines = nim_eval.summarize(rows, "c").splitlines()
+    assert (
+        "explain_row run 1: site 10/12, reading right 8/12, wrong 1"
+        in (lines[0])
+    )
+    assert "run 2: site 12/12" in lines[1]
+    assert lines[2].endswith("explain_row gate: pass")
+
+
+def test_explain_row_summary_gate_fail_names_bar_and_run():
+    rows = _rows(1, 12, 12, 0) + _rows(2, 9, 12, 0)
+    last = nim_eval.summarize(rows, "c").splitlines()[-1]
+    assert "gate: fail (site 9 < 10 in run 2)" in last
+    rows = _rows(1, 12, 12, 2, errors=1)
+    last = nim_eval.summarize(rows, "c").splitlines()[-1]
+    assert "wrong 2 > 1 in run 1" in last and "errors 1 > 0 in run 1" in last
+
+
+def test_snapshot_with_log_leaves_base_untouched(tmp_path):
+    server = SimpleNamespace(_cache_dir=lambda: tmp_path / "cache")
+    fixture = tmp_path / "fx"
+    fixture.mkdir()
+    (fixture / "a.sh").write_text("check\n")
+    (tmp_path / "x.log").write_text("FAIL x\n")
+    case = {
+        "_base": str(tmp_path),
+        "dir": "fx",
+        "log_file": "x.log",
+        "log": "Library/flow/r.log",
+    }
+    snap = nim_eval.snapshot_with_log(case, server)
+    assert snap != fixture
+    assert (snap / "Library/flow/r.log").read_text() == "FAIL x\n"
+    assert not (fixture / "Library").exists()
+    assert nim_eval.snapshot_with_log(case, server) == snap
