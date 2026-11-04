@@ -297,8 +297,10 @@
   wants them in castor); Castor killing or taking the lock (scripts own it).
 
 ### 2026-11-04: Ultra is not a fallback for Super
-- **Why:** on 2026-11-03 Ultra was rate limited on 252 of 326 requests while
-  Super ran 556 clean. Counting by local minute over 2026-11-02 and 11-03:
+- **Why:** in the 09:00 hour (local) of 2026-11-03 Ultra was rate limited on
+  252 of 326 requests, while Super ran 556 ok and 0 rate_limit in that same
+  hour (Super was limited later that day, 158 rate_limit at 12:04 to 12:07).
+  Counting by local minute over 2026-11-02 and 11-03:
   10 minutes held an Ultra rate_limit, 2 of them (09:37 and 09:38 on 11-03)
   also held successful Super requests (26 in all), and 8 had no Super
   traffic. The 8 are most of the 429s (245 of 257) because the burst ran
@@ -309,9 +311,8 @@
   (all three table rows now say "not as a fallback"); for a slow or limited
   Super it points to the `_start` job form, which waits up to
   `CASTOR_NIM_JOB_MAX_WAIT`. This amends the 2026-11-02 "limit is per
-  account, not per model" premise: overlap minutes are above 0, so the
-  premise looks wrong for Ultra, and model fallback chains are open again
-  for a later second-provider design. One 2-minute overlap is thin evidence,
-  so treat it as a lead to test before building chains.
+  account, not per model" premise: not confirmed either way (2 overlap
+  minutes). Treat a per-model Ultra limit as a lead to test before building
+  model fallback chains for a later second-provider design.
 - **Rejected:** keeping Ultra as the fallback for a crawling Super (it adds
   a tighter limit exactly when load is high).
