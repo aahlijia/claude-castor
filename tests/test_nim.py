@@ -5106,3 +5106,87 @@ def test_verdict_rows_stamped_unchanged():
         ("test standard", 1, None),
         ("tops: x", 5, (3, 4)),
     ]
+
+
+def _long_pair_log():
+    client = LONG_ROW.replace("(host)", "(client)")
+    return _unstamped_log(
+        [
+            ("  hover host trial 1", None),
+            ("FAIL", LONG_ROW, "10 of 10 stuck on the top"),
+            ("  hover client trial 1", None),
+            ("FAIL", client, "9 of 10 stuck on the top"),
+        ]
+    )
+
+
+def test_explain_row_unstamped_prefix_of_two_rows_is_refused(captured, repo):
+    (repo / "old.log").write_text("\n".join(_long_pair_log()) + "\n")
+    prefix = "tops: a tier-1 hover lifts off BookcaseE1"
+    out = json.loads(
+        server.nim_explain_row(str(repo), "old.log", prefix, format="json")
+    )
+    assert out["error"] == "bad_input"
+    assert f"'{prefix} (host) 10 of'" in out["message"]
+    assert f"'{prefix} (client) 9 of'" in out["message"]
+    assert "more of the row name" in out["message"]
+    assert captured == []
+
+
+def test_explain_row_unstamped_exact_long_name_detail():
+    lines = _long_pair_log()
+    rows = server._verdict_rows(lines)
+    found, error = server._explain_row_find(rows, LONG_ROW, 0, lines)
+    assert error is None and found is not None
+    assert (found.name, found.line, found.block) == (LONG_ROW, 2, (1, 1))
+    assert found.detail == "10 of 10 stuck on the top"
+
+
+def test_explain_row_unstamped_same_long_name_twice_picks_occurrence():
+    lines = _unstamped_log(
+        [
+            ("FAIL", LONG_ROW, "1 of 3 first"),
+            ("  trial b", None),
+            ("FAIL", LONG_ROW, "1 of 3 second"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    found, error = server._explain_row_find(rows, LONG_ROW, 1, lines)
+    assert error is None and found is not None
+    assert (found.line, found.occurrence, found.detail) == (
+        3,
+        1,
+        "1 of 3 second",
+    )
+
+
+def test_verdict_rows_reprint_without_totals_ends_at_other_output():
+    lines = [
+        *_unstamped_log([("FAIL", "tops: a", "1 of 3")]),
+        "--- verdicts ---",
+        *_unstamped_log([("FAIL", "tops: a", "1 of 3")]),
+        "",
+        "second suite starts",
+        *_unstamped_log([("  trial b", None), ("FAIL", "tops: b", "2 of 3")]),
+    ]
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.line, r.block) for r in rows] == [
+        ("tops: a", 1, None),
+        ("tops: b", 7, (5, 6)),
+    ]
+
+
+def test_verdict_rows_indented_marker_does_not_start_reprint():
+    lines = _unstamped_log(
+        [
+            ("FAIL", "tops: a", "1 of 3"),
+            ("  --- verdicts ---", None),
+            ("  trial b", None),
+            ("FAIL", "tops: b", "2 of 3"),
+        ]
+    )
+    rows = server._verdict_rows(lines)
+    assert [(r.name, r.line, r.block) for r in rows] == [
+        ("tops: a", 1, None),
+        ("tops: b", 4, (2, 3)),
+    ]
