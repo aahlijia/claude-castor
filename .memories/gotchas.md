@@ -126,3 +126,7 @@
 - **The eval's `dekko=on|off` flips agent tools and review context
   together.** Isolate a review-context change by comparing dekko-on runs of
   two server files (`--server`) in the same window.
+- **`must_cover` on a module constant always refuses.** dekko does not
+  index module-level constants, so there is no definition or call site to
+  require. Use `must_cover` for functions, methods and classes; for a
+  constant, scope with `files` and check the diff by eye.
