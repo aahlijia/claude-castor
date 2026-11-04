@@ -316,3 +316,20 @@
   model fallback chains for a later second-provider design.
 - **Rejected:** keeping Ultra as the fallback for a crawling Super (it adds
   a tighter limit exactly when load is high).
+
+### 2026-11-04: nim_explain_row stays gated: its reading failed the gate
+- **Why:** the gate run (commit 5013a0d, Super with dekko on, 2 runs, 12 NQC
+  cases, results in ~/.cache/claude-castor/eval/results-20261104-094551.json)
+  scored run 1 at site 11/12, reading right 1/12, wrong 2, errors 0, and
+  run 2 at site 12/12, reading right 3/12, wrong 2, errors 0. The bar needs
+  reading right 8 or more and wrong 1 or fewer, so both runs failed on the
+  reading. Of 24 readings, 16 were unclear, 7 game and 1 harness. All 4 wrong
+  ones were "game" on harness cases (nqc-tear-consoles both runs,
+  nqc-washer-consoles run 2, nqc-garage-carry run 1), mostly console-warning
+  rows where the model took a Unity warning for a game fault. Finding the
+  code that decides the verdict hit 23 of 24.
+- **How:** the tool stays behind CASTOR_NIM_EXPLAIN_ROW=1; the bar is
+  unchanged. The site part passed on its own, so a variant without the
+  harness/game reading is a separate decision for the user. CLAUDE.md and
+  GEMINI.md say the gate ran and failed on the reading.
+- **Rejected:** tuning the bar or the prompt after seeing these results.
