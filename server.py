@@ -7365,8 +7365,11 @@ def _triage_verdict(lines: list[str]) -> str | None:
 
 def _triage_item(line: str, label: str) -> dict | None:
     """One `<log>:LINE - what - cause` item, or None for other lines."""
+    base = re.escape(label.rsplit("/", 1)[-1])
+    path = rf"(?:{re.escape(label)}|(?:[^\s`:]*/)?{base})"
     pattern = re.compile(
-        rf"^[\s*-]*{re.escape(label)}:(\d+)\s+-\s+(.+?)(?:\s+-\s+(.+))?$"
+        rf"^[\s*-]*(?:\d+[.)]\s*)?`?{path}:(\d+)(?:-\d+)?`?"
+        r"\s+-\s+(.+?)(?:\s+-\s+(.+))?$"
     )
     clean, verified, quote_ok = _strip_check_tags(line)
     match = pattern.match(clean)
@@ -9755,8 +9758,8 @@ def _register_gated(fns: tuple[Any, ...], env: str) -> None:
 # nim_edit failed its stage 1 gate (run 6, 2026-11-04: two whitespace-wrong
 # patches); it is offered only with CASTOR_NIM_EDIT=1.
 _register_gated((nim_edit, nim_edit_start), "CASTOR_NIM_EDIT")
-# nim_explain_row waits on its eval gate (12 NQC cases, 2 runs); it is
-# offered only with CASTOR_NIM_EXPLAIN_ROW=1.
+# nim_explain_row's eval gate (12 NQC cases, 2 runs) ran and failed on
+# the reading; it is offered only with CASTOR_NIM_EXPLAIN_ROW=1.
 _register_gated(
     (nim_explain_row, nim_explain_row_start), "CASTOR_NIM_EXPLAIN_ROW"
 )

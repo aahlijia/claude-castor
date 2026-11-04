@@ -4575,6 +4575,41 @@ def test_triage_json_tolerates_loose_answers(stub, repo):
     assert f["cause_shown"] is False and f["cause_hint"] == ""
 
 
+@pytest.mark.parametrize(
+    "item,line",
+    [
+        ("- run.log:3-5 - boom - jammed", 3),
+        ("2. run.log:3 - boom - jammed", 3),
+        ("3) run.log:3 - boom - jammed", 3),
+        ("- `run.log:3` - boom - jammed", 3),
+        ("- `run.log:3-5` - boom - jammed", 3),
+        ("- ./run.log:3 - boom - jammed", 3),
+        ("- /tmp/work/run.log:3 - boom - jammed", 3),
+    ],
+)
+def test_triage_json_reads_cited_item_shapes(stub, repo, item, line):
+    out = _triage_json(
+        stub, repo, "failed\n" + item, log=["a", "b", "FAIL boom"]
+    )
+    assert [f["log_line"] for f in out["failures"]] == [line]
+    assert out["failures"][0]["what"] == "boom"
+
+
+def test_triage_json_reads_a_path_ending_in_the_label(stub, repo):
+    sub = repo / "Library" / "flow"
+    sub.mkdir(parents=True)
+    (sub / "run-1.log").write_text("a\nb\nFAIL boom\n")
+    stub.queue.append(
+        (200, {}, _completion("failed\n- /abs/Library/flow/run-1.log:3 - x"))
+    )
+    out = json.loads(
+        _tool(server.nim_triage_log)(
+            str(repo), "Library/flow/run-1.log", format="json"
+        )
+    )
+    assert [f["log_line"] for f in out["failures"]] == [3]
+
+
 def test_triage_json_marks_unverified_and_quote_tags(stub, repo):
     out = _triage_json(
         stub,
