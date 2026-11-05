@@ -2240,6 +2240,8 @@ def gemini_poll(job_id: str) -> str:
         agy's response. On error, a bracketed message. For an unknown id,
         a bracketed not-found note.
     """
+    if job_id.startswith("run-"):
+        return _run_poll(job_id)
     with _jobs_lock:
         job = _jobs.get(job_id)
         if job is None:
@@ -7418,20 +7420,25 @@ def _triage_json(
         "log": label,
         "verdict": _triage_verdict(body),
         "totals": _verdict_totals(lines),
-        "rows": [
-            {
-                "row": r.name,
-                "verdict": r.status,
-                "detail": r.detail,
-                "log_line": r.line,
-            }
-            for r in rows
-            if r.status != "PASS"
-        ],
+        "rows": _rows_json(rows),
         "failures": _triage_failures(body, label, rows),
         "markers": markers,
         "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
     }
+
+
+def _rows_json(rows: list[VerdictRow]) -> list[dict]:
+    """The FAIL and NOT ASSESSED rows as JSON objects."""
+    return [
+        {
+            "row": r.name,
+            "verdict": r.status,
+            "detail": r.detail,
+            "log_line": r.line,
+        }
+        for r in rows
+        if r.status != "PASS"
+    ]
 
 
 def _dispatch_triage_json(
@@ -9952,6 +9959,356 @@ def _run_resolve_command(
     if not any(fnmatch.fnmatchcase(rel, glob) for glob in cfg.allow):
         return None, f"{rel!r} is not in {RUN_CONFIG_FILE}'s allow list."
     return [str(resolved), *command[1:]], None
+
+
+# Run records live beside their capture files under the cache, so a run
+# survives a server restart: gemini_poll reads the record and reattaches a
+# monitor when the process is still the one Castor started.
+RUNS_DIR = "runs"
+RUN_RECORD_DAYS = 30
+_RUN_ID_RE = re.compile(r"^run-[0-9a-f]{8}$")
+RUN_MINUTE_S = 60.0  # seconds in a config minute; tests shrink it
+RUN_POLL_S = 2.0  # monitor tick
+RUN_ATTACH_WAIT_S = 2.0  # a poll waits this long on a monitor it attached
+RUN_PS_TIMEOUT = 5.0
+_RUN_EXIT_VERDICTS = {0: "passed", 1: "failed", 2: "inconclusive"}
+_run_monitors: dict[str, threading.Thread] = {}
+_run_monitors_lock = threading.Lock()
+
+
+def _runs_dir() -> Path:
+    """Where run records and capture files live."""
+    return _cache_dir() / RUNS_DIR
+
+
+def _run_config_dict(cfg: RunConfig) -> dict:
+    """The config as run.json holds it; each record keeps a copy."""
+    return {
+        "allow": list(cfg.allow),
+        "env_file": cfg.env_file,
+        "log_line": cfg.log_line.pattern,
+        "overdue_command": (
+            list(cfg.overdue_command) if cfg.overdue_command else None
+        ),
+        "grace_minutes": cfg.grace_minutes,
+        "max_hours": cfg.max_hours,
+        "max_running": cfg.max_running,
+        "flags": [
+            {"name": f.name, "pattern": f.pattern.pattern, "stop": f.stop}
+            for f in cfg.flags
+        ],
+    }
+
+
+def _run_new_record(
+    root: Path,
+    cfg: RunConfig,
+    command: list[str],
+    label: str,
+    expect_minutes: int,
+    triage: bool,
+) -> dict:
+    """A fresh record for a run about to start (no pid yet)."""
+    run_id = f"run-{uuid.uuid4().hex[:8]}"
+    return {
+        "run": run_id,
+        "status": "running",
+        "root": str(root.resolve()),
+        "command": list(command),
+        "label": label,
+        "pid": None,
+        "pid_start": None,
+        "capture": str(_runs_dir() / f"{run_id}.out"),
+        "started_at": time.time(),
+        "finished_at": None,
+        "expect_minutes": expect_minutes,
+        "triage": triage,
+        "config": _run_config_dict(cfg),
+        "offset": 0,
+        "flags": [],
+        "overdue": None,
+        "result": None,
+    }
+
+
+def _run_record_path(rec: dict) -> Path:
+    """The record file, beside the run's capture file."""
+    return Path(rec["capture"]).with_suffix(".json")
+
+
+def _run_record_write(rec: dict) -> None:
+    """Write a record atomically, pruning records past RUN_RECORD_DAYS."""
+    path = _run_record_path(rec)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _run_prune(path.parent)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _run_prune(folder: Path) -> None:
+    """Delete records and captures older than RUN_RECORD_DAYS."""
+    cutoff = time.time() - RUN_RECORD_DAYS * 86400
+    try:
+        for entry in folder.iterdir():
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+    except OSError:
+        return
+
+
+def _run_record_load(path: Path) -> dict | None:
+    """One record file's object, or None when it is unreadable."""
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _run_record_read(run_id: str) -> dict | None:
+    """The record for a run id, or None (unknown or malformed id)."""
+    if not _RUN_ID_RE.match(run_id):
+        return None
+    return _run_record_load(_runs_dir() / f"{run_id}.json")
+
+
+def _run_records(root: Path | None) -> list[dict]:
+    """Records under `root` (all when None), newest first."""
+    folder = _runs_dir()
+    if not folder.is_dir():
+        return []
+    want = str(root.resolve()) if root is not None else None
+    recs = [
+        rec
+        for rec in map(_run_record_load, sorted(folder.glob("run-*.json")))
+        if rec is not None and (want is None or rec.get("root") == want)
+    ]
+    return sorted(recs, key=lambda r: r.get("started_at") or 0, reverse=True)
+
+
+def _pid_start(pid: int) -> str | None:
+    """A process's start time as ps prints it, or None when it is gone."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=RUN_PS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = out.stdout.strip()
+    return text if out.returncode == 0 and text else None
+
+
+def _run_alive(rec: dict) -> bool:
+    """True when the record's pid is alive and is the process it started."""
+    pid = rec.get("pid")
+    if not pid:
+        return False
+    start = _pid_start(pid)
+    return start is not None and start == rec.get("pid_start")
+
+
+def _run_poll(run_id: str) -> str:
+    """gemini_poll for a run: the result, or progress while it runs.
+
+    A run whose monitor is not in this server (a restart) gets one
+    attached; a poll waits briefly for it, so a run that ended while no
+    one watched comes back finished.
+    """
+    rec = _run_record_read(run_id)
+    if rec is None:
+        return f"[Unknown run {run_id}]"
+    if rec["status"] == "running":
+        thread = _run_attach(run_id)
+        if thread is not None:
+            thread.join(timeout=RUN_ATTACH_WAIT_S)
+            rec = _run_record_read(run_id) or rec
+    if rec["status"] != "running":
+        return json.dumps(rec["result"], ensure_ascii=False)
+    return json.dumps(_run_progress(rec), ensure_ascii=False)
+
+
+def _run_progress(rec: dict) -> dict:
+    """The object gemini_poll returns while a run is going."""
+    return {
+        "run": rec["run"],
+        "status": "running",
+        "elapsed_s": int(time.time() - rec["started_at"]),
+        "pid": rec["pid"],
+        "flags": rec.get("flags", []),
+        "overdue": rec.get("overdue"),
+    }
+
+
+def _run_attach(
+    run_id: str, proc: subprocess.Popen | None = None
+) -> threading.Thread | None:
+    """Start a monitor for a run unless one is already watching it."""
+    with _run_monitors_lock:
+        current = _run_monitors.get(run_id)
+        if current is not None and current.is_alive():
+            return None
+        thread = threading.Thread(
+            target=_run_monitor,
+            args=(run_id, proc),
+            name=f"castor-{run_id}",
+            daemon=True,
+        )
+        _run_monitors[run_id] = thread
+        thread.start()
+    return thread
+
+
+def _run_monitor(run_id: str, proc: subprocess.Popen | None) -> None:
+    """Watch one run until it ends, then write its result.
+
+    Args:
+        run_id: The run.
+        proc: The process when this server started it; None when the
+            monitor was reattached (there is then no exit code).
+    """
+    rec = _run_record_read(run_id)
+    if rec is None:
+        return
+    cfg = _run_config_from(rec["config"])
+    while True:
+        ended, exit_code = _run_exit(rec, proc)
+        if ended:
+            break
+        time.sleep(RUN_POLL_S)
+    status = "done"
+    if proc is None and not _run_has_table(_run_capture_lines(rec)):
+        status = "lost"
+    _run_finish(rec, cfg, exit_code, status)
+
+
+def _run_exit(
+    rec: dict, proc: subprocess.Popen | None
+) -> tuple[bool, int | None]:
+    """(ended, exit code); the code is None for a reattached run."""
+    if proc is not None:
+        code = proc.poll()
+        return code is not None, code
+    return not _run_alive(rec), None
+
+
+def _run_capture_lines(rec: dict) -> list[str]:
+    """The run's console output so far, one string per line."""
+    data = _read_bytes(Path(rec["capture"])) or b""
+    return _clean_lines(data.decode("utf-8", errors="replace").splitlines())
+
+
+def _run_has_table(lines: list[str]) -> bool:
+    """True when the output reached a verdict table or a totals line."""
+    return _run_table(lines) is not None or _verdict_totals(lines) is not None
+
+
+def _run_table(lines: list[str]) -> str | None:
+    """The last `--- verdicts ---` block through its totals line."""
+    starts = [i for i, ln in enumerate(lines) if ln == _VERDICT_REPRINT]
+    if not starts:
+        return None
+    block = lines[starts[-1] :]
+    for i, line in enumerate(block):
+        if _NQC_TOTALS_RE.match(line):
+            return "\n".join(block[: i + 1])
+    return "\n".join(block).rstrip()
+
+
+def _run_finish(
+    rec: dict, cfg: RunConfig, exit_code: int | None, status: str
+) -> None:
+    """Record a run's end: status, finish time and result."""
+    rec["finished_at"] = time.time()
+    rec["status"] = status
+    rec["result"] = _run_result(
+        rec, cfg, exit_code, status, rec.get("flags", []), rec.get("overdue")
+    )
+    _run_record_write(rec)
+
+
+def _run_result(
+    rec: dict,
+    cfg: RunConfig,
+    exit_code: int | None,
+    status: str,
+    flags: list[dict],
+    overdue: dict | None,
+) -> dict:
+    """The final object gemini_poll returns for a run.
+
+    Rows and totals come from the full log when its `log:` line resolves
+    inside the project, else from the console output.
+    """
+    capture = _run_capture_lines(rec)
+    log = _run_log_name(capture, cfg)
+    full = _run_log_file(Path(rec["root"]), log)
+    lines = capture
+    if full is not None:
+        data = _read_bytes(full) or b""
+        lines = _clean_lines(
+            data.decode("utf-8", errors="replace").splitlines()
+        )
+    totals = _verdict_totals(lines)
+    result = {
+        "run": rec["run"],
+        "status": status,
+        "command": rec["command"],
+        "cwd": rec["root"],
+        "exit_code": exit_code,
+        "wall_s": round(
+            (rec["finished_at"] or time.time()) - rec["started_at"]
+        ),
+        "verdict": _run_verdict(exit_code, totals),
+        "totals": totals,
+        "rows": _rows_json(_verdict_rows(lines)),
+        "table": _run_table(capture),
+        "log": log,
+        "flags": flags,
+        "overdue": overdue,
+        "triage": None,
+    }
+    if status in ("stopped", "gave_up"):
+        result["pid"] = rec["pid"]
+    return result
+
+
+def _run_verdict(exit_code: int | None, totals: dict | None) -> str | None:
+    """From the exit status (0, 1, 2), else from the totals."""
+    if exit_code in _RUN_EXIT_VERDICTS:
+        return _RUN_EXIT_VERDICTS[exit_code]
+    if totals is None:
+        return None
+    if totals["fail"] > 0:
+        return "failed"
+    if totals["not_assessed"] > 0:
+        return "inconclusive"
+    return "passed"
+
+
+def _run_log_name(lines: list[str], cfg: RunConfig) -> str | None:
+    """The log path the run printed (last `log_line` match), or None."""
+    for line in reversed(lines):
+        match = cfg.log_line.search(line)
+        if match:
+            text = match.group(1) if match.groups() else match.group(0)
+            return text.strip() or None
+    return None
+
+
+def _run_log_file(root: Path, log: str | None) -> Path | None:
+    """The printed log as a file inside the project, or None."""
+    if not log:
+        return None
+    path = Path(log).expanduser()
+    full = (path if path.is_absolute() else root / path).resolve()
+    if full.is_relative_to(root.resolve()) and full.is_file():
+        return full
+    return None
 
 
 def _register_gated(fns: tuple[Any, ...], env: str) -> None:

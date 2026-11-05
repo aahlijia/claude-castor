@@ -7,7 +7,10 @@ test starts is ended by the test itself: Castor never kills one.
 
 import importlib
 import json
+import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -185,3 +188,180 @@ def test_run_refuses_unlisted_nonexec_and_missing(project):
         assert argv is None and reason in error, command
     argv, error = server._run_resolve_command(project, cfg, [])
     assert argv is None and "empty" in error
+
+
+# --- Task 2: run records -----------------------------------------------------
+
+
+def _row(status: str, name: str, detail: str) -> str:
+    """A verdict.sh line: `%-13s %-34s %s`."""
+    return f"{status:<13} {name:<34} {detail}"
+
+
+TABLE = "\n".join(
+    [
+        "  trial 1: ok",
+        _row("PASS", "tops: a", "3 of 3"),
+        "@case 1700000000 PASS tops: a",
+        "  trial 1: off",
+        _row("FAIL", "tops: b", "1 of 3"),
+        "@case 1700000001 FAIL tops: b",
+        "--- verdicts ---",
+        _row("PASS", "tops: a", "3 of 3"),
+        _row("FAIL", "tops: b", "1 of 3"),
+        "total 2, fail 1, not assessed 0",
+        "",
+    ]
+)
+
+
+@pytest.fixture
+def fast(monkeypatch):
+    """Minutes become milliseconds and the monitor ticks quickly."""
+    monkeypatch.setattr(server, "RUN_MINUTE_S", 0.001)
+    monkeypatch.setattr(server, "RUN_POLL_S", 0.02)
+
+
+@pytest.fixture
+def sleeper():
+    """A long-lived child process; killed and reaped at teardown."""
+    proc = subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL)
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+def _new_record(project: Path, **over: object) -> dict:
+    cfg, _ = server._run_config(project)
+    rec = server._run_new_record(project, cfg, ["t/ok.sh"], "ok", 5, False)
+    rec.update(over)
+    return rec
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"], stdin=subprocess.DEVNULL)
+    proc.wait()
+    return proc.pid
+
+
+def _join_monitor(run_id: str) -> None:
+    thread = server._run_monitors.get(run_id)
+    if thread is not None:
+        thread.join(timeout=5)
+
+
+def _poll_json(run_id: str, timeout: float = 5.0) -> dict:
+    """Poll a run until it is not running; the final object."""
+    end = time.monotonic() + timeout
+    while True:
+        out = json.loads(server.gemini_poll(run_id))
+        if out["status"] != "running" or time.monotonic() > end:
+            return out
+        time.sleep(0.02)
+
+
+def test_run_record_round_trip(project):
+    rec = _new_record(project, pid=12, pid_start="x")
+    assert server._RUN_ID_RE.match(rec["run"])
+    assert rec["status"] == "running" and rec["result"] is None
+    assert rec["root"] == str(project.resolve())
+    server._run_record_write(rec)
+    assert server._run_record_read(rec["run"]) == rec
+    assert Path(rec["capture"]).parent == server._runs_dir()
+
+
+def test_run_record_read_refuses_odd_ids(project):
+    assert server._run_record_read("run-../../etc") is None
+    assert server._run_record_read("run-deadbeef") is None
+    assert server.gemini_poll("run-deadbeef") == "[Unknown run run-deadbeef]"
+
+
+def test_run_records_filter_by_root_newest_first(project, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    old = _new_record(project, started_at=100.0)
+    new = _new_record(project, started_at=200.0)
+    elsewhere = _new_record(project, started_at=300.0, root=str(other))
+    for rec in (old, new, elsewhere):
+        server._run_record_write(rec)
+    ids = [r["run"] for r in server._run_records(project)]
+    assert ids == [new["run"], old["run"]]
+    every = [r["run"] for r in server._run_records(None)]
+    assert every == [elsewhere["run"], new["run"], old["run"]]
+
+
+def test_run_records_prune_old(project):
+    stale = _new_record(project)
+    server._run_record_write(stale)
+    Path(stale["capture"]).write_text("old\n")
+    month = time.time() - 31 * 86400
+    for path in (Path(stale["capture"]), server._run_record_path(stale)):
+        os.utime(path, (month, month))
+    server._run_record_write(_new_record(project))
+    assert server._run_record_read(stale["run"]) is None
+    assert not Path(stale["capture"]).exists()
+
+
+def test_pid_start_gone_is_none():
+    assert server._pid_start(_dead_pid()) is None
+
+
+def test_run_alive_requires_matching_start(sleeper):
+    start = server._pid_start(sleeper.pid)
+    assert start
+    assert server._run_alive({"pid": sleeper.pid, "pid_start": start})
+    assert not server._run_alive({"pid": sleeper.pid, "pid_start": "x"})
+    assert not server._run_alive({"pid": None, "pid_start": start})
+
+
+def test_poll_after_restart_reattaches(project, fast, sleeper):
+    rec = _new_record(
+        project, pid=sleeper.pid, pid_start=server._pid_start(sleeper.pid)
+    )
+    server._run_record_write(rec)
+    Path(rec["capture"]).write_text("  trial 1: going\n")
+    out = json.loads(server.gemini_poll(rec["run"]))
+    try:
+        assert out["status"] == "running" and out["pid"] == sleeper.pid
+        assert set(out) == {
+            "run",
+            "status",
+            "elapsed_s",
+            "pid",
+            "flags",
+            "overdue",
+        }
+        assert server._run_monitors[rec["run"]].is_alive()
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+        _join_monitor(rec["run"])
+    assert _poll_json(rec["run"])["status"] == "lost"
+
+
+def test_poll_after_restart_detects_pid_reuse(project, fast, sleeper):
+    rec = _new_record(project, pid=sleeper.pid, pid_start="Mon Jan  1 1999")
+    server._run_record_write(rec)
+    Path(rec["capture"]).write_text(TABLE)
+    out = _poll_json(rec["run"])
+    assert out["status"] == "done" and out["exit_code"] is None
+    assert out["verdict"] == "failed"
+    assert out["rows"] == [
+        {
+            "row": "tops: b",
+            "verdict": "FAIL",
+            "detail": "1 of 3",
+            "log_line": 5,
+        }
+    ]
+    assert out["totals"] == {"total": 2, "fail": 1, "not_assessed": 0}
+    assert sleeper.poll() is None
+
+
+def test_poll_after_restart_lost(project, fast):
+    rec = _new_record(project, pid=_dead_pid(), pid_start="x")
+    server._run_record_write(rec)
+    Path(rec["capture"]).write_text("")
+    out = _poll_json(rec["run"])
+    assert out["status"] == "lost" and out["exit_code"] is None
+    assert out["verdict"] is None and out["rows"] == []
