@@ -4722,6 +4722,19 @@ def test_explain_row_task_carries_row_and_block(captured, repo):
     assert captured[0]["steps"] == server.NIM_EXPLAIN_ROW_STEPS
 
 
+# --- explain row: location only --------------------------------------------
+
+
+def test_explain_row_task_asks_for_location_only(captured, repo):
+    log = _explain_log(repo, [("FAIL", "tops: x (host)", "1 of 3")])
+    server.nim_explain_row(str(repo), str(log), "tops: x (host)")
+    task = captured[0]["task"]
+    assert "exactly these four lines" in task
+    assert "Trial lines:" in task
+    assert "Reading" not in task and "unclear" not in task
+    assert "Recent commits" not in task
+
+
 def test_explain_row_substring_and_ambiguity(captured, repo):
     log = _explain_log(
         repo,
@@ -4853,10 +4866,18 @@ def test_explain_row_json_parses_answer(stub, repo):
     assert out["verdict_code"] == "Tools/playtest/tops.sh:88"
     assert out["precondition"] == "plain verdict"
     assert out["trial_lines"] == [1]
-    assert out["reading"] == "harness"
-    assert out["why"].startswith("the probe at Tools/playtest/tops.sh:3")
     assert out["verified"] is True and out["quote_ok"] is None
     assert set(out["agent"]) == {"model", "steps", "seconds"}
+    assert set(out) == {
+        "row",
+        "verdict",
+        "verdict_code",
+        "precondition",
+        "trial_lines",
+        "verified",
+        "quote_ok",
+        "agent",
+    }
 
 
 def test_explain_row_json_marks_unverified(stub, repo):
@@ -4879,24 +4900,8 @@ def test_explain_row_json_tolerates_loose_answer():
         "run.log",
     )
     assert out["row"] is None and out["verdict_code"] is None
-    assert out["trial_lines"] == [] and out["reading"] == "unclear"
-    assert out["why"] == "no line decides it"
+    assert out["trial_lines"] == [] and "reading" not in out
     assert out["agent"] == {"model": "m", "steps": 1, "seconds": 2.0}
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "harness | game | unclear - <one sentence>",
-        "harness | game - one sentence",
-        "Unclear: no line decides it",
-        "harness",
-        "game -",
-    ],
-)
-def test_explain_row_json_refuses_echoed_or_loose_reading(value):
-    out = server._explain_row_json(f"Reading: {value}", {}, "run.log")
-    assert out["reading"] is None and out["why"] is None
 
 
 def test_explain_row_json_verdict_code_not_found():
@@ -4921,7 +4926,7 @@ def test_explain_row_json_reads_numbered_lines():
     assert out["row"] == "tops: x" and out["verdict"] == "FAIL"
     assert out["verdict_code"] == "Tools/playtest/tops.sh:88"
     assert out["precondition"] == "plain verdict"
-    assert out["trial_lines"] == [4] and out["reading"] == "game"
+    assert out["trial_lines"] == [4] and "reading" not in out
 
 
 def test_explain_row_json_takes_row_from_castor(stub, repo):
@@ -4936,12 +4941,10 @@ def test_explain_row_json_takes_row_from_castor(stub, repo):
     assert out["row"] == "tops: x (host)" and out["verdict"] == "FAIL"
 
 
-def test_explain_row_prompt_offers_not_found_and_unclear(captured, repo):
+def test_explain_row_prompt_offers_not_found(captured, repo):
     log = _explain_log(repo, [("FAIL", "tops: x", "1 of 3")])
     server.nim_explain_row(str(repo), str(log), "tops: x")
-    task = captured[0]["task"]
-    assert "Verdict code: not found" in task
-    assert "unclear unless" in task
+    assert "Verdict code: not found" in captured[0]["task"]
 
 
 def test_explain_row_json_caps_trial_lines():
@@ -4975,9 +4978,9 @@ def test_explain_row_caps_steps(captured, repo):
 
 def test_explain_row_format_rejects_unknown(repo):
     out = server.nim_explain_row(str(repo), "x.log", "x", format="xml")
-    assert out == server.TRIAGE_FORMAT_ERROR
+    assert out == server.ROLE_FORMAT_ERROR
     start = server.nim_explain_row_start(str(repo), "x.log", "x", format="xml")
-    assert start == server.TRIAGE_FORMAT_ERROR
+    assert start == server.ROLE_FORMAT_ERROR
 
 
 def test_explain_row_start_json_runs_json_runner(stub, repo):
@@ -4997,29 +5000,10 @@ def test_explain_row_start_refuses_bad_row(captured, repo):
     assert out.startswith("[Error") and "passed" in out
 
 
-def test_explain_row_registers_only_with_its_env(monkeypatch):
-    from fastmcp import FastMCP
-
-    fns = (server.nim_explain_row, server.nim_explain_row_start)
-    monkeypatch.setattr(server, "mcp", FastMCP("explain-off"))
-    monkeypatch.delenv("CASTOR_NIM_EXPLAIN_ROW", raising=False)
-    server._register_gated(fns, "CASTOR_NIM_EXPLAIN_ROW")
-    assert "nim_explain_row" not in _registered_tool_names()
-    monkeypatch.setattr(server, "mcp", FastMCP("explain-on"))
-    monkeypatch.setenv("CASTOR_NIM_EXPLAIN_ROW", "1")
-    server._register_gated(fns, "CASTOR_NIM_EXPLAIN_ROW")
+def test_explain_row_registered_on_the_real_server():
     assert {"nim_explain_row", "nim_explain_row_start"} <= (
         _registered_tool_names()
     )
-
-
-@pytest.mark.skipif(
-    os.environ.get("CASTOR_NIM_EXPLAIN_ROW") is not None,
-    reason="CASTOR_NIM_EXPLAIN_ROW is set, so the server registered it",
-)
-def test_explain_row_unregistered_on_the_real_server():
-    assert "nim_explain_row" not in _registered_tool_names()
-    assert "nim_explain_row_start" not in _registered_tool_names()
 
 
 # --- verdict rows without case stamps ----------------------------------------

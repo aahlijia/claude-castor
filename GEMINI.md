@@ -318,7 +318,7 @@ files yourself when the answer is a short list and the reading is bulk:
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
-| Explain a FAIL or NOT ASSESSED row of a playtest log (gated, off unless `CASTOR_NIM_EXPLAIN_ROW=1`, see below) | `nim_explain_row` |
+| Find the code that decides a FAIL or NOT ASSESSED row of a playtest log (see below) | `nim_explain_row` |
 | Mechanical edit across files (off unless `CASTOR_NIM_EDIT=1`, see below) | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
 
@@ -358,22 +358,26 @@ confidence or owner field: a self-rated number is not calibrated, and triage
 reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
 are the checks Castor can stand behind.
 
-`nim_explain_row` (and its `_start`) is gated, off unless the server runs with
-`CASTOR_NIM_EXPLAIN_ROW=1`: its eval gate (12 cases from NQC fix history) ran
-and failed on the reading (site 23/24, reading right 4/24). Give it the log and a row name (or a piece of one); Castor finds the
-row and hands the agent the verdict line, the trial lines and the script name,
-and the agent answers five lines: Row, Verdict code (`path:line`, or "not
-found"), Precondition (what `PRE_OK` tests, or "plain verdict"), Trial lines
-(at most 6) and Reading (harness, game or unclear, with one sentence). A PASS
-row, or a name that matches none or several rows, is an input error. Logs
-written before NQC stamped rows work too; there a name over 34 characters
-needs its exact name.
+`nim_explain_row` (and its `_start`) is a locator: it finds the code that
+decides a row, and you decide whether the harness or the game is wrong.
+The free models could not read harness against game (Super right on 6 of
+32 decidable runs, Ultra on 8, mostly "game" on harness faults), so the
+tool no longer asks them to. Its site gate passed: on 21 NQC cases, Super
+named the verdict code within 3 lines on 18 and 19 of 21 over two runs,
+with no errors. When it says "not found" or cites code that does not
+decide the row, find the `verdict`/`check` call yourself. Give it the log and a row name (or a piece
+of one); Castor finds the row and hands the agent the verdict line, the
+trial lines and the script name, and the agent answers four lines: Row,
+Verdict code (`path:line`, or "not found"), Precondition (what `PRE_OK`
+tests, or "plain verdict") and Trial lines (at most 6). Then read the cited
+code and lines yourself. A PASS row, or a name that matches none or several
+rows, is an input error. Logs written before NQC stamped rows work too;
+there a name over 34 characters needs its exact name.
 `format="json"` returns the same fields parsed by Castor, with `row` and
-`verdict` from the row Castor found, `reading` null unless the answer gives
-exactly one reading, and `verified` and `quote_ok` from the citation checks.
-Treat the reading as a lead: open the verdict code before acting on it.
-The prompt tells the agent to use dekko, but in the gate it called a dekko
-tool in 1 of 24 runs (grep and read_range did the work).
+`verdict` from the row Castor found, and `verified` and `quote_ok` from the
+citation checks. The prompt tells the agent to use dekko, but in the first
+gate it called a dekko tool in 1 of 24 runs (grep and read_range did the
+work).
 
 **Models.** Every `nim_*` tool defaults to Nemotron 3.5 Super
 (`nvidia/nemotron-3.5-super-vl-120b-a12b`); `CASTOR_NIM_MODEL` and
@@ -399,6 +403,35 @@ Rules of thumb:
 - A "try again in Ns" or rate-limited error means NIM's free tier is saturated:
   fall back to agy or wait; don't retry in a loop.
 - Sessions are shared across backends (same `session` name, needs `cwd`).
+
+---
+
+## Runs (`castor_run_start`)
+
+Use `castor_run_start` for a long suite command (a playtest suite, a
+nightly check) instead of a subagent or a shell that waits on it: Castor
+watches the run, and `gemini_poll("run-...")` returns progress, then the
+verdict, failing rows, the verdict table, flags and a triage of the log.
+It is not a shell. The project must commit `.castor/run.json` naming the
+scripts it allows, and the user must list the root in `CASTOR_RUN_ROOTS`;
+without both it refuses, and the refusal says which key is missing.
+
+- Pass the script and its arguments as list items; nothing is parsed by a
+  shell.
+- Set `expect_minutes` honestly: past it plus the config's grace, the
+  config's overdue command runs once (a dialog check, say) and the run
+  keeps going.
+- Castor never kills a run. `stopped` (a stop flag) and `gave_up`
+  (`max_hours`) mean Castor stopped watching; the result gives the `pid`
+  and the decision is yours.
+- `castor_runs` lists the runs on record; poll the ids you still need.
+
+`castor_compare_runs` puts two or more suite logs side by side (`/castor:compare`):
+it says which rows regressed, which are flaky, which keep failing, and shows
+the trial lines that changed. Pass `same_code=True` when no fix landed
+between the runs, so a row that both passed and failed counts as flaky.
+No model reads the table: whether a flaky row is the harness or the game is
+your call, from the trial lines and the code.
 
 ---
 

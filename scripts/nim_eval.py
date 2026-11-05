@@ -39,8 +39,6 @@ Case fields (JSON list of objects):
                                snapshot (relative to the cases file),
                                copied to `log` in the snapshot; the row
                                name; which run of a repeated name
-    reading                    explain_row: "harness" or "game", the
-                               reading a good answer gives
     target                     summarize input, relative to the case's code
     task, files, must_cover    edit inputs: the edit as briefed, the scope
                                fence, symbols whose uses must be edited
@@ -370,27 +368,18 @@ def _site_hit(cited: str, case: dict) -> bool:
 
 
 def score_explain_row(answer: str, case: dict) -> dict:
-    """Score an explain_row answer: site hit, reading right or wrong.
+    """Score an explain_row answer: does it name the verdict code's site.
 
-    A "Verdict code: not found" is a site miss. An "unclear" or missing
-    reading is neither right nor wrong. A bracketed answer is an error.
+    A "Verdict code: not found" is a site miss. A bracketed answer is an
+    error.
     """
     if answer.startswith("["):
-        return {
-            "site_hit": False,
-            "reading_right": False,
-            "reading_wrong": False,
-            "error": True,
-        }
+        return {"site_hit": False, "error": True}
     code = re.search(r"^Verdict code:(.*)$", answer, re.M | re.I)
     if code and code.group(1).strip().lower().startswith("not found"):
         code = None
-    word = re.search(r"^Reading:\s*(harness|game)\b", answer, re.M | re.I)
-    reading = word.group(1).lower() if word else None
     return {
         "site_hit": bool(code) and _site_hit(code.group(1), case),
-        "reading_right": reading == case["reading"],
-        "reading_wrong": reading is not None and reading != case["reading"],
         "error": False,
     }
 
@@ -424,6 +413,35 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
         answer=text,
     )
     return result
+
+
+def print_tasks(cases: list[dict], out: Path, server: ModuleType) -> None:
+    """Write each case's task text and snapshot path; no NIM requests.
+
+    For a blind screen of explain-row cases: `out/<name>.txt` holds the
+    task the agent would get, and
+    `out/index.json` lists `{name, snapshot, task_file}` per case, with
+    `error` in place of `task_file` when the task cannot be built.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    index = []
+    for case in cases:
+        entry: dict[str, str] = {"name": case["name"]}
+        try:
+            cwd = snapshot_with_log(case, server)
+            entry["snapshot"] = str(cwd)
+            task, error = build_task(case, cwd, server)
+        except Exception as exc:  # one bad case is an entry, not a crash
+            task, error = None, f"[Error: {type(exc).__name__}: {exc}]"
+        if task is None:
+            entry["error"] = error
+        else:
+            task_file = out / f"{case['name']}.txt"
+            task_file.write_text(task)
+            entry["task_file"] = str(task_file)
+        index.append(entry)
+    (out / "index.json").write_text(json.dumps(index, indent=1))
+    print(f"tasks: {out} ({len(index)} cases)")
 
 
 def run_case(case: dict, config: dict, server: ModuleType) -> dict:
@@ -956,7 +974,9 @@ def _summarize_main(results: list[dict], label: str) -> str:
     return summarize_rows(rows, label) if rows else ""
 
 
-EXPLAIN_ROW_BARS = {"site": 10, "right": 8, "wrong": 1, "errors": 0}
+def explain_row_bars(n: int) -> dict[str, int]:
+    """The gate bars for one run of n cases: site on 80%, no errors."""
+    return {"site": math.ceil(0.8 * n), "errors": 0}
 
 
 def _explain_run_line(rows: list[dict], label: str, run: int) -> str:
@@ -964,29 +984,19 @@ def _explain_run_line(rows: list[dict], label: str, run: int) -> str:
     return (
         f"{label:<24} explain_row run {run}: "
         f"site {sum(r['site_hit'] for r in rows)}/{n}, "
-        f"reading right {sum(r['reading_right'] for r in rows)}/{n}, "
-        f"wrong {sum(r['reading_wrong'] for r in rows)}  "
         f"errors {sum(r['error'] for r in rows)}"
     )
 
 
 def _explain_run_misses(rows: list[dict], run: int) -> list[str]:
-    """The gate bars one run misses, scaled when it has not 12 cases."""
-    n = len(rows)
+    """The gate bars one run misses (`explain_row_bars` for its size)."""
+    bars = explain_row_bars(len(rows))
     site = sum(r["site_hit"] for r in rows)
-    right = sum(r["reading_right"] for r in rows)
-    wrong = sum(r["reading_wrong"] for r in rows)
     errors = sum(r["error"] for r in rows)
-    need_site = math.ceil(EXPLAIN_ROW_BARS["site"] * n / 12)
-    need_right = math.ceil(EXPLAIN_ROW_BARS["right"] * n / 12)
     misses = []
-    if site < need_site:
-        misses.append(f"site {site} < {need_site} in run {run}")
-    if right < need_right:
-        misses.append(f"reading right {right} < {need_right} in run {run}")
-    if wrong > EXPLAIN_ROW_BARS["wrong"]:
-        misses.append(f"wrong {wrong} > 1 in run {run}")
-    if errors > EXPLAIN_ROW_BARS["errors"]:
+    if site < bars["site"]:
+        misses.append(f"site {site} < {bars['site']} in run {run}")
+    if errors > bars["errors"]:
         misses.append(f"errors {errors} > 0 in run {run}")
     return misses
 
@@ -1136,8 +1146,7 @@ def report(results: list[dict], labels: list[str]) -> None:
             print(
                 f"{r['config']:<24} {r['case']:<22} explain_row "
                 f"run {r.get('run', 1)} "
-                f"site {int(r['site_hit'])} right {int(r['reading_right'])} "
-                f"wrong {int(r['reading_wrong'])} "
+                f"site {int(r['site_hit'])} "
                 f"{'ERROR ' if r['error'] else ''}{r['seconds']:.0f}s"
             )
             continue
@@ -1177,8 +1186,8 @@ def parse_config(raw: str) -> dict:
             config["step"] = value
         elif key == "dekko":
             if value not in ("on", "off"):
-                raise ValueError(f"dekko must be on or off, got {value!r}")
-            config["dekko"] = value == "on"
+                raise ValueError(f"{key} must be on or off, got {value!r}")
+            config[key] = value == "on"
     return config
 
 
@@ -1202,8 +1211,8 @@ def main() -> None:
         action="append",
         default=[],
         help=(
-            "label=model[,step=model][,dekko=on|off]; repeatable "
-            "(default: server default)"
+            "label=model[,step=model][,dekko=on|off]; "
+            "repeatable (default: server default)"
         ),
     )
     parser.add_argument("--server", type=Path, default=ROOT / "server.py")
@@ -1216,6 +1225,11 @@ def main() -> None:
     )
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=3)
+    parser.add_argument(
+        "--print-tasks",
+        type=Path,
+        help="write each case's task text to this folder; no requests",
+    )
     parser.add_argument(
         "--rescore",
         type=Path,
@@ -1231,6 +1245,9 @@ def main() -> None:
             case["_base"] = str(path.resolve().parent)
             cases.append(case)
     cases = select_cases(cases, args.only, args.role)
+    if args.print_tasks:
+        print_tasks(cases, args.print_tasks.expanduser(), server)
+        return
     if args.rescore:
         rescore(args.rescore, cases)
         return
