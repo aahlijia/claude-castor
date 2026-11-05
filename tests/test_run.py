@@ -8,6 +8,7 @@ test starts is ended by the test itself: Castor never kills one.
 import importlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -318,6 +319,7 @@ def test_poll_after_restart_reattaches(project, fast, sleeper):
     rec = _new_record(
         project, pid=sleeper.pid, pid_start=server._pid_start(sleeper.pid)
     )
+    rec["config"]["max_hours"] = 1000  # 60 s under `fast`
     server._run_record_write(rec)
     Path(rec["capture"]).write_text("  trial 1: going\n")
     out = json.loads(server.gemini_poll(rec["run"]))
@@ -365,3 +367,292 @@ def test_poll_after_restart_lost(project, fast):
     out = _poll_json(rec["run"])
     assert out["status"] == "lost" and out["exit_code"] is None
     assert out["verdict"] is None and out["rows"] == []
+
+
+# --- Task 3: launcher and monitor -------------------------------------------
+
+
+@pytest.fixture
+def started():
+    """Runs a test starts; each process group is ended at teardown."""
+    recs: list[dict] = []
+    yield recs
+    for rec in recs:
+        try:
+            os.killpg(rec["pid"], signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        _join_monitor(rec["run"])
+        try:
+            os.waitpid(rec["pid"], os.WNOHANG)
+        except ChildProcessError:
+            pass
+
+
+def _start(
+    project: Path,
+    started: list,
+    command: list[str],
+    expect: int = 5,
+    triage: bool = False,
+) -> dict:
+    cfg, error = server._run_config(project)
+    assert error is None, error
+    argv, error = server._run_resolve_command(project, cfg, command)
+    assert error is None, error
+    rec, error = server._run_begin(
+        project, cfg, argv, command, "t", expect, triage
+    )
+    assert error is None, error
+    started.append(rec)
+    return rec
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_run_args_reach_script_literally(project, fast, started):
+    _script(project / "t" / "args.sh", "printf '%s\\n' \"$@\" > args.txt\n")
+    args = ["; touch pwned", "$(id)", "a'b"]
+    rec = _start(project, started, ["t/args.sh", *args])
+    assert _poll_json(rec["run"])["status"] == "done"
+    assert (project / "args.txt").read_text().splitlines() == args
+    assert not (project / "pwned").exists()
+
+
+def test_run_sources_env_file_and_scrubs_secrets(
+    project, fast, started, monkeypatch
+):
+    (project / "lane.env").write_text("export LANE=b\n")
+    _write_config(project, {"allow": ["t/*.sh"], "env_file": "lane.env"})
+    _script(
+        project / "t" / "env.sh",
+        'echo "$LANE ${NVIDIA_API_KEY:-none} ${CASTOR_RUN_ROOTS:-none}"\n',
+    )
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-secret")
+    rec = _start(project, started, ["t/env.sh"])
+    _poll_json(rec["run"])
+    assert Path(rec["capture"]).read_text() == "b none none\n"
+
+
+def test_run_refuses_env_file_outside_project(project, tmp_path):
+    (tmp_path / "out.env").write_text("export X=1\n")
+    _write_config(
+        project, {"allow": ["t/*.sh"], "env_file": str(tmp_path / "out.env")}
+    )
+    cfg, _ = server._run_config(project)
+    argv, _ = server._run_resolve_command(project, cfg, ["t/ok.sh"])
+    rec, error = server._run_begin(
+        project, cfg, argv, ["t/ok.sh"], "t", 5, False
+    )
+    assert rec is None and "env_file" in error
+
+
+def test_run_own_session(project, fast, started):
+    _script(project / "t" / "sleep.sh", "sleep 30\n")
+    rec = _start(project, started, ["t/sleep.sh"])
+    assert os.getsid(rec["pid"]) == rec["pid"]
+
+
+def test_run_result_reads_table_log_and_exit(project, fast, started):
+    log = "\n".join(
+        [
+            "header line",
+            "  trial 1: off",
+            _row("FAIL", "tops: b", "1 of 3"),
+            "@case 1700000001 FAIL tops: b",
+            "total 1, fail 1, not assessed 0",
+            "",
+        ]
+    )
+    (project / "full.log").write_text(log)
+    fail_row = _row("FAIL", "tops: b", "1 of 3")
+    _script(
+        project / "t" / "suite.sh",
+        "mkdir -p Library/s && cp full.log Library/s/x.log\n"
+        f"printf '%s\\n' '--- verdicts ---' '{fail_row}'"
+        " 'total 1, fail 1, not assessed 0' 'log: Library/s/x.log'\n"
+        "exit 1\n",
+    )
+    rec = _start(project, started, ["t/suite.sh"])
+    out = _poll_json(rec["run"])
+    assert out["status"] == "done" and out["exit_code"] == 1
+    assert out["verdict"] == "failed"
+    assert out["log"] == "Library/s/x.log"
+    assert out["rows"] == [
+        {
+            "row": "tops: b",
+            "verdict": "FAIL",
+            "detail": "1 of 3",
+            "log_line": 3,
+        }
+    ]
+    assert out["table"] == "\n".join(
+        [
+            "--- verdicts ---",
+            _row("FAIL", "tops: b", "1 of 3"),
+            "total 1, fail 1, not assessed 0",
+        ]
+    )
+    assert out["command"] == ["t/suite.sh"] and out["triage"] is None
+
+
+def test_monitor_matches_flags_on_whole_lines(project, fast, started):
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "flags": [{"name": "editor_restarted", "pattern": "^RESTA"}],
+        },
+    )
+    _script(
+        project / "t" / "flag.sh",
+        "printf 'RESTA'; sleep 0.2; printf 'RTED lane A age 26 h\\n'\n",
+    )
+    rec = _start(project, started, ["t/flag.sh"])
+    out = _poll_json(rec["run"])
+    assert out["flags"] == [
+        {"name": "editor_restarted", "line": "RESTARTED lane A age 26 h"}
+    ]
+
+
+def test_stop_flag_stops_watching(project, fast, started):
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "flags": [
+                {
+                    "name": "refused",
+                    "pattern": "^start\\.sh: REFUSED",
+                    "stop": True,
+                }
+            ],
+        },
+    )
+    _script(
+        project / "t" / "refuse.sh",
+        "echo 'start.sh: REFUSED editor age 30 h'\nsleep 30\n",
+    )
+    rec = _start(project, started, ["t/refuse.sh"])
+    out = _poll_json(rec["run"])
+    assert out["status"] == "stopped" and out["pid"] == rec["pid"]
+    assert out["flags"][0]["name"] == "refused"
+    assert _alive(rec["pid"])
+
+
+def test_overdue_runs_command_once_and_keeps_watching(project, fast, started):
+    _script(
+        project / "t" / "dialog.sh",
+        "echo x >> count.txt\necho 'dialog: none'\n",
+    )
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "overdue_command": ["t/dialog.sh"],
+            "grace_minutes": 0.001,
+            "max_hours": 1000,
+        },
+    )
+    _script(project / "t" / "slow.sh", "sleep 1\necho finished\n")
+    rec = _start(project, started, ["t/slow.sh"], expect=1)
+    end = time.monotonic() + 5
+    seen = None
+    while time.monotonic() < end:
+        out = json.loads(server.gemini_poll(rec["run"]))
+        if out["status"] == "running" and out["overdue"]:
+            seen = out["overdue"]
+            break
+        time.sleep(0.02)
+    assert seen is not None
+    assert seen["output"] == "dialog: none\n" and seen["exit_code"] == 0
+    final = _poll_json(rec["run"])
+    assert final["status"] == "done" and final["overdue"] == seen
+    assert (project / "count.txt").read_text() == "x\n"
+
+
+def test_overdue_skipped_once_the_table_is_out(project, fast, started):
+    _script(project / "t" / "dialog.sh", "echo x >> count.txt\n")
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "overdue_command": ["t/dialog.sh"],
+            "grace_minutes": 0.001,
+        },
+    )
+    _script(
+        project / "t" / "tail.sh",
+        "echo 'total 1, fail 0, not assessed 0'\nsleep 1\n",
+    )
+    rec = _start(project, started, ["t/tail.sh"], expect=400)
+    assert _poll_json(rec["run"])["overdue"] is None
+    assert not (project / "count.txt").exists()
+
+
+def test_monitor_gives_up_without_killing(project, fast, started):
+    _write_config(project, {"allow": ["t/*.sh"], "max_hours": 0.00001})
+    _script(project / "t" / "sleep.sh", "sleep 30\n")
+    rec = _start(project, started, ["t/sleep.sh"])
+    out = _poll_json(rec["run"])
+    assert out["status"] == "gave_up" and out["pid"] == rec["pid"]
+    assert _alive(rec["pid"])
+
+
+def test_triage_runs_only_on_fail_or_not_assessed(
+    project, fast, started, monkeypatch
+):
+    calls = []
+    reply = {"value": json.dumps({"verdict": "failed", "rows": []})}
+
+    def fake(task, cwd, model, max_steps, label, log):
+        calls.append((label, str(log)))
+        return reply["value"]
+
+    monkeypatch.setattr(server, "_dispatch_triage_json", fake)
+    for name, status in (("pass", "PASS"), ("fail", "FAIL")):
+        (project / f"{name}.log").write_text(
+            f"{_row(status, 'tops: b', '1 of 3')}\n"
+            f"@case 1700000001 {status} tops: b\n"
+        )
+        _script(
+            project / "t" / f"{name}.sh",
+            f"echo 'log: {name}.log'\n",
+        )
+    passed = _poll_json(
+        _start(project, started, ["t/pass.sh"], triage=True)["run"]
+    )
+    assert passed["triage"] is None and calls == []
+    failed = _poll_json(
+        _start(project, started, ["t/fail.sh"], triage=True)["run"]
+    )
+    assert calls == [("fail.log", str((project / "fail.log").resolve()))]
+    assert failed["triage"] == {"verdict": "failed", "rows": []}
+    quiet = _poll_json(_start(project, started, ["t/fail.sh"])["run"])
+    assert quiet["triage"] is None and len(calls) == 1
+    reply["value"] = json.dumps(
+        {"error": "rate_limited", "retry_after_s": 5, "message": "x"}
+    )
+    limited = _poll_json(
+        _start(project, started, ["t/fail.sh"], triage=True)["run"]
+    )
+    assert limited["triage"] == {
+        "error": "rate_limited",
+        "retry_after_s": 5,
+        "message": "x",
+    }
+
+
+def test_attach_after_finish_leaves_the_result(project, fast, started):
+    rec = _start(project, started, ["t/ok.sh"])
+    first = _poll_json(rec["run"])
+    _join_monitor(rec["run"])
+    thread = server._run_attach(rec["run"])
+    thread.join(timeout=5)
+    assert json.loads(server.gemini_poll(rec["run"])) == first
