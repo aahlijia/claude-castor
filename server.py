@@ -10163,29 +10163,6 @@ def _run_attach(
     return thread
 
 
-def _run_monitor(run_id: str, proc: subprocess.Popen | None) -> None:
-    """Watch one run until it ends, then write its result.
-
-    Args:
-        run_id: The run.
-        proc: The process when this server started it; None when the
-            monitor was reattached (there is then no exit code).
-    """
-    rec = _run_record_read(run_id)
-    if rec is None:
-        return
-    cfg = _run_config_from(rec["config"])
-    while True:
-        ended, exit_code = _run_exit(rec, proc)
-        if ended:
-            break
-        time.sleep(RUN_POLL_S)
-    status = "done"
-    if proc is None and not _run_has_table(_run_capture_lines(rec)):
-        status = "lost"
-    _run_finish(rec, cfg, exit_code, status)
-
-
 def _run_exit(
     rec: dict, proc: subprocess.Popen | None
 ) -> tuple[bool, int | None]:
@@ -10225,9 +10202,20 @@ def _run_finish(
     """Record a run's end: status, finish time and result."""
     rec["finished_at"] = time.time()
     rec["status"] = status
-    rec["result"] = _run_result(
+    result = _run_result(
         rec, cfg, exit_code, status, rec.get("flags", []), rec.get("overdue")
     )
+    if rec.get("triage") and result["rows"]:
+        full = _run_log_file(Path(rec["root"]), result["log"])
+        result["triage"] = (
+            _run_triage(Path(rec["root"]), str(full))
+            if full is not None
+            else {
+                "error": "bad_input",
+                "message": "the run printed no log inside the project",
+            }
+        )
+    rec["result"] = result
     _run_record_write(rec)
 
 
@@ -10309,6 +10297,265 @@ def _run_log_file(root: Path, log: str | None) -> Path | None:
     if full.is_relative_to(root.resolve()) and full.is_file():
         return full
     return None
+
+
+# The child sources the env file (when one is set) and execs the command:
+# arguments are positional parameters, never parsed by a shell.
+RUN_BASH = '[ -n "$1" ] && . "$1"; shift; exec "$@"'
+RUN_SCRUBBED_PREFIXES = ("NVIDIA_", "CASTOR_")
+RUN_MAX_FLAGS = 50  # flag matches kept per run
+RUN_FLAG_LINE_CHARS = 300
+RUN_OVERDUE_WAIT_S = 60.0  # the overdue command is left alone after this
+RUN_OVERDUE_OUTPUT_CHARS = 4000
+
+
+def _run_child_env() -> dict[str, str]:
+    """The server's environment minus every NVIDIA_* and CASTOR_* name."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(RUN_SCRUBBED_PREFIXES)
+    }
+
+
+def _run_env_file(root: Path, cfg: RunConfig) -> tuple[str | None, str | None]:
+    """(absolute env file or None, None), or (None, error) when it is bad.
+
+    The path is made absolute so bash's `.` never searches PATH for it.
+    """
+    if not cfg.env_file:
+        return None, None
+    base = root.resolve()
+    path = Path(cfg.env_file).expanduser()
+    full = (path if path.is_absolute() else base / path).resolve()
+    if not full.is_relative_to(base) or not full.is_file():
+        return None, (
+            f"env_file {cfg.env_file!r} is not a file inside the project."
+        )
+    return str(full), None
+
+
+def _run_launch(
+    root: Path, argv: list[str], capture: Path, env_file: str | None
+) -> subprocess.Popen:
+    """Start the command in its own session, output to the capture file."""
+    capture.parent.mkdir(parents=True, exist_ok=True)
+    with capture.open("wb") as out:
+        return subprocess.Popen(
+            ["bash", "-c", RUN_BASH, "castor-run", env_file or "", *argv],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=_run_child_env(),
+        )
+
+
+def _run_begin(
+    root: Path,
+    cfg: RunConfig,
+    argv: list[str],
+    command: list[str],
+    label: str,
+    expect_minutes: int,
+    triage: bool,
+) -> tuple[dict | None, str | None]:
+    """Start a checked command, record it and attach its monitor.
+
+    Args:
+        root: The project root.
+        cfg: The project's run config.
+        argv: The command from _run_resolve_command.
+        command: The command as the caller gave it (kept in the record).
+        label: A short name for listings.
+        expect_minutes: When the run should be over; overdue after this
+            plus the config's grace minutes.
+        triage: Triage the log when a row fails or is not assessed.
+
+    Returns:
+        (record, None), or (None, the reason it did not start).
+    """
+    env_file, error = _run_env_file(root, cfg)
+    if error:
+        return None, error
+    rec = _run_new_record(root, cfg, command, label, expect_minutes, triage)
+    try:
+        proc = _run_launch(root, argv, Path(rec["capture"]), env_file)
+    except OSError as exc:
+        return None, f"could not start the command: {exc}"
+    rec["pid"] = proc.pid
+    rec["pid_start"] = _pid_start(proc.pid)
+    _run_record_write(rec)
+    _run_attach(rec["run"], proc)
+    return rec, None
+
+
+class _RunTail:
+    """Reads a capture file's new complete lines from a byte offset.
+
+    A line still being written stays in `carry` until its newline
+    arrives, so a flag never matches a fragment, and never twice.
+    """
+
+    def __init__(self, path: Path, offset: int) -> None:
+        self.path = path
+        self.offset = offset
+        self.carry = b""
+
+    def lines(self, final: bool) -> list[str]:
+        """The lines completed since the last call (all of them if final)."""
+        try:
+            with self.path.open("rb") as fh:
+                fh.seek(self.offset)
+                new = fh.read()
+        except OSError:
+            new = b""
+        self.offset += len(new)
+        parts = (self.carry + new).split(b"\n")
+        self.carry = parts.pop()
+        if final and self.carry:
+            parts.append(self.carry)
+            self.carry = b""
+        return [
+            p.decode("utf-8", errors="replace").rstrip("\r") for p in parts
+        ]
+
+    def consumed(self) -> int:
+        """The offset of the first byte not yet read as a whole line."""
+        return self.offset - len(self.carry)
+
+
+def _run_monitor(run_id: str, proc: subprocess.Popen | None) -> None:
+    """Watch one run until it ends, a stop flag shows, or max_hours passes.
+
+    Args:
+        run_id: The run.
+        proc: The process when this server started it; None when the
+            monitor was reattached (there is then no exit code).
+    """
+    rec = _run_record_read(run_id)
+    if rec is None or rec["status"] != "running":
+        return  # a poll raced the previous monitor's last write
+    _nim_patience.on = True  # triage at the end may wait for NIM
+    cfg = _run_config_from(rec["config"])
+    try:
+        exit_code, status = _run_watch(rec, cfg, proc)
+    except Exception as exc:  # a dead monitor must not leave "running"
+        logger.exception("run monitor %s failed", run_id)
+        rec.setdefault("flags", []).append(
+            {"name": "monitor_error", "line": str(exc)[:RUN_FLAG_LINE_CHARS]}
+        )
+        exit_code, status = None, "lost"
+    _run_finish(rec, cfg, exit_code, status)
+
+
+def _run_watch(
+    rec: dict, cfg: RunConfig, proc: subprocess.Popen | None
+) -> tuple[int | None, str]:
+    """The monitor loop: (exit code, final status)."""
+    tail = _RunTail(Path(rec["capture"]), rec.get("offset", 0))
+    start = rec["started_at"]
+    overdue_at = start + (
+        (rec["expect_minutes"] + cfg.grace_minutes) * RUN_MINUTE_S
+    )
+    give_up_at = start + cfg.max_hours * 60 * RUN_MINUTE_S
+    while True:
+        ended, exit_code = _run_exit(rec, proc)
+        stop = _run_scan(rec, cfg, tail, final=ended)
+        if ended:
+            lines = _run_capture_lines(rec)
+            if proc is None and not _run_has_table(lines):
+                return None, "lost"
+            return exit_code, "done"
+        if stop:
+            return None, "stopped"
+        now = time.time()
+        if now >= overdue_at and _run_wants_overdue(rec, cfg):
+            rec["overdue"] = _run_overdue(rec, cfg)
+            _run_record_write(rec)
+        if now >= give_up_at:
+            return None, "gave_up"
+        time.sleep(RUN_POLL_S)
+
+
+def _run_scan(rec: dict, cfg: RunConfig, tail: _RunTail, final: bool) -> bool:
+    """Match flags on new whole lines; True when a stop flag matched."""
+    found = False
+    stop = False
+    for line in tail.lines(final):
+        for flag in cfg.flags:
+            if not flag.pattern.search(line):
+                continue
+            stop = stop or flag.stop
+            if len(rec["flags"]) < RUN_MAX_FLAGS:
+                rec["flags"].append(
+                    {"name": flag.name, "line": line[:RUN_FLAG_LINE_CHARS]}
+                )
+                found = True
+    if found:
+        rec["offset"] = tail.consumed()
+        _run_record_write(rec)
+    return stop
+
+
+def _run_wants_overdue(rec: dict, cfg: RunConfig) -> bool:
+    """True once: an overdue command is set and no table is out yet."""
+    if rec.get("overdue") is not None or not cfg.overdue_command:
+        return False
+    return not _run_has_table(_run_capture_lines(rec))
+
+
+def _run_overdue(rec: dict, cfg: RunConfig) -> dict:
+    """Run the overdue command once: {at_s, exit_code, output}.
+
+    It is left running (never killed) when it takes over
+    RUN_OVERDUE_WAIT_S; exit_code is then None.
+    """
+    root = Path(rec["root"])
+    at_s = int(time.time() - rec["started_at"])
+    argv, error = _run_resolve_command(root, cfg, list(cfg.overdue_command))
+    if argv is None:
+        return {"at_s": at_s, "exit_code": None, "output": error}
+    out_path = Path(rec["capture"]).with_suffix(".overdue")
+    try:
+        with out_path.open("wb") as out:
+            proc = subprocess.Popen(
+                argv,
+                cwd=root,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=_run_child_env(),
+            )
+        code = proc.wait(timeout=RUN_OVERDUE_WAIT_S)
+    except subprocess.TimeoutExpired:
+        code = None
+    except OSError as exc:
+        return {"at_s": at_s, "exit_code": None, "output": str(exc)}
+    data = _read_bytes(out_path) or b""
+    text = data.decode("utf-8", errors="replace")
+    return {
+        "at_s": at_s,
+        "exit_code": code,
+        "output": text[:RUN_OVERDUE_OUTPUT_CHARS],
+    }
+
+
+def _run_triage(root: Path, log: str) -> dict:
+    """Triage JSON for the run's log (phase 1's role), or an error object."""
+    task, cwd, error, path = _triage_task(str(root), log, None)
+    if error or task is None or path is None:
+        return json.loads(_role_bad_input(error, "json"))
+    label = str(path.relative_to(cwd))
+    try:
+        text = _dispatch_triage_json(
+            task, cwd, None, NIM_TRIAGE_STEPS, label, path
+        )
+        return json.loads(text)
+    except Exception as exc:  # triage is a bonus; the run result stands
+        return {"error": "failed", "message": str(exc)}
 
 
 def _register_gated(fns: tuple[Any, ...], env: str) -> None:
