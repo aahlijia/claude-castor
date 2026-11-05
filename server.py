@@ -19,6 +19,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -10685,6 +10686,189 @@ def _run_line(rec: dict) -> str:
         secs = result.get("wall_s", 0)
     verdict = result.get("verdict") or "-"
     return f"{rec['run']} {rec['status']} {rec['label']} {secs}s {verdict}"
+
+
+# ---------------------------------------------------------------------------
+# Compare runs
+#
+# Suite logs side by side, row by row: each row (name and occurrence) gets
+# a class from its statuses across the runs, and the text shows the
+# actionable ones with the trial lines that changed. Deterministic: no
+# model reads it.
+# ---------------------------------------------------------------------------
+
+COMPARE_CLASS_ORDER = (
+    "regressed",
+    "flaky",
+    "failing",
+    "not_assessed",
+    "numbers_changed",
+    "missing",
+    "fixed",
+    "same",
+)
+COMPARE_MAX_TRIAL_LINES = 12
+COMPARE_LINE_CHARS = 300
+_DECIMAL_RE = re.compile(r"\d+\.\d+")
+_INTEGER_RE = re.compile(r"\d+")
+
+
+@dataclass(frozen=True)
+class RowRun:
+    """One row in one run: None when the run lacks it."""
+
+    label: str
+    row: VerdictRow | None
+    trials: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RowCompare:
+    """One row across every run, with its class."""
+
+    name: str
+    occurrence: int
+    klass: str
+    runs: tuple[RowRun, ...]
+
+
+def _mask_decimals(text: str) -> str:
+    """Every decimal number becomes `#`: timings move every run."""
+    return _DECIMAL_RE.sub("#", text)
+
+
+def _compare_rows(
+    runs: list[tuple[str, list[str]]], same_code: bool = False
+) -> list[RowCompare]:
+    """Every row across the runs, sorted by class order, then name.
+
+    Args:
+        runs: (label, log lines) per run, oldest first.
+        same_code: True when no fix landed between the runs, so any
+            PASS and FAIL mix is flaky.
+
+    Returns:
+        One RowCompare per (name, occurrence) seen in any run; `same` rows
+        come last.
+    """
+    parsed = []
+    keys: dict[tuple[str, int], None] = {}
+    for label, lines in runs:
+        clean = _clean_lines(lines)
+        by_key = {(r.name, r.occurrence): r for r in _verdict_rows(clean)}
+        parsed.append((label, clean, by_key))
+        keys.update(dict.fromkeys(by_key))
+    out = []
+    for key in keys:
+        row_runs = tuple(
+            _row_run(label, lines, by_key.get(key))
+            for label, lines, by_key in parsed
+        )
+        klass = _compare_class(row_runs, same_code)
+        out.append(RowCompare(key[0], key[1], klass, row_runs))
+    order = {k: i for i, k in enumerate(COMPARE_CLASS_ORDER)}
+    return sorted(out, key=lambda r: (order[r.klass], r.name, r.occurrence))
+
+
+def _row_run(label: str, lines: list[str], row: VerdictRow | None) -> RowRun:
+    """A row in one run, with its trial lines."""
+    if row is None:
+        return RowRun(label, None, ())
+    trials = tuple(lines[row.block[0] - 1 : row.block[1]]) if row.block else ()
+    return RowRun(label, row, trials)
+
+
+def _compare_class(runs: tuple[RowRun, ...], same_code: bool) -> str:
+    """The row's class; the first rule that matches wins."""
+    present = [r.row for r in runs if r.row is not None]
+    verdicts = [r.status for r in present if r.status in ("PASS", "FAIL")]
+    switched = _switch_class(verdicts, same_code)
+    if switched:
+        return switched
+    if verdicts and all(v == "FAIL" for v in verdicts):
+        return "failing"
+    if any(r.status == "NOT ASSESSED" for r in present):
+        return "not_assessed"
+    numbers = {
+        tuple(_INTEGER_RE.findall(_mask_decimals(r.detail))) for r in present
+    }
+    if len(numbers) > 1:
+        return "numbers_changed"
+    if len(present) < len(runs):
+        return "missing"
+    return "same"
+
+
+def _switch_class(verdicts: list[str], same_code: bool) -> str | None:
+    """flaky, regressed or fixed from the PASS/FAIL order; else None."""
+    if same_code and "PASS" in verdicts and "FAIL" in verdicts:
+        return "flaky"
+    switches = sum(a != b for a, b in pairwise(verdicts))
+    if switches >= 2:
+        return "flaky"
+    if switches == 1:
+        return "regressed" if verdicts[-1] == "FAIL" else "fixed"
+    return None
+
+
+def _compare_text(
+    rows: list[RowCompare], max_trial_lines: int = COMPARE_MAX_TRIAL_LINES
+) -> str:
+    """The listed rows' blocks, then the counts per class."""
+    blocks = [
+        _compare_block(r, max_trial_lines) for r in rows if r.klass != "same"
+    ]
+    counts = Counter(r.klass for r in rows)
+    summary = ", ".join(
+        f"{counts[k]} {k}" for k in COMPARE_CLASS_ORDER if counts[k]
+    )
+    tail = f"rows: {summary or 'none differ'}"
+    return "\n\n".join([*blocks, tail])
+
+
+def _compare_block(row: RowCompare, max_trial_lines: int) -> str:
+    """One row: its class, a line per run, then the trial differences."""
+    head = (
+        row.name
+        if row.occurrence == 0
+        else (f"{row.name} (occurrence {row.occurrence})")
+    )
+    lines = [f"{head} [{row.klass}]"]
+    for run in row.runs:
+        if run.row is None:
+            lines.append(f"  {run.label} (absent)")
+        else:
+            lines.append(
+                f"  {run.label} {run.row.status} {run.row.detail}".rstrip()
+            )
+    present = [r for r in row.runs if r.row is not None]
+    for run in present[1:]:
+        lines += _trial_diff(present[0], run, max_trial_lines)
+    return "\n".join(line[:COMPARE_LINE_CHARS] for line in lines)
+
+
+def _trial_diff(ref: RowRun, run: RowRun, limit: int) -> list[str]:
+    """A later run's trial lines that differ from the first run's."""
+    differ = []
+    for i in range(max(len(ref.trials), len(run.trials))):
+        a = ref.trials[i] if i < len(ref.trials) else None
+        b = run.trials[i] if i < len(run.trials) else None
+        if a is not None and b is not None:
+            if _mask_decimals(a) != _mask_decimals(b):
+                differ.append(b)
+        elif b is not None:
+            differ.append(b)
+        else:
+            differ.append(f"(no line {i + 1}; {ref.label}: {a.strip()})")
+    if not differ:
+        return [
+            f"  {run.label} trial lines match {ref.label} apart from timings"
+        ]
+    out = [f"  {run.label} trial lines that differ from {ref.label}:"]
+    out += [f"    {line}" for line in differ[:limit]]
+    if len(differ) > limit:
+        out.append(f"    [{len(differ) - limit} more]")
+    return out
 
 
 def _register_gated(fns: tuple[Any, ...], env: str) -> None:

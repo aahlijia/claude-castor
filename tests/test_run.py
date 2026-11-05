@@ -741,3 +741,183 @@ def test_castor_runs_lists_newest_first(project, fast, started):
     assert lines[0].endswith(" passed")
     assert "ok.sh x" in lines[0]
     assert server.castor_runs().splitlines()[0].startswith(second)
+
+
+# --- Task 5: compare parser and classes -------------------------------------
+
+
+def _log(*rows: tuple) -> list[str]:
+    """A stamped suite log: rows of (status, name, detail[, trials])."""
+    lines: list[str] = []
+    for i, row in enumerate(rows):
+        status, name, detail = row[:3]
+        lines += list(row[3]) if len(row) > 3 else [f"  trial: {name}"]
+        lines.append(_row(status, name, detail))
+        lines.append(
+            f"@case {1700000000 + i} {status.replace(' ', '_')} {name}"
+        )
+    return lines
+
+
+def _classes(*statuses: str, same_code: bool = False) -> str:
+    runs = [
+        (f"run{i + 1}", _log((st, "tops: x", "1 of 3")))
+        for i, st in enumerate(statuses)
+    ]
+    return server._compare_rows(runs, same_code=same_code)[0].klass
+
+
+def test_compare_flaky():
+    assert _classes("PASS", "FAIL", "PASS") == "flaky"
+
+
+def test_compare_regressed():
+    assert _classes("PASS", "PASS", "FAIL") == "regressed"
+
+
+def test_compare_fixed():
+    assert _classes("FAIL", "PASS", "PASS") == "fixed"
+    assert _classes("FAIL", "FAIL", "PASS") == "fixed"
+
+
+def test_compare_same_code_makes_one_switch_flaky():
+    assert _classes("FAIL", "PASS", "PASS", same_code=True) == "flaky"
+    assert _classes("FAIL", "FAIL", same_code=True) == "failing"
+
+
+def test_compare_failing():
+    assert _classes("FAIL", "FAIL") == "failing"
+    assert _classes("FAIL", "NOT ASSESSED", "FAIL") == "failing"
+
+
+def test_compare_not_assessed_keeps_reason():
+    runs = [
+        ("run1", _log(("PASS", "tops: x", "3 of 3"))),
+        ("run2", _log(("NOT ASSESSED", "tops: x", "no janitor spawned"))),
+    ]
+    rows = server._compare_rows(runs)
+    assert rows[0].klass == "not_assessed"
+    text = server._compare_text(rows)
+    assert "run2 NOT ASSESSED no janitor spawned" in text
+
+
+def test_compare_numbers_changed_ignores_decimals():
+    def klass(a: str, b: str) -> str:
+        runs = [
+            ("run1", _log(("PASS", "tops: x", a))),
+            ("run2", _log(("PASS", "tops: x", b))),
+        ]
+        return server._compare_rows(runs)[0].klass
+
+    assert klass("3 of 3 trials 0.12 s", "3 of 3 trials 0.13 s") == "same"
+    assert klass("3 of 3 trials 0.12 s", "2 of 3 trials 0.12 s") == (
+        "numbers_changed"
+    )
+    assert server._mask_decimals("took 0.12 s, 3 of 4, 10.5") == (
+        "took # s, 3 of 4, #"
+    )
+
+
+def test_compare_missing_by_occurrence():
+    runs = [
+        (
+            "run1",
+            _log(("PASS", "tops: x", "1"), ("PASS", "tops: x", "1")),
+        ),
+        ("run2", _log(("PASS", "tops: x", "1"))),
+    ]
+    rows = server._compare_rows(runs)
+    assert [(r.name, r.occurrence, r.klass) for r in rows] == [
+        ("tops: x", 1, "missing"),
+        ("tops: x", 0, "same"),
+    ]
+    assert rows[0].runs[1].row is None
+
+
+def test_compare_same_counted_not_listed():
+    runs = [
+        ("run1", _log(("PASS", "a", "1"), ("PASS", "b", "1"))),
+        ("run2", _log(("PASS", "a", "1"), ("FAIL", "b", "1"))),
+    ]
+    rows = server._compare_rows(runs)
+    assert [(r.name, r.klass) for r in rows] == [
+        ("b", "regressed"),
+        ("a", "same"),
+    ]
+    text = server._compare_text(rows)
+    assert "a [same]" not in text and "b [regressed]" in text
+    assert text.splitlines()[-1] == "rows: 1 regressed, 1 same"
+
+
+def test_compare_sorts_by_class_then_name():
+    runs = [
+        (
+            "run1",
+            _log(
+                ("FAIL", "z fixed", "1"),
+                ("PASS", "b flaky", "1"),
+                ("PASS", "y regressed", "1"),
+                ("PASS", "a regressed", "1"),
+            ),
+        ),
+        (
+            "run2",
+            _log(
+                ("PASS", "z fixed", "1"),
+                ("FAIL", "b flaky", "1"),
+                ("FAIL", "y regressed", "1"),
+                ("FAIL", "a regressed", "1"),
+            ),
+        ),
+        (
+            "run3",
+            _log(
+                ("PASS", "z fixed", "1"),
+                ("PASS", "b flaky", "1"),
+                ("FAIL", "y regressed", "1"),
+                ("FAIL", "a regressed", "1"),
+            ),
+        ),
+    ]
+    rows = server._compare_rows(runs)
+    assert [(r.name, r.klass) for r in rows] == [
+        ("a regressed", "regressed"),
+        ("y regressed", "regressed"),
+        ("b flaky", "flaky"),
+        ("z fixed", "fixed"),
+    ]
+
+
+def test_compare_text_trial_diff_and_cap():
+    first = [f"  trial {i}: on top 0.{i}1 s" for i in range(13)]
+    later = [f"  trial {i}: off after {i} s" for i in range(13)]
+    timing = [f"  trial {i}: on top 0.{i}9 s" for i in range(13)]
+    runs = [
+        ("run1", _log(("PASS", "tops: x", "13 of 13", first))),
+        ("run2", _log(("FAIL", "tops: x", "0 of 13", later))),
+        ("run3", _log(("PASS", "tops: x", "13 of 13", timing))),
+    ]
+    text = server._compare_text(server._compare_rows(runs))
+    lines = text.splitlines()
+    assert lines[0] == "tops: x [flaky]"
+    assert lines[1:4] == [
+        "  run1 PASS 13 of 13",
+        "  run2 FAIL 0 of 13",
+        "  run3 PASS 13 of 13",
+    ]
+    assert lines[4] == "  run2 trial lines that differ from run1:"
+    assert lines[5] == "      trial 0: off after 0 s"
+    assert lines[16] == "      trial 11: off after 11 s"
+    assert lines[17] == "    [1 more]"
+    assert lines[18] == "  run3 trial lines match run1 apart from timings"
+    assert lines[-1] == "rows: 1 flaky"
+
+
+def test_compare_text_absent_run_and_no_rows():
+    runs = [
+        ("run1", _log(("FAIL", "tops: x", "1"))),
+        ("run2", []),
+    ]
+    text = server._compare_text(server._compare_rows(runs))
+    assert "  run2 (absent)" in text.splitlines()
+    assert server._compare_text([]) == "rows: none differ"
