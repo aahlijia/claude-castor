@@ -262,6 +262,7 @@ with its recorded start time, else finishes the run from its capture
 |---|---|---|
 | `castor_run_start` | `(cwd, command, expect_minutes, triage=True, label=None)` | Start a run; collect it with `gemini_poll("run-...")`. Refuses past `max_running` live runs under the root, naming them |
 | `castor_runs` | `(cwd=None)` | Runs on record, newest first: id, status, label, seconds, verdict |
+| `castor_compare_runs` | `(cwd, logs, rows=None, same_code=False)` | Two to 12 suite logs (oldest first, inside `cwd` or any worktree of its repo, labelled by their `YYYYMMDD-HHMMSS` stamp) row by row. Each row (name and occurrence) gets a class, first match wins: `flaky` (PASS and FAIL with `same_code=True`, or two or more switches), `regressed` / `fixed` (one switch), `failing`, `not_assessed`, `numbers_changed` (integers in the detail differ; decimals are timings and masked), `missing`, `same` (counted, not listed). Text: the rows by class, a line per run and the trial lines that differ from the first run's (at most 12 per run). No model call (its NIM reading was cut: the free models cannot tell harness from game faults). Runs anywhere, not only POSIX |
 
 `gemini_poll` on a run id returns progress (`run`, `status`, `elapsed_s`,
 `pid`, `flags`, `overdue`) and then the result: `status` (`done`,

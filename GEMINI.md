@@ -426,6 +426,13 @@ without both it refuses, and the refusal says which key is missing.
   and the decision is yours.
 - `castor_runs` lists the runs on record; poll the ids you still need.
 
+`castor_compare_runs` puts two or more suite logs side by side (`/castor:compare`):
+it says which rows regressed, which are flaky, which keep failing, and shows
+the trial lines that changed. Pass `same_code=True` when no fix landed
+between the runs, so a row that both passed and failed counts as flaky.
+No model reads the table: whether a flaky row is the harness or the game is
+your call, from the trial lines and the code.
+
 ---
 
 ## Quick Reference
