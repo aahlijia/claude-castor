@@ -6,8 +6,10 @@ test starts is ended by the test itself: Castor never kills one.
 """
 
 import importlib
+import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -656,3 +658,86 @@ def test_attach_after_finish_leaves_the_result(project, fast, started):
     thread = server._run_attach(rec["run"])
     thread.join(timeout=5)
     assert json.loads(server.gemini_poll(rec["run"])) == first
+
+
+# --- Task 4: run tools -----------------------------------------------------
+
+_STARTED_RE = re.compile(
+    r"^Run (run-[0-9a-f]{8}) started: (.+); collect it with "
+    r'gemini_poll\("run-[0-9a-f]{8}"\)\.$'
+)
+
+
+def _tool_start(project: Path, started: list, command: list[str]) -> str:
+    """castor_run_start; the run id. Its process is ended at teardown."""
+    out = server.castor_run_start(str(project), command, 5)
+    match = _STARTED_RE.match(out)
+    assert match, out
+    started.append(server._run_record_read(match.group(1)))
+    return match.group(1)
+
+
+def test_run_tools_registered():
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert {"castor_run_start", "castor_runs"} <= names
+
+
+def test_run_start_and_poll_end_to_end(project, fast, started):
+    out = server.castor_run_start(str(project), ["t/ok.sh", "a b"], 5)
+    match = _STARTED_RE.match(out)
+    assert match and match.group(2) == "ok.sh a b"
+    started.append(server._run_record_read(match.group(1)))
+    final = _poll_json(match.group(1))
+    assert final["status"] == "done" and final["exit_code"] == 0
+    assert final["verdict"] == "passed"
+    assert final["command"] == ["t/ok.sh", "a b"]
+
+
+def test_run_start_takes_a_label(project, fast, started):
+    out = server.castor_run_start(
+        str(project), ["t/ok.sh"], 5, triage=False, label="lane A tops"
+    )
+    assert "started: lane A tops;" in out
+    started.append(server._run_record_read(_STARTED_RE.match(out).group(1)))
+
+
+def test_run_start_refusals(project, monkeypatch, tmp_path):
+    def start(command: list, expect: int = 5, cwd: str = str(project)) -> str:
+        return server.castor_run_start(cwd, command, expect)
+
+    assert "empty" in start([])
+    assert "expect_minutes" in start(["t/ok.sh"], 0)
+    assert "allow" in start(["u/x.sh"]) or "not a file" in start(["u/x.sh"])
+    assert "not a directory" in start(["t/ok.sh"], cwd=str(tmp_path / "no"))
+    assert "absolute" in start(["t/ok.sh"], cwd="proj")
+    (project / ".castor" / "run.json").unlink()
+    assert ".castor/run.json" in start(["t/ok.sh"])
+    monkeypatch.delenv("CASTOR_RUN_ROOTS")
+    out = start(["t/ok.sh"])
+    assert out.startswith("[Error:") and "CASTOR_RUN_ROOTS" in out
+
+
+def test_run_start_respects_max_running(project, fast, started):
+    _write_config(
+        project, {"allow": ["t/*.sh"], "max_running": 1, "max_hours": 1000}
+    )
+    _script(project / "t" / "sleep.sh", "sleep 30\n")
+    first = _tool_start(project, started, ["t/sleep.sh"])
+    out = server.castor_run_start(str(project), ["t/sleep.sh"], 5)
+    assert out.startswith("[Error:") and first in out
+    assert "max_running" in out
+
+
+def test_castor_runs_lists_newest_first(project, fast, started):
+    assert server.castor_runs(str(project)) == "No runs on record."
+    first = _tool_start(project, started, ["t/ok.sh"])
+    _poll_json(first)
+    time.sleep(0.01)
+    second = _tool_start(project, started, ["t/ok.sh", "x"])
+    _poll_json(second)
+    lines = server.castor_runs(str(project)).splitlines()
+    assert [ln.split()[0] for ln in lines] == [second, first]
+    assert lines[0].split()[1] == "done"
+    assert lines[0].endswith(" passed")
+    assert "ok.sh x" in lines[0]
+    assert server.castor_runs().splitlines()[0].startswith(second)
