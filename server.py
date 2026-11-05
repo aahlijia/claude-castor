@@ -7563,9 +7563,12 @@ def _triage_ends(lines: list[str], label: str) -> str:
 # Castor finds the row in the log and hands the agent its verdict line and
 # trial lines; the agent finds the code that decides the verdict. It is a
 # locator: the caller reads the cited code and decides harness or game.
+# Its site gate passed on 2026-11-04 (21 NQC cases, 2 runs on Super: 18
+# and 19 sites, 0 errors; results-20261104-191044.json).
 # ---------------------------------------------------------------------------
 
 
+@mcp.tool()
 def nim_explain_row(
     cwd: str,
     log_path: str,
@@ -7611,6 +7614,7 @@ def nim_explain_row(
     return _dispatch_nim_agent(**kwargs)
 
 
+@mcp.tool()
 def nim_explain_row_start(
     cwd: str,
     log_path: str,
@@ -9736,11 +9740,6 @@ def _register_gated(fns: tuple[Any, ...], env: str) -> None:
 # nim_edit failed its stage 1 gate (run 6, 2026-11-04: two whitespace-wrong
 # patches); it is offered only with CASTOR_NIM_EDIT=1.
 _register_gated((nim_edit, nim_edit_start), "CASTOR_NIM_EDIT")
-# nim_explain_row (location only since 2026-11-04) is offered only with
-# CASTOR_NIM_EXPLAIN_ROW=1 until its site gate passes.
-_register_gated(
-    (nim_explain_row, nim_explain_row_start), "CASTOR_NIM_EXPLAIN_ROW"
-)
 
 
 if __name__ == "__main__":

@@ -318,7 +318,7 @@ files yourself when the answer is a short list and the reading is bulk:
 |---|---|
 | Find the lines a task or brief needs | `nim_scout` (`/castor:scout`) |
 | Reduce a long log to its failures | `nim_triage_log` (`/castor:triage`) |
-| Explain a FAIL or NOT ASSESSED row of a playtest log (gated, off unless `CASTOR_NIM_EXPLAIN_ROW=1`, see below) | `nim_explain_row` |
+| Find the code that decides a FAIL or NOT ASSESSED row of a playtest log (see below) | `nim_explain_row` |
 | Mechanical edit across files (off unless `CASTOR_NIM_EDIT=1`, see below) | `nim_edit` |
 | Anything else that is read-only investigation | `nim_agent` / `nim_agent_start` |
 
@@ -359,12 +359,13 @@ reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
 are the checks Castor can stand behind.
 
 `nim_explain_row` (and its `_start`) is a locator: it finds the code that
-decides a row, and you decide whether the harness or the game is wrong. It
-is gated, off unless the server runs with `CASTOR_NIM_EXPLAIN_ROW=1`, until
-its site gate passes. The free models could not read harness against game
-(Super right on 6 of 32 decidable runs, Ultra on 8, mostly "game" on
-harness faults), so the tool no longer asks them to; Super found the
-verdict code in 41 of 42 runs. Give it the log and a row name (or a piece
+decides a row, and you decide whether the harness or the game is wrong.
+The free models could not read harness against game (Super right on 6 of
+32 decidable runs, Ultra on 8, mostly "game" on harness faults), so the
+tool no longer asks them to. Its site gate passed: on 21 NQC cases, Super
+named the verdict code within 3 lines on 18 and 19 of 21 over two runs,
+with no errors. When it says "not found" or cites code that does not
+decide the row, find the `verdict`/`check` call yourself. Give it the log and a row name (or a piece
 of one); Castor finds the row and hands the agent the verdict line, the
 trial lines and the script name, and the agent answers four lines: Row,
 Verdict code (`path:line`, or "not found"), Precondition (what `PRE_OK`
