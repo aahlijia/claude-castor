@@ -780,7 +780,6 @@ def test_build_task_triage_case_returns_task(tmp_path):
 EXPLAIN_ROW_CASE = {
     "name": "r",
     "role": "explain_row",
-    "reading": "harness",
     "expected": [
         {
             "id": "site",
@@ -794,53 +793,41 @@ EXPLAIN_ROW_CASE = {
 }
 
 
-def _row_answer(code: str, reading: str) -> str:
+def _row_answer(code: str) -> str:
     return (
         "Row: runstate equal (FAIL)\n"
         f"Verdict code: {code}\n"
         "Precondition: none\n"
         "Trial lines: run.log:4\n"
-        f"Reading: {reading}\n"
     )
 
 
 def test_score_explain_row_hit_within_three_lines():
-    answer = _row_answer(
-        "Tools/playtest/flow.sh:91 - cat_verdict", "harness - x"
-    )
+    answer = _row_answer("Tools/playtest/flow.sh:91 - cat_verdict")
     got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
-    assert got == {
-        "site_hit": True,
-        "reading_right": True,
-        "reading_wrong": False,
-        "error": False,
-    }
-    far = _row_answer("Tools/playtest/flow.sh:93 - x", "harness - x")
+    assert got == {"site_hit": True, "error": False}
+    far = _row_answer("Tools/playtest/flow.sh:93 - x")
     assert not nim_eval.score_explain_row(far, EXPLAIN_ROW_CASE)["site_hit"]
 
 
 def test_score_explain_row_wrong_file_is_miss():
-    answer = _row_answer("Tools/playtest/other.sh:414 - x", "harness - x")
+    answer = _row_answer("Tools/playtest/other.sh:414 - x")
     got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
     assert got["site_hit"] is False and got["error"] is False
-    none = _row_answer("not found", "harness - x")
+    none = _row_answer("not found")
     got = nim_eval.score_explain_row(none, EXPLAIN_ROW_CASE)
     assert got["site_hit"] is False and got["error"] is False
 
 
-def test_score_explain_row_unclear_is_neither():
-    answer = _row_answer("Tools/playtest/flow.sh:414 - x", "unclear - x")
+def test_score_explain_row_ignores_a_reading_line():
+    answer = _row_answer("Tools/playtest/flow.sh:414 - x") + "Reading: game\n"
     got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
-    assert got["reading_right"] is False and got["reading_wrong"] is False
-    assert got["site_hit"] is True
+    assert got == {"site_hit": True, "error": False}
 
 
-def test_score_explain_row_swapped_is_wrong():
-    answer = _row_answer("Tools/playtest/flow.sh:414 - x", "game - x")
-    got = nim_eval.score_explain_row(answer, EXPLAIN_ROW_CASE)
-    assert got["reading_right"] is False and got["reading_wrong"] is True
+def test_score_explain_row_bracketed_answer_is_error():
     err = nim_eval.score_explain_row("[Error: rate limited]", EXPLAIN_ROW_CASE)
-    assert err["error"] is True and err["site_hit"] is False
+    assert err == {"site_hit": False, "error": True}
 
 
 def test_log_file_copied_into_snapshot(tmp_path):
@@ -858,10 +845,8 @@ def test_log_file_copied_into_snapshot(tmp_path):
     nim_eval.copy_log_file({"_base": str(tmp_path), "log": "x"}, snap)
 
 
-def _hit(code: str, reading: str = "harness - x") -> dict:
-    return nim_eval.score_explain_row(
-        _row_answer(code, reading), EXPLAIN_ROW_CASE
-    )
+def _hit(code: str) -> dict:
+    return nim_eval.score_explain_row(_row_answer(code), EXPLAIN_ROW_CASE)
 
 
 def test_explain_row_range_overlap_hit_and_miss():
@@ -881,17 +866,13 @@ def test_explain_row_first_citation_counts_and_bare_name_hits():
     assert not _hit("playtest/flow2.sh:91 - x")["site_hit"]
 
 
-def _rows(
-    run: int, site: int, right: int, wrong: int, errors: int = 0
-) -> list[dict]:
+def _rows(run: int, site: int, errors: int = 0) -> list[dict]:
     return [
         {
             "config": "c",
             "role": "explain_row",
             "run": run,
             "site_hit": i < site,
-            "reading_right": i < right,
-            "reading_wrong": 12 - i <= wrong,
             "error": i < errors,
         }
         for i in range(12)
@@ -899,23 +880,20 @@ def _rows(
 
 
 def test_explain_row_summary_per_run_and_gate_pass():
-    rows = _rows(1, 10, 8, 1) + _rows(2, 12, 12, 0)
+    rows = _rows(1, 10) + _rows(2, 12)
     lines = nim_eval.summarize(rows, "c").splitlines()
-    assert (
-        "explain_row run 1: site 10/12, reading right 8/12, wrong 1"
-        in (lines[0])
-    )
+    assert "explain_row run 1: site 10/12, errors 0" in lines[0]
     assert "run 2: site 12/12" in lines[1]
     assert lines[2].endswith("explain_row gate: pass")
 
 
 def test_explain_row_summary_gate_fail_names_bar_and_run():
-    rows = _rows(1, 12, 12, 0) + _rows(2, 9, 12, 0)
+    rows = _rows(1, 12) + _rows(2, 9)
     last = nim_eval.summarize(rows, "c").splitlines()[-1]
     assert "gate: fail (site 9 < 10 in run 2)" in last
-    rows = _rows(1, 12, 12, 2, errors=1)
+    rows = _rows(1, 12, errors=1)
     last = nim_eval.summarize(rows, "c").splitlines()[-1]
-    assert "wrong 2 > 1 in run 1" in last and "errors 1 > 0 in run 1" in last
+    assert last.endswith("gate: fail (errors 1 > 0 in run 1)")
 
 
 def test_snapshot_with_log_leaves_base_untouched(tmp_path):
@@ -952,7 +930,7 @@ def test_summary_keeps_main_lines_beside_explain_row():
         "steps": 2,
         "failed": False,
     }
-    text = nim_eval.summarize([review, *_rows(1, 12, 12, 0)], "c")
+    text = nim_eval.summarize([review, *_rows(1, 12)], "c")
     lines = text.splitlines()
     assert "precision" in lines[0] and "explain_row" not in lines[0]
     assert "explain_row run 1" in lines[1]
@@ -972,8 +950,6 @@ def _explain_server(seen):
 
     return SimpleNamespace(
         _dekko_override=override,
-        _fix_history_source=contextvars.ContextVar("h", default=None),
-        FIX_HISTORY_OFF="off",
         _dekko_ensure_map=ensure_map,
         _cache_dir=lambda: seen["cache"],
         nim_explain_row=explain_row,
@@ -1009,54 +985,19 @@ def test_explain_row_case_honours_the_dekko_setting(tmp_path, dekko):
     assert server._dekko_override.get() is None
 
 
-# --- explain row: fix history and the reading round's bar ---------------------
-
-
-def test_parse_config_reads_history():
-    assert nim_eval.parse_config("s=m,history=off")["history"] is False
-    assert nim_eval.parse_config("s=m,history=on")["history"] is True
-    assert "history" not in nim_eval.parse_config("s=m")
-    with pytest.raises(ValueError):
-        nim_eval.parse_config("s=m,history=maybe")
+# --- explain row: the site gate ----------------------------------------------
 
 
 def test_explain_row_bars_scale():
-    assert nim_eval.explain_row_bars(12) == {
-        "site": 10,
-        "right": 8,
-        "wrong": 1,
-        "errors": 0,
-    }
-    assert nim_eval.explain_row_bars(18) == {
-        "site": 15,
-        "right": 12,
-        "wrong": 2,
-        "errors": 0,
-    }
-    assert nim_eval.explain_row_bars(10) == {
-        "site": 8,
-        "right": 7,
-        "wrong": 1,
-        "errors": 0,
-    }
+    assert nim_eval.explain_row_bars(21) == {"site": 17, "errors": 0}
+    assert nim_eval.explain_row_bars(12) == {"site": 10, "errors": 0}
 
 
-def _run_rows(n: int, site: int, right: int, wrong: int) -> list[dict]:
-    return [
-        {
-            "site_hit": i < site,
-            "reading_right": i < right,
-            "reading_wrong": n - i <= wrong,
-            "error": False,
-        }
-        for i in range(n)
-    ]
-
-
-def test_explain_run_misses_uses_new_bar():
-    assert nim_eval._explain_run_misses(_run_rows(18, 15, 12, 2), 1) == []
-    misses = nim_eval._explain_run_misses(_run_rows(18, 15, 12, 3), 1)
-    assert misses == ["wrong 3 > 2 in run 1"]
+def test_explain_run_misses_site_bar():
+    rows = [{"site_hit": i < 17, "error": False} for i in range(21)]
+    assert nim_eval._explain_run_misses(rows, 1) == []
+    rows[16]["site_hit"] = False
+    assert nim_eval._explain_run_misses(rows, 1) == ["site 16 < 17 in run 1"]
 
 
 def _real_server():
@@ -1078,7 +1019,7 @@ def _git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _history_repo(tmp_path: Path) -> tuple[Path, str]:
+def _verdict_repo(tmp_path: Path) -> tuple[Path, str]:
     """A repo with two commits to Tools/tops.sh and a stamped verdict log.
 
     Returns the repo and the first commit's hash.
@@ -1100,7 +1041,7 @@ def _history_repo(tmp_path: Path) -> tuple[Path, str]:
     return root, _git(root, "rev-list", "--max-parents=0", "HEAD")
 
 
-def _history_case(tmp_path: Path, root: Path, commit: str) -> dict:
+def _verdict_case(tmp_path: Path, root: Path, commit: str) -> dict:
     return {
         "name": "h",
         "role": "explain_row",
@@ -1112,39 +1053,12 @@ def _history_case(tmp_path: Path, root: Path, commit: str) -> dict:
     }
 
 
-def test_history_scope_uses_case_commit(tmp_path):
-    server = _real_server()
-    root, first = _history_repo(tmp_path)
-    case = _history_case(tmp_path, root, first)
-    config = {"label": "c", "model": None}
-    with nim_eval.history_scope(case, config, server):
-        task, error = nim_eval.build_task(case, root, server)
-    assert error == "" and task is not None
-    assert "fix(playtest): first" in task and "later" not in task
-    assert server._fix_history_source.get() is None
-
-
-def test_history_scope_off_and_dir_cases(tmp_path):
-    server = _real_server()
-    root, first = _history_repo(tmp_path)
-    case = _history_case(tmp_path, root, first)
-    off = {"label": "c", "model": None, "history": False}
-    with nim_eval.history_scope(case, off, server):
-        task, _ = nim_eval.build_task(case, root, server)
-    assert task is not None and "Recent commits" not in task
-    dir_case = dict(case, dir="src")
-    del dir_case["repo"]
-    with nim_eval.history_scope(dir_case, {"label": "c"}, server):
-        task, _ = nim_eval.build_task(dir_case, root, server)
-    assert task is not None and "Recent commits" not in task
-
-
 def test_print_tasks_writes_task_files(tmp_path, monkeypatch):
     import sys
 
     server = _real_server()
-    root, first = _history_repo(tmp_path)
-    case = _history_case(tmp_path, root, first)
+    root, first = _verdict_repo(tmp_path)
+    case = _verdict_case(tmp_path, root, first)
     del case["_base"]
     cases_file = tmp_path / "cases.json"
     cases_file.write_text(json.dumps([case]))
@@ -1163,8 +1077,7 @@ def test_print_tasks_writes_task_files(tmp_path, monkeypatch):
     )
     nim_eval.main()
     text = (out / "h.txt").read_text()
-    assert "tops: x (host)" in text and "fix(playtest): first" in text
-    assert "later" not in text
+    assert "tops: x (host)" in text and "Recent commits" not in text
     index = json.loads((out / "index.json").read_text())
     assert [e["name"] for e in index] == ["h"]
     assert Path(index[0]["snapshot"]).is_dir()
@@ -1173,8 +1086,8 @@ def test_print_tasks_writes_task_files(tmp_path, monkeypatch):
 
 def test_print_tasks_records_a_failing_case_and_goes_on(tmp_path):
     server = _real_server()
-    root, first = _history_repo(tmp_path)
-    good = _history_case(tmp_path, root, first)
+    root, first = _verdict_repo(tmp_path)
+    good = _verdict_case(tmp_path, root, first)
     bad = {"name": "b", "role": "explain", "_base": str(tmp_path)}
     bad["dir"] = "src"
     nim_eval.print_tasks([bad, good], tmp_path / "out", server)

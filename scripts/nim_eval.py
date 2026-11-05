@@ -39,8 +39,6 @@ Case fields (JSON list of objects):
                                snapshot (relative to the cases file),
                                copied to `log` in the snapshot; the row
                                name; which run of a repeated name
-    reading                    explain_row: "harness" or "game", the
-                               reading a good answer gives
     target                     summarize input, relative to the case's code
     task, files, must_cover    edit inputs: the edit as briefed, the scope
                                fence, symbols whose uses must be edited
@@ -223,29 +221,6 @@ def dekko_scope(config: dict, server: ModuleType) -> Iterator[None]:
         server._dekko_override.reset(token)
 
 
-@contextlib.contextmanager
-def history_scope(
-    case: dict, config: dict, server: ModuleType
-) -> Iterator[None]:
-    """Point explain-row's fix history at the case's source repo and commit.
-
-    Snapshots carry no history, so the history comes from the case's repo
-    at its commit (later fixes stay out). `history=off`, or a fixture case
-    with no repo, leaves the history out.
-    """
-    if config.get("history") is False or "repo" not in case:
-        source: Any = server.FIX_HISTORY_OFF
-    else:
-        base = Path(case["_base"])
-        repo = (base / Path(case["repo"]).expanduser()).resolve()
-        source = (repo, case["commit"])
-    token = server._fix_history_source.set(source)
-    try:
-        yield
-    finally:
-        server._fix_history_source.reset(token)
-
-
 def _prepare_dekko(config: dict, cwd: Path, server: ModuleType) -> None:
     """With dekko on, make sure the snapshot has a map before the run."""
     if config.get("dekko") is True:
@@ -393,27 +368,18 @@ def _site_hit(cited: str, case: dict) -> bool:
 
 
 def score_explain_row(answer: str, case: dict) -> dict:
-    """Score an explain_row answer: site hit, reading right or wrong.
+    """Score an explain_row answer: does it name the verdict code's site.
 
-    A "Verdict code: not found" is a site miss. An "unclear" or missing
-    reading is neither right nor wrong. A bracketed answer is an error.
+    A "Verdict code: not found" is a site miss. A bracketed answer is an
+    error.
     """
     if answer.startswith("["):
-        return {
-            "site_hit": False,
-            "reading_right": False,
-            "reading_wrong": False,
-            "error": True,
-        }
+        return {"site_hit": False, "error": True}
     code = re.search(r"^Verdict code:(.*)$", answer, re.M | re.I)
     if code and code.group(1).strip().lower().startswith("not found"):
         code = None
-    word = re.search(r"^Reading:\s*(harness|game)\b", answer, re.M | re.I)
-    reading = word.group(1).lower() if word else None
     return {
         "site_hit": bool(code) and _site_hit(code.group(1), case),
-        "reading_right": reading == case["reading"],
-        "reading_wrong": reading is not None and reading != case["reading"],
         "error": False,
     }
 
@@ -422,7 +388,7 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
     """Run one explain_row case through nim_explain_row and score it."""
     started = time.monotonic()
     try:
-        with dekko_scope(config, server), history_scope(case, config, server):
+        with dekko_scope(config, server):
             cwd = snapshot_with_log(case, server)
             _prepare_dekko(config, cwd, server)
             text = _tool_fn(server.nim_explain_row)(
@@ -443,7 +409,6 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
         role="explain_row",
         config=config["label"],
         dekko=config.get("dekko"),
-        history=config.get("history") is not False,
         seconds=round(time.monotonic() - started, 1),
         answer=text,
     )
@@ -453,8 +418,8 @@ def run_explain_row_case(case: dict, config: dict, server: ModuleType) -> dict:
 def print_tasks(cases: list[dict], out: Path, server: ModuleType) -> None:
     """Write each case's task text and snapshot path; no NIM requests.
 
-    For the explain-row blind screen: `out/<name>.txt` holds the task the
-    agent would get (fix history as of the case commit), and
+    For a blind screen of explain-row cases: `out/<name>.txt` holds the
+    task the agent would get, and
     `out/index.json` lists `{name, snapshot, task_file}` per case, with
     `error` in place of `task_file` when the task cannot be built.
     """
@@ -465,8 +430,7 @@ def print_tasks(cases: list[dict], out: Path, server: ModuleType) -> None:
         try:
             cwd = snapshot_with_log(case, server)
             entry["snapshot"] = str(cwd)
-            with history_scope(case, {}, server):
-                task, error = build_task(case, cwd, server)
+            task, error = build_task(case, cwd, server)
         except Exception as exc:  # one bad case is an entry, not a crash
             task, error = None, f"[Error: {type(exc).__name__}: {exc}]"
         if task is None:
@@ -1011,17 +975,8 @@ def _summarize_main(results: list[dict], label: str) -> str:
 
 
 def explain_row_bars(n: int) -> dict[str, int]:
-    """The reading round's gate bars for one run of n cases.
-
-    Site on 80% of cases, reading right on two thirds, at most one wrong
-    reading (two past 15 cases), no errors.
-    """
-    return {
-        "site": math.ceil(0.8 * n),
-        "right": math.ceil(2 * n / 3),
-        "wrong": 2 if n > 15 else 1,
-        "errors": 0,
-    }
+    """The gate bars for one run of n cases: site on 80%, no errors."""
+    return {"site": math.ceil(0.8 * n), "errors": 0}
 
 
 def _explain_run_line(rows: list[dict], label: str, run: int) -> str:
@@ -1029,8 +984,6 @@ def _explain_run_line(rows: list[dict], label: str, run: int) -> str:
     return (
         f"{label:<24} explain_row run {run}: "
         f"site {sum(r['site_hit'] for r in rows)}/{n}, "
-        f"reading right {sum(r['reading_right'] for r in rows)}/{n}, "
-        f"wrong {sum(r['reading_wrong'] for r in rows)}  "
         f"errors {sum(r['error'] for r in rows)}"
     )
 
@@ -1039,16 +992,10 @@ def _explain_run_misses(rows: list[dict], run: int) -> list[str]:
     """The gate bars one run misses (`explain_row_bars` for its size)."""
     bars = explain_row_bars(len(rows))
     site = sum(r["site_hit"] for r in rows)
-    right = sum(r["reading_right"] for r in rows)
-    wrong = sum(r["reading_wrong"] for r in rows)
     errors = sum(r["error"] for r in rows)
     misses = []
     if site < bars["site"]:
         misses.append(f"site {site} < {bars['site']} in run {run}")
-    if right < bars["right"]:
-        misses.append(f"reading right {right} < {bars['right']} in run {run}")
-    if wrong > bars["wrong"]:
-        misses.append(f"wrong {wrong} > {bars['wrong']} in run {run}")
     if errors > bars["errors"]:
         misses.append(f"errors {errors} > 0 in run {run}")
     return misses
@@ -1199,8 +1146,7 @@ def report(results: list[dict], labels: list[str]) -> None:
             print(
                 f"{r['config']:<24} {r['case']:<22} explain_row "
                 f"run {r.get('run', 1)} "
-                f"site {int(r['site_hit'])} right {int(r['reading_right'])} "
-                f"wrong {int(r['reading_wrong'])} "
+                f"site {int(r['site_hit'])} "
                 f"{'ERROR ' if r['error'] else ''}{r['seconds']:.0f}s"
             )
             continue
@@ -1238,7 +1184,7 @@ def parse_config(raw: str) -> dict:
         key, _, value = item.partition("=")
         if key == "step":
             config["step"] = value
-        elif key in ("dekko", "history"):
+        elif key == "dekko":
             if value not in ("on", "off"):
                 raise ValueError(f"{key} must be on or off, got {value!r}")
             config[key] = value == "on"
@@ -1265,7 +1211,7 @@ def main() -> None:
         action="append",
         default=[],
         help=(
-            "label=model[,step=model][,dekko=on|off][,history=on|off]; "
+            "label=model[,step=model][,dekko=on|off]; "
             "repeatable (default: server default)"
         ),
     )
