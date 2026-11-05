@@ -245,8 +245,11 @@ that waits on a long run). Two keys open it, and both are needed:
   (`{name, pattern, stop}`, matched on whole console lines). Unknown keys
   and bad regexes are errors.
 - the castor registration lists the root in `CASTOR_RUN_ROOTS`
-  (colon-separated absolute paths), so a cloned repo cannot authorize
-  itself. `CASTOR_RUN=0` turns the tier off. POSIX only.
+  (colon-separated absolute paths). `cwd` must be an entry itself or a git
+  worktree of one (list the main repo and every lane is covered), never a
+  folder under one, so a cloned repo cannot authorize itself.
+  `CASTOR_RUN=0` turns the tier off, the overdue command included. POSIX
+  only.
 
 The command runs as `bash -c '<source env>; exec "$@"'` with the arguments
 as positional parameters (no shell parsing), in its own session, with
@@ -256,11 +259,13 @@ ends the watching, not the run, and the result gives the `pid`. Records and
 captures live in `~/.cache/claude-castor/runs/` (30 days), so a run
 survives a server restart: `gemini_poll` reattaches when the pid is alive
 with its recorded start time, else finishes the run from its capture
-(`exit_code` null; `lost` with no table).
+(`exit_code` null; `lost` with no table). A monitor holds an exclusive
+`flock` on `runs/<id>.lock`, so when several Claude sessions (each with
+its own Castor) poll one run, only one watches it.
 
 | Tool | Signature | Purpose |
 |---|---|---|
-| `castor_run_start` | `(cwd, command, expect_minutes, triage=True, label=None)` | Start a run; collect it with `gemini_poll("run-...")`. Refuses past `max_running` live runs under the root, naming them |
+| `castor_run_start` | `(cwd, command, expect_minutes, triage=True, label=None)` | Start a run; collect it with `gemini_poll("run-...")`. Refuses past `max_running` live processes under the root (running, or stopped / given up but still alive), naming them |
 | `castor_runs` | `(cwd=None)` | Runs on record, newest first: id, status, label, seconds, verdict |
 | `castor_compare_runs` | `(cwd, logs, rows=None, same_code=False)` | Two to 12 suite logs (oldest first, inside `cwd` or any worktree of its repo, labelled by their `YYYYMMDD-HHMMSS` stamp) row by row. Each row (name and occurrence) gets a class, first match wins: `flaky` (PASS and FAIL with `same_code=True`, or two or more switches), `regressed` / `fixed` (one switch), `failing`, `not_assessed`, `numbers_changed` (integers in the detail differ; decimals are timings and masked), `missing`, `same` (counted, not listed). Text: the rows by class, a line per run and the trial lines that differ from the first run's (at most 12 per run). No model call (its NIM reading was cut: the free models cannot tell harness from game faults). Runs anywhere, not only POSIX |
 
