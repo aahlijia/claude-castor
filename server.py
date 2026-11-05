@@ -9727,6 +9727,233 @@ def nim_edit_start(
     return _start_agent_job("NIM edit", kwargs, _dispatch_nim_edit)
 
 
+# ---------------------------------------------------------------------------
+# Run tier
+#
+# Castor's one path that runs project commands: an allowlisted suite command
+# started in its own session, watched by a monitor thread, reported when it
+# ends. Two keys open it: the project commits .castor/run.json, and the MCP
+# registration lists the root in CASTOR_RUN_ROOTS (a cloned repo cannot
+# authorize itself). Castor never kills, signals or restarts a process.
+# ---------------------------------------------------------------------------
+
+RUN_CONFIG_FILE = ".castor/run.json"
+RUN_CONFIG_KEYS = frozenset(
+    {
+        "allow",
+        "env_file",
+        "log_line",
+        "overdue_command",
+        "grace_minutes",
+        "max_hours",
+        "max_running",
+        "flags",
+    }
+)
+RUN_DEFAULT_LOG_LINE = "^log: (.+)$"
+RUN_DEFAULT_GRACE_MINUTES = 10.0
+RUN_DEFAULT_MAX_HOURS = 8.0
+RUN_DEFAULT_MAX_RUNNING = 4
+
+
+@dataclass(frozen=True)
+class RunFlag:
+    """A console line worth reporting; `stop` ends the watch on a match."""
+
+    name: str
+    pattern: re.Pattern
+    stop: bool
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """A project's .castor/run.json, checked and with defaults filled in."""
+
+    allow: tuple[str, ...]
+    env_file: str | None
+    log_line: re.Pattern
+    overdue_command: tuple[str, ...] | None
+    grace_minutes: float
+    max_hours: float
+    max_running: int
+    flags: tuple[RunFlag, ...]
+
+
+def _run_enabled_for(root: Path) -> str | None:
+    """None when runs are allowed under `root`, else the reason they are not.
+
+    Args:
+        root: The project root a run would start in.
+
+    Returns:
+        None, or a sentence naming the switch that refuses it.
+    """
+    if sys.platform == "win32":
+        return "the run tier is POSIX only (it uses ps and process groups)."
+    if os.environ.get("CASTOR_RUN") == "0":
+        return "the run tier is off (CASTOR_RUN=0)."
+    raw = os.environ.get("CASTOR_RUN_ROOTS", "")
+    roots = [Path(p).expanduser() for p in raw.split(os.pathsep) if p]
+    if not roots:
+        return (
+            "CASTOR_RUN_ROOTS is not set: list the project roots allowed "
+            "to run commands in the castor MCP registration."
+        )
+    target = root.resolve()
+    for allowed in roots:
+        if target.is_relative_to(allowed.resolve()):
+            return None
+    return f"{str(root)!r} is not inside CASTOR_RUN_ROOTS."
+
+
+def _run_config(root: Path) -> tuple[RunConfig | None, str | None]:
+    """Read and check `root/.castor/run.json`.
+
+    Args:
+        root: The project root.
+
+    Returns:
+        (config, None), or (None, a sentence naming the bad key).
+    """
+    path = root / RUN_CONFIG_FILE
+    if not path.is_file():
+        return None, f"no {RUN_CONFIG_FILE} in {str(root)!r}; no runs."
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, f"{RUN_CONFIG_FILE} is not valid JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, f"{RUN_CONFIG_FILE} must hold a JSON object."
+    unknown = sorted(set(data) - RUN_CONFIG_KEYS)
+    if unknown:
+        return None, f"unknown key(s) in {RUN_CONFIG_FILE}: {unknown}"
+    try:
+        cfg = _run_config_from(data)
+    except ValueError as exc:
+        return None, f"{RUN_CONFIG_FILE}: {exc}"
+    if cfg.overdue_command:
+        _, error = _run_resolve_command(root, cfg, list(cfg.overdue_command))
+        if error:
+            return None, f"{RUN_CONFIG_FILE}: overdue_command: {error}"
+    return cfg, None
+
+
+def _run_config_from(data: dict) -> RunConfig:
+    """Build a RunConfig from the file's object; ValueError names a key."""
+    allow = _run_str_list(data.get("allow"), "allow")
+    if not allow:
+        raise ValueError("allow must list at least one glob.")
+    env_file = data.get("env_file")
+    if env_file is not None and not isinstance(env_file, str):
+        raise ValueError("env_file must be a string.")
+    overdue = data.get("overdue_command")
+    if overdue is not None:
+        overdue = tuple(_run_str_list(overdue, "overdue_command"))
+    return RunConfig(
+        allow=tuple(allow),
+        env_file=env_file or None,
+        log_line=_run_regex(
+            data.get("log_line", RUN_DEFAULT_LOG_LINE), "log_line"
+        ),
+        overdue_command=overdue or None,
+        grace_minutes=_run_number(
+            data, "grace_minutes", RUN_DEFAULT_GRACE_MINUTES, minimum=0
+        ),
+        max_hours=_run_number(data, "max_hours", RUN_DEFAULT_MAX_HOURS),
+        max_running=int(
+            _run_number(data, "max_running", RUN_DEFAULT_MAX_RUNNING)
+        ),
+        flags=tuple(_run_flags(data.get("flags", []))),
+    )
+
+
+def _run_str_list(value: Any, key: str) -> list[str]:
+    """A list of non-empty strings, or ValueError naming `key`."""
+    if not isinstance(value, list) or not all(
+        isinstance(v, str) and v for v in value
+    ):
+        raise ValueError(f"{key} must be a list of non-empty strings.")
+    return value
+
+
+def _run_regex(value: Any, key: str) -> re.Pattern:
+    """A compiled pattern, or ValueError naming `key`."""
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a regex string.")
+    try:
+        return re.compile(value)
+    except re.error as exc:
+        raise ValueError(f"{key} is not a valid regex: {exc}") from None
+
+
+def _run_number(
+    data: dict, key: str, default: float, minimum: float | None = None
+) -> float:
+    """A number above 0 (or at least `minimum`), or ValueError naming key."""
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be a number.")
+    if (minimum is None and value <= 0) or (
+        minimum is not None and value < minimum
+    ):
+        raise ValueError(f"{key} is out of range: {value}.")
+    return float(value)
+
+
+def _run_flags(value: Any) -> list[RunFlag]:
+    """The flags list, or ValueError naming the bad entry."""
+    if not isinstance(value, list):
+        raise ValueError("flags must be a list.")
+    flags = []
+    for i, entry in enumerate(value):
+        key = f"flags[{i}]"
+        if not isinstance(entry, dict) or not isinstance(
+            entry.get("name"), str
+        ):
+            raise ValueError(f"{key} needs a name and a pattern.")
+        extra = sorted(set(entry) - {"name", "pattern", "stop"})
+        if extra:
+            raise ValueError(f"{key} has unknown key(s): {extra}")
+        stop = entry.get("stop", False)
+        if not isinstance(stop, bool):
+            raise ValueError(f"{key}.stop must be true or false.")
+        pattern = _run_regex(entry.get("pattern"), f"{key}.pattern")
+        flags.append(RunFlag(entry["name"], pattern, stop))
+    return flags
+
+
+def _run_resolve_command(
+    root: Path, cfg: RunConfig, command: list[str]
+) -> tuple[list[str] | None, str | None]:
+    """Check a command against the allowlist and resolve its path.
+
+    Args:
+        root: The project root.
+        cfg: The project's run config.
+        command: The program (relative to `root` or absolute) and its
+            arguments.
+
+    Returns:
+        (argv with the program as its resolved absolute path, None), or
+        (None, the reason it is refused).
+    """
+    if not command or not command[0]:
+        return None, "the command is empty."
+    base = root.resolve()
+    program = Path(command[0]).expanduser()
+    resolved = (program if program.is_absolute() else base / program).resolve()
+    if not resolved.is_relative_to(base):
+        return None, f"{command[0]!r} resolves outside the project."
+    if not resolved.is_file():
+        return None, f"{command[0]!r} is not a file."
+    if not os.access(resolved, os.X_OK):
+        return None, f"{command[0]!r} is not executable."
+    rel = resolved.relative_to(base).as_posix()
+    if not any(fnmatch.fnmatchcase(rel, glob) for glob in cfg.allow):
+        return None, f"{rel!r} is not in {RUN_CONFIG_FILE}'s allow list."
+    return [str(resolved), *command[1:]], None
+
+
 def _register_gated(fns: tuple[Any, ...], env: str) -> None:
     """Register tools whose eval gate has not passed only when env is "1".
 
