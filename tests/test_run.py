@@ -63,7 +63,36 @@ def test_run_root_must_be_listed(tmp_path, monkeypatch):
     monkeypatch.setenv("CASTOR_RUN_ROOTS", str(tmp_path / "other"))
     assert server._run_enabled_for(tmp_path) is not None
     monkeypatch.setenv("CASTOR_RUN_ROOTS", f"/nope:{tmp_path}")
+    assert server._run_enabled_for(tmp_path) is None
+
+
+def test_run_root_inside_a_listed_folder_is_refused(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    monkeypatch.delenv("CASTOR_RUN", raising=False)
+    monkeypatch.setenv("CASTOR_RUN_ROOTS", str(tmp_path))
+    assert "CASTOR_RUN_ROOTS" in server._run_enabled_for(clone)
+
+
+def test_run_root_worktree_of_a_listed_repo_allowed(tmp_path, monkeypatch):
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q")
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "t")
+    (main / "f.txt").write_text("x\n")
+    _git(main, "add", "-A")
+    _git(main, "commit", "-qm", "init")
+    _git(main, "worktree", "add", "-q", str(tmp_path / "lane"))
+    monkeypatch.delenv("CASTOR_RUN", raising=False)
+    monkeypatch.setenv("CASTOR_RUN_ROOTS", str(main))
     assert server._run_enabled_for(tmp_path / "lane") is None
+
+
+def test_run_roots_must_be_absolute(tmp_path, monkeypatch):
+    monkeypatch.delenv("CASTOR_RUN", raising=False)
+    monkeypatch.setenv("CASTOR_RUN_ROOTS", f"rel:{tmp_path}")
+    assert "absolute" in server._run_enabled_for(tmp_path)
 
 
 def test_run_off_switch(tmp_path, monkeypatch):
@@ -258,8 +287,10 @@ def _poll_json(run_id: str, timeout: float = 5.0) -> dict:
     end = time.monotonic() + timeout
     while True:
         out = json.loads(server.gemini_poll(run_id))
-        if out["status"] != "running" or time.monotonic() > end:
+        if out["status"] != "running":
             return out
+        if time.monotonic() > end:
+            raise AssertionError(f"{run_id} still running: {out}")
         time.sleep(0.02)
 
 
@@ -380,10 +411,11 @@ def started():
     recs: list[dict] = []
     yield recs
     for rec in recs:
-        try:
-            os.killpg(rec["pid"], signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        if server._run_alive(rec):  # never signal a reused pid
+            try:
+                os.killpg(rec["pid"], signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         _join_monitor(rec["run"])
         try:
             os.waitpid(rec["pid"], os.WNOHANG)
@@ -1024,3 +1056,68 @@ def test_compare_makes_no_nim_request(tmp_path, monkeypatch):
     a = _write_log(tmp_path / "a.log", ("PASS", "x", "1"))
     b = _write_log(tmp_path / "b.log", ("FAIL", "x", "1"))
     assert "x [regressed]" in server.castor_compare_runs(str(tmp_path), [a, b])
+
+
+# --- final review fixes ----------------------------------------------------
+
+
+def test_second_server_does_not_watch_a_watched_run(project, fast, started):
+    _script(
+        project / "t" / "dialog.sh",
+        "echo x >> count.txt\necho 'dialog: none'\n",
+    )
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "overdue_command": ["t/dialog.sh"],
+            "grace_minutes": 0.001,
+            "max_hours": 1000,
+        },
+    )
+    _script(project / "t" / "slow.sh", "sleep 1\nexit 3\n")
+    rec = _start(project, started, ["t/slow.sh"], expect=1)
+    first = server._run_monitors[rec["run"]]
+    server._run_monitors.clear()  # what another server process sees
+    assert server._run_attach(rec["run"]) is None
+    first.join(timeout=5)
+    out = _poll_json(rec["run"])
+    assert out["status"] == "done" and out["exit_code"] == 3, out
+    assert (project / "count.txt").read_text() == "x\n"
+
+
+def test_live_stopped_run_counts_toward_max_running(project, fast, started):
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "max_running": 1,
+            "flags": [{"name": "refused", "pattern": "REFUSED", "stop": True}],
+        },
+    )
+    _script(project / "t" / "refuse.sh", "echo REFUSED\nsleep 30\n")
+    first = _tool_start(project, started, ["t/refuse.sh"])
+    assert _poll_json(first)["status"] == "stopped"
+    out = server.castor_run_start(str(project), ["t/ok.sh"], 5)
+    assert out.startswith("[Error:") and first in out
+
+
+def test_overdue_respects_the_off_switch(project, fast, started, monkeypatch):
+    _script(project / "t" / "dialog.sh", "echo x >> count.txt\n")
+    _write_config(
+        project,
+        {
+            "allow": ["t/*.sh"],
+            "overdue_command": ["t/dialog.sh"],
+            "grace_minutes": 0.001,
+            "max_hours": 1000,
+        },
+    )
+    _script(project / "t" / "slow.sh", "sleep 1\n")
+    monkeypatch.setattr(server, "RUN_POLL_S", 0.3)
+    rec = _start(project, started, ["t/slow.sh"], expect=100)
+    monkeypatch.setenv("CASTOR_RUN", "0")
+    out = _poll_json(rec["run"])
+    assert out["overdue"]["exit_code"] is None, out
+    assert "CASTOR_RUN=0" in out["overdue"]["output"]
+    assert not (project / "count.txt").exists()

@@ -9809,11 +9809,17 @@ def _run_enabled_for(root: Path) -> str | None:
             "CASTOR_RUN_ROOTS is not set: list the project roots allowed "
             "to run commands in the castor MCP registration."
         )
+    relative = [str(r) for r in roots if not r.is_absolute()]
+    if relative:
+        return f"CASTOR_RUN_ROOTS entries must be absolute: {relative}."
     target = root.resolve()
     for allowed in roots:
-        if target.is_relative_to(allowed.resolve()):
+        if target in _worktree_roots(allowed):
             return None
-    return f"{str(root)!r} is not inside CASTOR_RUN_ROOTS."
+    return (
+        f"{str(root)!r} is not a CASTOR_RUN_ROOTS entry or a git worktree "
+        "of one."
+    )
 
 
 def _run_config(root: Path) -> tuple[RunConfig | None, str | None]:
@@ -10044,7 +10050,9 @@ def _run_record_write(rec: dict) -> None:
     path = _run_record_path(rec)
     path.parent.mkdir(parents=True, exist_ok=True)
     _run_prune(path.parent)
-    tmp = path.with_suffix(".json.tmp")
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -10150,20 +10158,54 @@ def _run_progress(rec: dict) -> dict:
 def _run_attach(
     run_id: str, proc: subprocess.Popen | None = None
 ) -> threading.Thread | None:
-    """Start a monitor for a run unless one is already watching it."""
+    """Start a monitor for a run unless one is already watching it.
+
+    The monitor holds an exclusive lock on the run's lock file for its
+    life, so a second Castor process (another Claude session) never
+    watches the same run; the kernel drops the lock when its holder
+    dies, so a restarted server can take over.
+    """
     with _run_monitors_lock:
         current = _run_monitors.get(run_id)
         if current is not None and current.is_alive():
             return None
+        lock = _run_lock(run_id)
+        if lock is None:
+            return None
         thread = threading.Thread(
-            target=_run_monitor,
-            args=(run_id, proc),
+            target=_run_monitor_locked,
+            args=(run_id, proc, lock),
             name=f"castor-{run_id}",
             daemon=True,
         )
         _run_monitors[run_id] = thread
         thread.start()
     return thread
+
+
+def _run_lock(run_id: str) -> int | None:
+    """An fd holding the run's exclusive lock, or None when it is held."""
+    import fcntl  # POSIX only, like the run tier
+
+    folder = _runs_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    fd = os.open(folder / f"{run_id}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _run_monitor_locked(
+    run_id: str, proc: subprocess.Popen | None, lock: int
+) -> None:
+    """_run_monitor, releasing the run's lock when it returns."""
+    try:
+        _run_monitor(run_id, proc)
+    finally:
+        os.close(lock)
 
 
 def _run_exit(
@@ -10517,6 +10559,9 @@ def _run_overdue(rec: dict, cfg: RunConfig) -> dict:
     """
     root = Path(rec["root"])
     at_s = int(time.time() - rec["started_at"])
+    off = _run_enabled_for(root)
+    if off:
+        return {"at_s": at_s, "exit_code": None, "output": f"not run: {off}"}
     argv, error = _run_resolve_command(root, cfg, list(cfg.overdue_command))
     if argv is None:
         return {"at_s": at_s, "exit_code": None, "output": error}
@@ -10648,7 +10693,8 @@ def _run_capacity_error(root: Path, cfg: RunConfig) -> str | None:
     live = [
         r["run"]
         for r in _run_records(root)
-        if r.get("status") == "running" and _run_alive(r)
+        if r.get("status") in ("running", "stopped", "gave_up")
+        and _run_alive(r)
     ]
     if len(live) < cfg.max_running:
         return None
