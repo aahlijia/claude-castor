@@ -2230,10 +2230,12 @@ def gemini_start(
 
 @mcp.tool()
 def gemini_poll(job_id: str) -> str:
-    """Check a background job started with gemini_start.
+    """Check a background job (gemini_start, nim_*_start) or a run.
 
     Args:
-        job_id: The id returned by gemini_start.
+        job_id: The id returned by gemini_start or a *_start tool, or a
+            run id (`run-...`) from castor_run_start. A run returns JSON:
+            progress while it runs, then its result.
 
     Returns:
         While running, a bracketed status with elapsed seconds. When done,
@@ -2267,7 +2269,7 @@ def gemini_poll(job_id: str) -> str:
 
 @mcp.tool()
 def gemini_jobs() -> str:
-    """List background jobs and their status.
+    """List background jobs and their status (runs: castor_runs).
 
     Returns:
         One line per job (id, status, age/duration), newest last, or a
@@ -10556,6 +10558,133 @@ def _run_triage(root: Path, log: str) -> dict:
         return json.loads(text)
     except Exception as exc:  # triage is a bonus; the run result stands
         return {"error": "failed", "message": str(exc)}
+
+
+RUN_LABEL_CHARS = 60
+
+
+@mcp.tool()
+def castor_run_start(
+    cwd: str,
+    command: list[str],
+    expect_minutes: int,
+    triage: bool = True,
+    label: str | None = None,
+) -> str:
+    """Run an allowlisted suite command in the background and report it.
+
+    Needs two keys: the project's committed `.castor/run.json` (allow
+    globs, flags, limits) and `cwd` inside CASTOR_RUN_ROOTS in the castor
+    registration. The command runs in its own session with NVIDIA_* and
+    CASTOR_* removed from its environment; Castor watches its output and
+    never kills it. Not a shell: the command is a script path the allow
+    list names, plus its arguments.
+
+    Args:
+        cwd: Absolute project root.
+        command: The script (relative to `cwd` or absolute) and its
+            arguments, one list item each.
+        expect_minutes: How long the run should take. Past this plus the
+            config's grace minutes, the config's overdue command runs once.
+        triage: Triage the log with a NIM agent when a row fails or is not
+            assessed (default true).
+        label: A short name for castor_runs (default: the command).
+
+    Returns:
+        "Run <id> started: <label>; collect it with gemini_poll(...)", or a
+        bracketed error.
+    """
+    error = _run_start_error(cwd, command, expect_minutes)
+    if error:
+        return f"[Error: {error}]"
+    root = Path(cwd).expanduser()
+    cfg, error = _run_config(root)
+    if cfg is None:
+        return f"[Error: {error}]"
+    argv, error = _run_resolve_command(root, cfg, command)
+    if argv is None:
+        return f"[Error: {error}]"
+    error = _run_capacity_error(root, cfg)
+    if error:
+        return f"[Error: {error}]"
+    name = (label or " ".join([Path(command[0]).name, *command[1:]]))[
+        :RUN_LABEL_CHARS
+    ]
+    rec, error = _run_begin(
+        root, cfg, argv, command, name, expect_minutes, triage
+    )
+    if rec is None:
+        return f"[Error: {error}]"
+    run_id = rec["run"]
+    return (
+        f"Run {run_id} started: {name}; collect it with "
+        f'gemini_poll("{run_id}").'
+    )
+
+
+def _run_start_error(
+    cwd: str, command: list[str], expect_minutes: int
+) -> str | None:
+    """The input error for castor_run_start, before any file is read."""
+    if not command or not all(isinstance(c, str) for c in command):
+        return "the command is empty or not a list of strings."
+    if isinstance(expect_minutes, bool) or not isinstance(
+        expect_minutes, (int, float)
+    ):
+        return "expect_minutes must be a number of minutes."
+    if expect_minutes <= 0:
+        return "expect_minutes must be above 0."
+    root = Path(cwd).expanduser()
+    if not root.is_absolute():
+        return f"cwd must be an absolute path, not {cwd!r}."
+    if not root.is_dir():
+        return f"{cwd!r} is not a directory."
+    return _run_enabled_for(root)
+
+
+def _run_capacity_error(root: Path, cfg: RunConfig) -> str | None:
+    """An error naming the live runs when max_running are going."""
+    live = [
+        r["run"]
+        for r in _run_records(root)
+        if r.get("status") == "running" and _run_alive(r)
+    ]
+    if len(live) < cfg.max_running:
+        return None
+    return (
+        f"{len(live)} run(s) already going under this root (max_running "
+        f"{cfg.max_running}): {', '.join(live)}. Collect them with "
+        "gemini_poll first."
+    )
+
+
+@mcp.tool()
+def castor_runs(cwd: str | None = None) -> str:
+    """List the runs on record (kept 30 days), newest first.
+
+    Args:
+        cwd: A project root to list runs for; all runs when omitted.
+
+    Returns:
+        One line per run: id, status, label, elapsed or wall seconds,
+        verdict (or -); or "No runs on record."
+    """
+    root = Path(cwd).expanduser() if cwd else None
+    recs = _run_records(root)
+    if not recs:
+        return "No runs on record."
+    return "\n".join(_run_line(rec) for rec in recs)
+
+
+def _run_line(rec: dict) -> str:
+    """One castor_runs line for a record."""
+    result = rec.get("result") or {}
+    if rec.get("status") == "running":
+        secs = int(time.time() - rec["started_at"])
+    else:
+        secs = result.get("wall_s", 0)
+    verdict = result.get("verdict") or "-"
+    return f"{rec['run']} {rec['status']} {rec['label']} {secs}s {verdict}"
 
 
 def _register_gated(fns: tuple[Any, ...], env: str) -> None:

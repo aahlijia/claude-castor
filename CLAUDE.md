@@ -229,6 +229,50 @@ http for localhost), `CASTOR_NIM_MAX_INPUT_CHARS`, `CASTOR_NIM_MAX_TOKENS`,
 (`_summarize_text_nim`), so NIM-only users never need agy. `gemini_status` adds
 a one-line `nvidia_nim:` summary (no network call).
 
+### Run tier
+
+Castor's one path that runs project commands: an allowlisted suite script
+started in the background and reported when it ends (replaces a subagent
+that waits on a long run). Two keys open it, and both are needed:
+
+- the project commits `.castor/run.json`: `allow` (globs relative to the
+  root, matched against the resolved script path, which must be an
+  executable file inside the root), optional `env_file` (sourced before the
+  command; must be inside the root), `log_line` (regex whose group 1 is the
+  log path the suite prints, default `^log: (.+)$`), `overdue_command` (run
+  once at `expect_minutes + grace_minutes` while no verdict table is out),
+  `grace_minutes` (10), `max_hours` (8), `max_running` (4) and `flags`
+  (`{name, pattern, stop}`, matched on whole console lines). Unknown keys
+  and bad regexes are errors.
+- the castor registration lists the root in `CASTOR_RUN_ROOTS`
+  (colon-separated absolute paths), so a cloned repo cannot authorize
+  itself. `CASTOR_RUN=0` turns the tier off. POSIX only.
+
+The command runs as `bash -c '<source env>; exec "$@"'` with the arguments
+as positional parameters (no shell parsing), in its own session, with
+every `NVIDIA_*` and `CASTOR_*` variable removed. **Castor never kills,
+signals or restarts a process**: a stop flag, `max_hours` or an overdue run
+ends the watching, not the run, and the result gives the `pid`. Records and
+captures live in `~/.cache/claude-castor/runs/` (30 days), so a run
+survives a server restart: `gemini_poll` reattaches when the pid is alive
+with its recorded start time, else finishes the run from its capture
+(`exit_code` null; `lost` with no table).
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `castor_run_start` | `(cwd, command, expect_minutes, triage=True, label=None)` | Start a run; collect it with `gemini_poll("run-...")`. Refuses past `max_running` live runs under the root, naming them |
+| `castor_runs` | `(cwd=None)` | Runs on record, newest first: id, status, label, seconds, verdict |
+
+`gemini_poll` on a run id returns progress (`run`, `status`, `elapsed_s`,
+`pid`, `flags`, `overdue`) and then the result: `status` (`done`,
+`stopped`, `gave_up`, `lost`), `command`, `cwd`, `exit_code`, `wall_s`,
+`verdict` (exit 0 passed, 1 failed, 2 inconclusive, else from the totals),
+`totals`, `rows` (FAIL and NOT ASSESSED rows, from the printed log when it
+resolves inside the root, else from the console), `table` (the last
+`--- verdicts ---` block), `log`, `flags`, `overdue`, `triage` (phase 1's
+triage JSON when a row failed and `triage=True`, or an error object) and
+`pid` for `stopped` / `gave_up`.
+
 ### `gemini_cache_clear`
 
 Deletes all cached Antigravity responses. `gemini_prompt` reuses a stored

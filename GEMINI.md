@@ -406,6 +406,28 @@ Rules of thumb:
 
 ---
 
+## Runs (`castor_run_start`)
+
+Use `castor_run_start` for a long suite command (a playtest suite, a
+nightly check) instead of a subagent or a shell that waits on it: Castor
+watches the run, and `gemini_poll("run-...")` returns progress, then the
+verdict, failing rows, the verdict table, flags and a triage of the log.
+It is not a shell. The project must commit `.castor/run.json` naming the
+scripts it allows, and the user must list the root in `CASTOR_RUN_ROOTS`;
+without both it refuses, and the refusal says which key is missing.
+
+- Pass the script and its arguments as list items; nothing is parsed by a
+  shell.
+- Set `expect_minutes` honestly: past it plus the config's grace, the
+  config's overdue command runs once (a dialog check, say) and the run
+  keeps going.
+- Castor never kills a run. `stopped` (a stop flag) and `gave_up`
+  (`max_hours`) mean Castor stopped watching; the result gives the `pid`
+  and the decision is yours.
+- `castor_runs` lists the runs on record; poll the ids you still need.
+
+---
+
 ## Quick Reference
 
 | Situation | What to do |
