@@ -5000,29 +5000,10 @@ def test_explain_row_start_refuses_bad_row(captured, repo):
     assert out.startswith("[Error") and "passed" in out
 
 
-def test_explain_row_registers_only_with_its_env(monkeypatch):
-    from fastmcp import FastMCP
-
-    fns = (server.nim_explain_row, server.nim_explain_row_start)
-    monkeypatch.setattr(server, "mcp", FastMCP("explain-off"))
-    monkeypatch.delenv("CASTOR_NIM_EXPLAIN_ROW", raising=False)
-    server._register_gated(fns, "CASTOR_NIM_EXPLAIN_ROW")
-    assert "nim_explain_row" not in _registered_tool_names()
-    monkeypatch.setattr(server, "mcp", FastMCP("explain-on"))
-    monkeypatch.setenv("CASTOR_NIM_EXPLAIN_ROW", "1")
-    server._register_gated(fns, "CASTOR_NIM_EXPLAIN_ROW")
+def test_explain_row_registered_on_the_real_server():
     assert {"nim_explain_row", "nim_explain_row_start"} <= (
         _registered_tool_names()
     )
-
-
-@pytest.mark.skipif(
-    os.environ.get("CASTOR_NIM_EXPLAIN_ROW") is not None,
-    reason="CASTOR_NIM_EXPLAIN_ROW is set, so the server registered it",
-)
-def test_explain_row_unregistered_on_the_real_server():
-    assert "nim_explain_row" not in _registered_tool_names()
-    assert "nim_explain_row_start" not in _registered_tool_names()
 
 
 # --- verdict rows without case stamps ----------------------------------------
