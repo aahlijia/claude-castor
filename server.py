@@ -10871,6 +10871,121 @@ def _trial_diff(ref: RowRun, run: RowRun, limit: int) -> list[str]:
     return out
 
 
+COMPARE_MAX_LOGS = 12
+COMPARE_MAX_LOG_BYTES = 50_000_000
+_LOG_STAMP_RE = re.compile(r"\d{8}-\d{6}")
+
+
+@mcp.tool()
+def castor_compare_runs(
+    cwd: str,
+    logs: list[str],
+    rows: list[str] | None = None,
+    same_code: bool = False,
+) -> str:
+    """Compare suite logs row by row: what regressed, what is flaky.
+
+    No model reads anything: Castor parses the verdict rows and classes
+    each row (name and occurrence) across the runs.
+
+    Args:
+        cwd: Absolute project root. Each log must be inside it or inside a
+            worktree of the same git repo.
+        logs: Two or more logs, oldest first (absolute or relative to
+            `cwd`); each is labelled by its YYYYMMDD-HHMMSS file-name stamp,
+            else run1, run2, ...
+        rows: Only rows whose name equals or contains one of these.
+        same_code: True when no fix landed between the runs, so a row that
+            both passed and failed is flaky rather than fixed or regressed.
+
+    Returns:
+        One block per row that changed (regressed, flaky, failing,
+        not_assessed, numbers_changed, missing, fixed): a line per run,
+        then the trial lines that differ from the first run's (timings
+        masked). The last line counts rows per class. Or a bracketed error.
+    """
+    root = Path(cwd).expanduser()
+    if not root.is_absolute() or not root.is_dir():
+        return f"[Error: cwd must be an absolute directory, not {cwd!r}.]"
+    if len(logs) < 2 or len(logs) > COMPARE_MAX_LOGS:
+        return f"[Error: give two logs to {COMPARE_MAX_LOGS}, oldest first.]"
+    runs, error = _compare_read_logs(root, logs)
+    if error:
+        return f"[Error: {error}]"
+    found = _compare_rows(runs, same_code)
+    if rows:
+        found = [r for r in found if any(w in r.name for w in rows)]
+    return _compare_text(found)
+
+
+def _compare_read_logs(
+    root: Path, logs: list[str]
+) -> tuple[list[tuple[str, list[str]]], str | None]:
+    """(label, lines) per log, or the first log's error."""
+    allowed = _worktree_roots(root)
+    runs = []
+    labels: set[str] = set()
+    for i, raw in enumerate(logs):
+        path, error = _compare_log_path(root, allowed, raw)
+        if path is None:
+            return [], error
+        data = _read_bytes(path)
+        if data is None:
+            return [], f"{raw!r} is unreadable."
+        label = _log_label(path, i)
+        if label in labels:
+            label = f"{label}#{i + 1}"
+        labels.add(label)
+        runs.append(
+            (label, data.decode("utf-8", errors="replace").splitlines())
+        )
+    return runs, None
+
+
+def _compare_log_path(
+    root: Path, allowed: list[Path], raw: str
+) -> tuple[Path | None, str | None]:
+    """A log as a file inside `allowed`, or the reason it is refused."""
+    path = Path(raw).expanduser()
+    full = (path if path.is_absolute() else root / path).resolve()
+    if not any(full.is_relative_to(a) for a in allowed):
+        return None, f"{raw!r} is outside cwd and its repo's worktrees."
+    if not full.is_file():
+        return None, f"{raw!r} is not a file."
+    if full.stat().st_size > COMPARE_MAX_LOG_BYTES:
+        return None, f"{raw!r} is over {COMPARE_MAX_LOG_BYTES:,} bytes."
+    return full, None
+
+
+def _worktree_roots(root: Path) -> list[Path]:
+    """`root` plus every worktree of its git repo, resolved."""
+    roots = [root.resolve()]
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return roots
+    if out.returncode != 0:
+        return roots
+    roots.extend(
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in out.stdout.splitlines()
+        if line.startswith("worktree ")
+    )
+    return roots
+
+
+def _log_label(path: Path, index: int) -> str:
+    """The file name's YYYYMMDD-HHMMSS stamp, else run<index+1>."""
+    stamp = _LOG_STAMP_RE.search(path.name)
+    return stamp.group(0) if stamp else f"run{index + 1}"
+
+
 def _register_gated(fns: tuple[Any, ...], env: str) -> None:
     """Register tools whose eval gate has not passed only when env is "1".
 

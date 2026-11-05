@@ -921,3 +921,106 @@ def test_compare_text_absent_run_and_no_rows():
     text = server._compare_text(server._compare_rows(runs))
     assert "  run2 (absent)" in text.splitlines()
     assert server._compare_text([]) == "rows: none differ"
+
+
+# --- Task 6: castor_compare_runs ---------------------------------------------
+
+
+def _write_log(path: Path, *rows: tuple) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(_log(*rows)) + "\n")
+    return str(path)
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def test_compare_tool_registered():
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert "castor_compare_runs" in names
+
+
+def test_compare_needs_two_logs(tmp_path):
+    one = _write_log(tmp_path / "a.log", ("PASS", "x", "1"))
+    out = server.castor_compare_runs(str(tmp_path), [one])
+    assert out.startswith("[Error:") and "two logs" in out
+    out = server.castor_compare_runs("rel", [one, one])
+    assert out.startswith("[Error:") and "absolute" in out
+
+
+def test_compare_labels_logs_by_stamp(tmp_path):
+    a = _write_log(
+        tmp_path / "Library" / "s" / "tops-20261104-010203.log",
+        ("PASS", "x", "1"),
+    )
+    _write_log(tmp_path / "b.log", ("FAIL", "x", "1"))
+    out = server.castor_compare_runs(str(tmp_path), [a, "b.log"])
+    assert "  20261104-010203 PASS 1" in out.splitlines()
+    assert "  run2 FAIL 1" in out.splitlines()
+    assert out.splitlines()[-1] == "rows: 1 regressed"
+
+
+def test_compare_log_in_sibling_worktree_allowed(tmp_path):
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q")
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "t")
+    (main / "f.txt").write_text("x\n")
+    _git(main, "add", "-A")
+    _git(main, "commit", "-qm", "init")
+    _git(main, "worktree", "add", "-q", str(tmp_path / "lane"))
+    a = _write_log(main / "a.log", ("PASS", "x", "1"))
+    b = _write_log(tmp_path / "lane" / "b.log", ("FAIL", "x", "1"))
+    out = server.castor_compare_runs(str(main), [a, b])
+    assert not out.startswith("[Error"), out
+    assert "x [regressed]" in out
+
+
+def test_compare_log_outside_refused(tmp_path):
+    proj = tmp_path / "proj"
+    a = _write_log(proj / "a.log", ("PASS", "x", "1"))
+    b = _write_log(tmp_path / "elsewhere.log", ("FAIL", "x", "1"))
+    out = server.castor_compare_runs(str(proj), [a, b])
+    assert out.startswith("[Error:") and "outside" in out
+    out = server.castor_compare_runs(str(proj), [a, "missing.log"])
+    assert out.startswith("[Error:") and "not a file" in out
+
+
+def test_compare_rows_filter(tmp_path):
+    a = _write_log(
+        tmp_path / "a.log", ("PASS", "tops: x", "1"), ("PASS", "doors: y", "1")
+    )
+    b = _write_log(
+        tmp_path / "b.log", ("FAIL", "tops: x", "1"), ("FAIL", "doors: y", "1")
+    )
+    out = server.castor_compare_runs(str(tmp_path), [a, b], rows=["tops:"])
+    assert "tops: x [regressed]" in out and "doors" not in out
+    assert out.splitlines()[-1] == "rows: 1 regressed"
+
+
+def test_compare_same_code_flag(tmp_path):
+    a = _write_log(tmp_path / "a.log", ("FAIL", "x", "1"))
+    b = _write_log(tmp_path / "b.log", ("PASS", "x", "1"))
+    c = _write_log(tmp_path / "c.log", ("PASS", "x", "1"))
+    logs = [a, b, c]
+    assert "x [fixed]" in server.castor_compare_runs(str(tmp_path), logs)
+    assert "x [flaky]" in server.castor_compare_runs(
+        str(tmp_path), logs, same_code=True
+    )
+
+
+def test_compare_makes_no_nim_request(tmp_path, monkeypatch):
+    def no_request(*_a: object, **_k: object) -> None:
+        raise AssertionError("castor_compare_runs called NIM")
+
+    monkeypatch.setattr(server, "_nim_request", no_request)
+    a = _write_log(tmp_path / "a.log", ("PASS", "x", "1"))
+    b = _write_log(tmp_path / "b.log", ("FAIL", "x", "1"))
+    assert "x [regressed]" in server.castor_compare_runs(str(tmp_path), [a, b])
