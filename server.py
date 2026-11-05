@@ -10755,8 +10755,11 @@ COMPARE_CLASS_ORDER = (
 )
 COMPARE_MAX_TRIAL_LINES = 12
 COMPARE_LINE_CHARS = 300
+_CLOCK_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\b")
 _DECIMAL_RE = re.compile(r"\d+\.\d+")
-_INTEGER_RE = re.compile(r"\d+")
+# "2 of 3": the counts a numbers_changed row compares. Other integers in
+# a detail are measurements that move every run.
+_COUNT_RE = re.compile(r"\b(\d+) of (\d+)\b")
 
 
 @dataclass(frozen=True)
@@ -10778,9 +10781,9 @@ class RowCompare:
     runs: tuple[RowRun, ...]
 
 
-def _mask_decimals(text: str) -> str:
-    """Every decimal number becomes `#`: timings move every run."""
-    return _DECIMAL_RE.sub("#", text)
+def _mask_timings(text: str) -> str:
+    """Clock stamps and decimal numbers become `#`: they move every run."""
+    return _DECIMAL_RE.sub("#", _CLOCK_RE.sub("#", text))
 
 
 def _compare_rows(
@@ -10835,9 +10838,7 @@ def _compare_class(runs: tuple[RowRun, ...], same_code: bool) -> str:
         return "failing"
     if any(r.status == "NOT ASSESSED" for r in present):
         return "not_assessed"
-    numbers = {
-        tuple(_INTEGER_RE.findall(_mask_decimals(r.detail))) for r in present
-    }
+    numbers = {tuple(_COUNT_RE.findall(r.detail)) for r in present}
     if len(numbers) > 1:
         return "numbers_changed"
     if len(present) < len(runs):
@@ -10900,7 +10901,7 @@ def _trial_diff(ref: RowRun, run: RowRun, limit: int) -> list[str]:
         a = ref.trials[i] if i < len(ref.trials) else None
         b = run.trials[i] if i < len(run.trials) else None
         if a is not None and b is not None:
-            if _mask_decimals(a) != _mask_decimals(b):
+            if _mask_timings(a) != _mask_timings(b):
                 differ.append(b)
         elif b is not None:
             differ.append(b)

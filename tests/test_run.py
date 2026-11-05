@@ -454,8 +454,10 @@ def test_run_args_reach_script_literally(project, fast, started):
     _script(project / "t" / "args.sh", "printf '%s\\n' \"$@\" > args.txt\n")
     args = ["; touch pwned", "$(id)", "a'b"]
     rec = _start(project, started, ["t/args.sh", *args])
-    assert _poll_json(rec["run"])["status"] == "done"
-    assert (project / "args.txt").read_text().splitlines() == args
+    out = _poll_json(rec["run"])
+    assert out["status"] == "done", out
+    written = (project / "args.txt").read_text().splitlines()
+    assert written == args, (written, Path(rec["capture"]).read_text(), out)
     assert not (project / "pwned").exists()
 
 
@@ -845,9 +847,41 @@ def test_compare_numbers_changed_ignores_decimals():
     assert klass("3 of 3 trials 0.12 s", "2 of 3 trials 0.12 s") == (
         "numbers_changed"
     )
-    assert server._mask_decimals("took 0.12 s, 3 of 4, 10.5") == (
+    assert server._mask_timings("took 0.12 s, 3 of 4, 10.5") == (
         "took # s, 3 of 4, #"
     )
+
+
+def test_mask_timings_covers_clock_stamps():
+    assert server._mask_timings("[02:41:07] trial 1 at 9:05, 12:34:56.78") == (
+        "[#] trial 1 at #, #"
+    )
+
+
+def test_compare_text_ignores_clock_stamps():
+    runs = [
+        ("run1", _log(("FAIL", "x", "1 of 3", ["[02:41:07] trial 1: off"]))),
+        ("run2", _log(("PASS", "x", "3 of 3", ["[03:10:55] trial 1: off"]))),
+    ]
+    text = server._compare_text(server._compare_rows(runs))
+    assert "  run2 trial lines match run1 apart from timings" in text
+
+
+def test_compare_numbers_changed_only_on_counts():
+    def klass(a: str, b: str) -> str:
+        runs = [
+            ("run1", _log(("PASS", "x", a))),
+            ("run2", _log(("PASS", "x", b))),
+        ]
+        return server._compare_rows(runs)[0].klass
+
+    assert klass("Sharp contacts 110 128 141", "Sharp contacts 99 12 7") == (
+        "same"
+    )
+    assert klass("3 of 3 trials, 110 contacts", "2 of 3 trials, 99") == (
+        "numbers_changed"
+    )
+    assert klass("3 of 3 trials", "3 of 4 trials") == "numbers_changed"
 
 
 def test_compare_missing_by_occurrence():
