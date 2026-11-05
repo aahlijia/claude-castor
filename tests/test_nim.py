@@ -4978,9 +4978,9 @@ def test_explain_row_caps_steps(captured, repo):
 
 def test_explain_row_format_rejects_unknown(repo):
     out = server.nim_explain_row(str(repo), "x.log", "x", format="xml")
-    assert out == server.TRIAGE_FORMAT_ERROR
+    assert out == server.ROLE_FORMAT_ERROR
     start = server.nim_explain_row_start(str(repo), "x.log", "x", format="xml")
-    assert start == server.TRIAGE_FORMAT_ERROR
+    assert start == server.ROLE_FORMAT_ERROR
 
 
 def test_explain_row_start_json_runs_json_runner(stub, repo):

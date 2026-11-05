@@ -6541,9 +6541,9 @@ def _unstamped_prefix_error(name: str, tails: list[list[str]]) -> str:
     """The error for a `name` that begins rows continuing differently."""
     shown = [
         repr(" ".join([name, *words]))
-        for words in tails[:NIM_EXPLAIN_ROW_CANDIDATES]
+        for words in tails[:VERDICT_ROW_CANDIDATES]
     ]
-    more = len(tails) - NIM_EXPLAIN_ROW_CANDIDATES
+    more = len(tails) - VERDICT_ROW_CANDIDATES
     tail = f" ({more} more)" if more > 0 else ""
     return (
         f"[Error: {name!r} begins {len(tails)} different rows: "
@@ -6634,7 +6634,7 @@ NIM_EXPLAIN_ROW_STEPS = 6
 NIM_EXPLAIN_ROW_MAX_STEPS = 12
 NIM_EXPLAIN_ROW_BLOCK_LINES = 60  # longer blocks keep the first/last half
 NIM_EXPLAIN_ROW_TRIAL_LINES = 6  # trial lines kept in the JSON
-NIM_EXPLAIN_ROW_CANDIDATES = 10  # row names listed in a lookup error
+VERDICT_ROW_CANDIDATES = 10  # row names listed in a row lookup error
 NIM_SCOUT_MAX_ITEMS = 15
 NIM_REVIEW_MAX_DIFF_CHARS = 120_000  # roughly 1,500 lines of diff
 NIM_REVIEW_MAX_FILE_BYTES = 2_000_000
@@ -7190,11 +7190,11 @@ def nim_triage_log(
         or a bracketed error. In JSON mode, one JSON object (errors are
         {"error": ..., "message": ...}).
     """
-    if format not in TRIAGE_FORMATS:
-        return TRIAGE_FORMAT_ERROR
+    if format not in ROLE_FORMATS:
+        return ROLE_FORMAT_ERROR
     task, root, error, log = _triage_task(cwd, log_path, question)
     if error or task is None or log is None:
-        return _triage_bad_input(error, format)
+        return _role_bad_input(error, format)
     steps = max_steps or NIM_TRIAGE_STEPS
     if format == "json":
         label = str(log.relative_to(root))
@@ -7226,11 +7226,11 @@ def nim_triage_log_start(
         A message with the job id to pass to gemini_poll, or a bracketed
         error.
     """
-    if format not in TRIAGE_FORMATS:
-        return TRIAGE_FORMAT_ERROR
+    if format not in ROLE_FORMATS:
+        return ROLE_FORMAT_ERROR
     task, root, error, log = _triage_task(cwd, log_path, question)
     if error or task is None or log is None:
-        return _triage_bad_input(error, format)
+        return _role_bad_input(error, format)
     kwargs = {
         "task": task,
         "cwd": root,
@@ -7246,8 +7246,8 @@ def nim_triage_log_start(
     return _start_agent_job("NIM log triage", kwargs)
 
 
-def _triage_bad_input(error: str | None, fmt: str) -> str:
-    """A triage input error, as an object in JSON mode."""
+def _role_bad_input(error: str | None, fmt: str) -> str:
+    """A role's input error, as an object in JSON mode."""
     text = error or "[Error: no log.]"
     if fmt != "json":
         return text
@@ -7300,9 +7300,10 @@ def _role_log(cwd: str, log_path: str) -> tuple[Path | None, str, str | None]:
     return target, str(root), None
 
 
+# Output formats of the roles that take `format` (triage, explain-row).
+ROLE_FORMATS = ("text", "json")
+ROLE_FORMAT_ERROR = '[Error: format must be "text" or "json".]'
 # A triage answer's check tags and footer, as the agent loop appends them.
-TRIAGE_FORMATS = ("text", "json")
-TRIAGE_FORMAT_ERROR = '[Error: format must be "text" or "json".]'
 _TRIAGE_TAG_RE = re.compile(
     r"\s*\[(unverified|quote is at line \d+|quote not in file)\]"
 )
@@ -7608,7 +7609,7 @@ def nim_explain_row(
         cwd, log_path, row, occurrence, format, model, max_steps
     )
     if error or kwargs is None:
-        return error or TRIAGE_FORMAT_ERROR
+        return error or ROLE_FORMAT_ERROR
     if "label" in kwargs:
         return _dispatch_explain_row_json(**kwargs)
     return _dispatch_nim_agent(**kwargs)
@@ -7644,7 +7645,7 @@ def nim_explain_row_start(
         cwd, log_path, row, occurrence, format, model, max_steps
     )
     if error or kwargs is None:
-        return error or TRIAGE_FORMAT_ERROR
+        return error or ROLE_FORMAT_ERROR
     runner = _dispatch_explain_row_json if "label" in kwargs else None
     return _start_agent_job("NIM explain-row", kwargs, runner)
 
@@ -7664,13 +7665,13 @@ def _explain_row_job(
     trial lines) and the found row's `row_name` and `row_status`, which
     the JSON takes in place of the model's Row line.
     """
-    if fmt not in TRIAGE_FORMATS:
-        return None, TRIAGE_FORMAT_ERROR
+    if fmt not in ROLE_FORMATS:
+        return None, ROLE_FORMAT_ERROR
     task, root, error, facts = _explain_row_build(
         cwd, log_path, row, occurrence
     )
     if error or task is None:
-        return None, _triage_bad_input(error, fmt)
+        return None, _role_bad_input(error, fmt)
     steps = min(
         max(1, max_steps or NIM_EXPLAIN_ROW_STEPS), NIM_EXPLAIN_ROW_MAX_STEPS
     )
@@ -7794,8 +7795,8 @@ def _explain_row_lookup_error(
         failed = [r.name for r in rows if r.status != "PASS"]
         names = list(dict.fromkeys(failed or [r.name for r in rows]))
         ask = ""
-    shown = ", ".join(repr(n) for n in names[:NIM_EXPLAIN_ROW_CANDIDATES])
-    more = len(names) - NIM_EXPLAIN_ROW_CANDIDATES
+    shown = ", ".join(repr(n) for n in names[:VERDICT_ROW_CANDIDATES])
+    more = len(names) - VERDICT_ROW_CANDIDATES
     tail = f" ({more} more)" if more > 0 else ""
     return f"[Error: {head}. Rows: {shown}{tail}.{ask}]"
 
