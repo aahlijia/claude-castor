@@ -240,7 +240,9 @@ that waits on a long run). Two keys open it, and both are needed:
   executable file inside the root), optional `env_file` (sourced before the
   command; must be inside the root), `log_line` (regex whose group 1 is the
   log path the suite prints, default `^log: (.+)$`), `overdue_command` (run
-  once at `expect_minutes + grace_minutes` while no verdict table is out),
+  once at `expect_minutes + grace_minutes` while no verdict table is out;
+  it must be an executable file inside the root but need not match `allow`,
+  which only limits what callers can start),
   `grace_minutes` (10), `max_hours` (8), `max_running` (4) and `flags`
   (`{name, pattern, stop}`, matched on whole console lines). Unknown keys
   and bad regexes are errors.
