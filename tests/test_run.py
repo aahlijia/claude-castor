@@ -616,6 +616,34 @@ def test_overdue_runs_command_once_and_keeps_watching(project, fast, started):
     assert (project / "count.txt").read_text() == "x\n"
 
 
+def test_overdue_command_need_not_be_allowed(project, fast, started):
+    _script(project / "t" / "dialog.sh", "echo 'dialog: none'\n")
+    _script(project / "t" / "slow.sh", "sleep 1\necho finished\n")
+    _write_config(
+        project,
+        {
+            "allow": ["t/slow.sh"],
+            "overdue_command": ["t/dialog.sh"],
+            "grace_minutes": 0.001,
+        },
+    )
+    rec = _start(project, started, ["t/slow.sh"], expect=1)
+    out = _poll_json(rec["run"])
+    assert out["overdue"]["output"] == "dialog: none\n", out
+    refused = server.castor_run_start(str(project), ["t/dialog.sh"], 1)
+    assert "allow list" in refused
+
+
+def test_overdue_command_stays_inside_the_project(project, tmp_path):
+    outside = _script(tmp_path / "evil.sh", "echo evil\n")
+    (project / "t" / "link.sh").symlink_to(outside)
+    _write_config(
+        project, {"allow": ["t/ok.sh"], "overdue_command": ["t/link.sh"]}
+    )
+    cfg, error = server._run_config(project)
+    assert cfg is None and "outside the project" in error
+
+
 def test_overdue_skipped_once_the_table_is_out(project, fast, started):
     _script(project / "t" / "dialog.sh", "echo x >> count.txt\n")
     _write_config(

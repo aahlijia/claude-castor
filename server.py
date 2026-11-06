@@ -9848,7 +9848,7 @@ def _run_config(root: Path) -> tuple[RunConfig | None, str | None]:
     except ValueError as exc:
         return None, f"{RUN_CONFIG_FILE}: {exc}"
     if cfg.overdue_command:
-        _, error = _run_resolve_command(root, cfg, list(cfg.overdue_command))
+        _, error = _run_resolve_program(root, cfg.overdue_command[0])
         if error:
             return None, f"{RUN_CONFIG_FILE}: overdue_command: {error}"
     return cfg, None
@@ -9938,6 +9938,30 @@ def _run_flags(value: Any) -> list[RunFlag]:
     return flags
 
 
+def _run_resolve_program(
+    root: Path, program: str
+) -> tuple[Path | None, str | None]:
+    """Resolve a program to an executable file inside the project.
+
+    Args:
+        root: The project root.
+        program: The path, relative to `root` or absolute.
+
+    Returns:
+        (resolved path, None), or (None, the reason it is refused).
+    """
+    base = root.resolve()
+    path = Path(program).expanduser()
+    resolved = (path if path.is_absolute() else base / path).resolve()
+    if not resolved.is_relative_to(base):
+        return None, f"{program!r} resolves outside the project."
+    if not resolved.is_file():
+        return None, f"{program!r} is not a file."
+    if not os.access(resolved, os.X_OK):
+        return None, f"{program!r} is not executable."
+    return resolved, None
+
+
 def _run_resolve_command(
     root: Path, cfg: RunConfig, command: list[str]
 ) -> tuple[list[str] | None, str | None]:
@@ -9955,16 +9979,10 @@ def _run_resolve_command(
     """
     if not command or not command[0]:
         return None, "the command is empty."
-    base = root.resolve()
-    program = Path(command[0]).expanduser()
-    resolved = (program if program.is_absolute() else base / program).resolve()
-    if not resolved.is_relative_to(base):
-        return None, f"{command[0]!r} resolves outside the project."
-    if not resolved.is_file():
-        return None, f"{command[0]!r} is not a file."
-    if not os.access(resolved, os.X_OK):
-        return None, f"{command[0]!r} is not executable."
-    rel = resolved.relative_to(base).as_posix()
+    resolved, error = _run_resolve_program(root, command[0])
+    if resolved is None:
+        return None, error
+    rel = resolved.relative_to(root.resolve()).as_posix()
     if not any(fnmatch.fnmatchcase(rel, glob) for glob in cfg.allow):
         return None, f"{rel!r} is not in {RUN_CONFIG_FILE}'s allow list."
     return [str(resolved), *command[1:]], None
@@ -10563,9 +10581,10 @@ def _run_overdue(rec: dict, cfg: RunConfig) -> dict:
     off = _run_enabled_for(root)
     if off:
         return {"at_s": at_s, "exit_code": None, "output": f"not run: {off}"}
-    argv, error = _run_resolve_command(root, cfg, list(cfg.overdue_command))
-    if argv is None:
+    program, error = _run_resolve_program(root, cfg.overdue_command[0])
+    if program is None:
         return {"at_s": at_s, "exit_code": None, "output": error}
+    argv = [str(program), *cfg.overdue_command[1:]]
     out_path = Path(rec["capture"]).with_suffix(".overdue")
     try:
         with out_path.open("wb") as out:
