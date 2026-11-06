@@ -1,61 +1,25 @@
 # Decisions
 
-### 2026-06-05: Keep `gemini_*` tool names after moving from Gemini CLI to agy
-- **Why:** renaming breaks every registered MCP install and the slash commands.
-- **Rejected:** `agy_*` / `castor_*` renames.
+## Earlier decisions (summary)
 
-### 2026-06-05: Drive agy as a captured subprocess, not a PTY
-- **Why:** non-TTY `agy --print` captures stdout fine; a PTY added complexity
-  for nothing.
-
-### 2026-06-05: Hybrid context: `cwd`/`add_dirs` for exploration, inline only user-named files
-- **Why:** agy explores on its own when rooted; inlining whole trees hits size limits.
-
-### 2026-06-08: Server persists to `~/.cache/claude-castor`; only skills write Claude memory
-- **Why:** keeps `server.py` out of `~/.claude/`. Project-state store lives at
-  `~/.cache/claude-castor/projects/<sha256(cwd)>.json`.
-
-### 2026-07-31: Castor owns session transcripts instead of agy `--continue` / `--conversation`
-- **Why:** agy gives no way to capture a print-mode conversation id, and
-  `--continue` cross-contaminates projects. Transcripts are replayed into
-  fresh `agy --print` calls and summarized over ~24k chars.
-
-### 2026-07-31: `gemini_index` does not default to agy's `repo-index` agent
-- **Why:** on agy 1.1.9, `repo-index` + sandbox + `--json-schema` restated its
-  JSON across turns and broke both schema enforcement and the text fallback.
-  `agent=None` was reliable on the same repo.
-
-### 2026-07-31: `--mode` is not used anywhere
-- **Why:** `accept-edits` hangs headless print on any shell command; `plan` is
-  a no-op (silent auto-deny without trust, identical to no flag with trust).
-- **Rejected:** a `mode="plan"` passthrough was built, then reverted as API
-  surface with no observable capability.
-
-### 2026-07-31: Streaming output parked
-- **Why:** fastmcp 3.2.4 only has numeric `report_progress`, no incremental
-  tool-output API.
-
-### 2026-07-31: agy surface drift check lives in tracked `scripts/`, not `.dev/`
-- **Why:** it must reach fresh clones to be run before releases.
-
-### 2026-10-26: Sandbox tier = `--sandbox --dangerously-skip-permissions`
-- **Why:** since agy 1.3, headless print mode auto-denies every shell command
-  outside trust, and one denial ends the run with empty output and exit 0, so
-  all six sandboxed workflow tools were broken. Tested on agy 1.4.7: inside
-  `--sandbox`, workspace writes fail ("Operation not permitted") while
-  find/grep/git work. Writes elsewhere in `~` and network access are NOT
-  blocked; the user accepted that trade-off explicitly. Workflow tools keep
-  `trust=False`, so they stay cacheable.
-- **Rejected:** plain trust for workflow tools (the review's suggestion; agy
-  could modify the project); settings.json allow-rules (did not match in
-  1.4.7); leaving sandbox broken with only a clearer error.
-
-### 2026-10-26: Kept `PRINT_TIMEOUT = 300s` despite the review's 60s-timeout claim
-- **Why:** Claude Code 2.1.310's MCP tool timeout defaults to 1e8 ms, with a
-  30-minute idle limit for stdio servers (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`).
-  `gemini_index` takes ~2 minutes even on a tiny repo, so 45s would break it.
-- **Rejected:** lowering to 45s; parallelizing `gemini_status` lookups (models
-  and agents take ~1.2s and ~0.6s; the slow step is the live model probe).
+2026-06-05: kept the `gemini_*` tool names after the move to agy (renames
+would break every install; `agy_*`/`castor_*` rejected); agy runs as a
+captured subprocess, not a PTY; exploration uses `cwd`/`add_dirs`, and
+only user-named files are inlined. 2026-06-08: the server persists only to
+`~/.cache/claude-castor` (project state at `projects/<sha256(cwd)>.json`);
+only skills write Claude memory. 2026-07-31: Castor owns session
+transcripts (replayed into fresh `agy --print`, summarized over ~24k
+chars) instead of agy `--continue`; `gemini_index` does not default to
+agy's `repo-index` agent (broke schema output on 1.1.9); `--mode` is not
+used (`accept-edits` hangs headless, `plan` is a no-op; a passthrough was
+built and reverted); streaming parked (fastmcp had no incremental output
+API; later done for NIM chat requests); the agy surface check lives in
+tracked `scripts/`. 2026-10-26: the sandbox tier is `--sandbox
+--dangerously-skip-permissions`, since agy 1.3+ auto-denies shell commands
+headless (workspace writes blocked, `~` writes and network not; the user
+accepted that; plain trust and settings allow-rules rejected);
+`PRINT_TIMEOUT` stays 300 s (Claude Code's MCP tool timeout is far longer
+and `gemini_index` needs ~2 min; 45 s rejected).
 
 ### 2026-11-02: NIM default model is nemotron-3-ultra-550b-a55b
 - **Why:** `meta/llama-3.3-70b-instruct` reached end of life 2026-08-26 and
@@ -295,6 +259,9 @@
   instead) and `owner` (triage reads no code; explain-row's `reading`);
   building run/compare as NQC scripts (Claude's recommendation; the user
   wants them in castor); Castor killing or taking the lock (scripts own it).
+- **Amended 2026-11-04:** `castor_compare_runs` has no NIM reading, and `cwd`
+  must be a `CASTOR_RUN_ROOTS` entry or a git worktree of one (not any
+  folder under it). See the entries below.
 
 ### 2026-11-04: Ultra is not a fallback for Super
 - **Why:** in the 09:00 hour (local) of 2026-11-03 Ultra was rate limited on
@@ -333,3 +300,162 @@
   harness/game reading is a separate decision for the user. CLAUDE.md and
   GEMINI.md say the gate ran and failed on the reading.
 - **Rejected:** tuning the bar or the prompt after seeing these results.
+- **Superseded 2026-11-04:** location-only and on by default ("nim_explain_row
+  (location only) passed its site gate").
+
+### 2026-11-04: nim_explain_row: improve the reading before shipping (user)
+- **Why:** its gate (results-20261104-094551.json) found the verdict code in
+  23 of 24 runs but got the harness/game reading right in only 4 of 24
+  (unclear 16, all 4 wrong answers "game" on harness cases). The misses need
+  NQC's own rulings on what is acceptable (tear-consoles: a host JobTempAlloc
+  warning the fix allowed in the harness), which the model never sees.
+- **How:** next, give the agent NQC's rulings (`DECISIONS.md`) or the fix
+  history, then re-gate on a new or extended case set with the bar set
+  before any run. The tool stays behind `CASTOR_NIM_EXPLAIN_ROW=1` until then.
+  Note for the design: the gate's model called a dekko tool in 1 of 24 runs.
+- **Rejected:** shipping a location-only variant now (Claude's
+  recommendation: drop the Reading line, add a precondition check, re-gate
+  the site); leaving it gated with no further work.
+- **Superseded 2026-11-04:** the reading was cut ("nim_explain_row becomes
+  location-only"); the caller reads the cited code.
+
+### 2026-11-04: feature/nim-edit merged with nim_edit gated (user)
+- **Why:** gate run 6 failed the strict bar on two whitespace patches, but the
+  branch carried the dekko agent tools phase 1 needed. Merged into develop
+  (027fda7, no squash) with nim_edit registered only under
+  `CASTOR_NIM_EDIT=1` (`_register_gated`); the strict bar stays.
+- **Rejected:** another prompt round before merging (more free-tier gate
+  runs); relaxing the bar to accept whitespace misses Claude would see in the
+  diff.
+
+### 2026-11-04: explain-row eval labels come from fix commits (user)
+- **Why:** the user chose no manual check of the 12 cases. A case is
+  `harness` when its fix touched only Tools/, probes or test scripts, `game`
+  when only game code under Assets/; fixes touching both are dropped. Cases:
+  `~/.cache/claude-castor/eval/nqc-explain-cases.json` (7 harness, 5 game, 8
+  check rows), reviewed twice; the floorcheck trio was replaced because its
+  logs ran on uncommitted layout edits.
+- **Rejected:** the user confirming each label (12 calls of their time).
+
+### 2026-11-04: explain-row reading round: fix history, blind screen, bar set (user)
+- **Why:** the last gate's labels are partly team choices (the two mansion C
+  walk-off cases log the same symptom, one fixed in the harness, one in the
+  game), so some cases cannot be decided from pre-fix evidence. Spec:
+  `.docs/explain-row-reading-design-2026-11-04.md`.
+- **How:** the only new context is the script's fix history
+  (`_script_fix_history(repo, rev, name)`, last 15 commits to files named
+  like the log's folder, as of HEAD; the eval passes the case commit). A
+  pool of ~24 cases (12 old, ~12 new) is screened blind by a Sonnet subagent
+  per case; a case stays only if it names the labeled side; under 10
+  survivors means no gate. Bar per run over 2 Super runs: site >= 80%,
+  reading right >= ceil(2N/3), wrong <= 1 (<= 2 when N > 15), 0 errors; one
+  `history=off` control run, reported only.
+- **Rejected:** caller-named rulings files, pointing the agent at NQC's
+  decision index, prompt-only rules; Claude screening with labels known; the
+  user screening; keeping the 12 cases unscreened.
+- **Superseded 2026-11-04:** the fix-history block and the eval `history`
+  switch were removed with the reading (b60dc85).
+
+### 2026-11-04: explain-row reading round stopped at the screen; stays gated
+- **Why:** of 21 cases (12 old, 9 new mined from fix commits; 12 harness, 9
+  game), a blind Sonnet reader with the new fix-history block named the
+  fixed side on 9 (game 6 of 9, harness 3 of 12; 11 unclear, 1 wrong:
+  mansionA-bookcase-walkoff read harness on a game-fixed case, citing the
+  hip-y off test at mansion.sh:258). Under the floor of 10 set before any
+  run, so no NIM gate ran. Harness faults are the hard side: the evidence
+  rarely shows the harness is wrong, only that a check failed. Pool with
+  `screen` fields: `~/.cache/claude-castor/eval/nqc-explain-pool.json`;
+  survivors: `nqc-explain-gate.json`. Branch `feature/explain-row-reading`
+  (fix-history block, eval `history=on|off`, `--print-tasks`, scaled bar).
+- **How:** `nim_explain_row` stays behind `CASTOR_NIM_EXPLAIN_ROW=1`. The
+  site half still works (23/24 last gate). Merging the branch is the
+  user's call; the history block is harmless while the tool is gated.
+- **Rejected:** mining more cases to clear the floor, or lowering it, after
+  seeing the screen.
+- **Superseded 2026-11-04:** no longer gated; see "passed its site gate".
+
+### 2026-11-04: explain-row reading: frontier Claude can read it, free NIM models cannot
+- **Why:** an Opus blind re-screen of the 12 cases Sonnet left undecided got
+  7 right (5 harness, 2 game), 4 unclear, 1 wrong (mansionA-bookcase-walkoff,
+  where Sonnet and Opus both read harness from mansion.sh:258's hip-height
+  test: likely a label problem). So 16 of 21 cases are decidable from
+  pre-fix evidence at Opus level (Opus did not re-read Sonnet's 9). A
+  measurement run (results-20261104-162059.json, history on, dekko on, 2
+  runs each, not a gate) on all 21: Super site 41/42, reading right 7/42,
+  wrong 3, mostly unclear; Ultra site 37/42, right 9/42, wrong 7, mostly
+  "game" on harness cases (the costly error), 64 s per run vs Super's 37 s.
+  On the 16 decidable cases: Super right 6/32, Ultra 8/32. Super on the old
+  12 cases with history: right 5/24, wrong 3 (morning gate without: 4/24,
+  wrong 4), so the history block did not move it.
+- **How:** the reading capability is in the calling Claude, not in the
+  free models; the site half is reliable on Super. Recommendation to the
+  user: location-only NIM tool, the caller reads the cited code.
+- **Rejected:** retracted the earlier claim that pre-fix evidence was the
+  limit (it rested on one Sonnet pass).
+
+### 2026-11-04: nim_explain_row becomes location-only (user)
+- **Why:** the free NIM models cannot read harness vs game (Super 6/32,
+  Ultra 8/32 on the 16 decidable cases) while Super finds the verdict code
+  (41/42), and NQC's orchestrator is a Claude model that can read it.
+- **How:** the answer is four lines (Row, Verdict code, Precondition, Trial
+  lines); JSON drops `reading` and `why`; the fix-history block and the
+  eval's `history` switch come out. Gate, bar set before any run: all 21
+  pool cases, labels ignored, 2 runs, Nemotron 3.5 Super, dekko on; pass
+  when every run has the verdict code within 3 lines of a known site on at
+  least 17 of 21 and 0 errors. Pass: register by default, update CLAUDE.md,
+  GEMINI.md and the NQC handoff. Fail: stays gated. Same branch
+  (`feature/explain-row-reading`).
+- **Rejected:** keeping a reading step "for later"; raising the site bar
+  after seeing 41/42.
+
+### 2026-11-04: castor_compare_runs ships without the NIM reading (user)
+- **Why:** the reading measurement above: free models cannot tell a
+  harness fault from a game fault, and a confident wrong reading costs
+  more than none.
+- **How:** phase 2 plan Task 6 drops `explain` and its NIM call; compare
+  stays deterministic and the caller reads the rows. Phase 2 starts after
+  the location-only explain-row and the rename of the triage-specific
+  shared names.
+
+### 2026-11-04: nim_explain_row (location only) passed its site gate; on by default
+- **Why:** bar set before the run (above). results-20261104-191044.json: 21
+  NQC pool cases, 2 runs, Super, dekko on: site 18/21 and 19/21, 0 errors.
+  Spot-checked: hits cite the expected lines; misses are real ("not
+  found", a sibling check at doors.sh:973, an editor report for
+  paths-pockets). Lower than the 41/42 measurement with the reading step
+  (37/42 now): one window, noise likely, not chased.
+- **How:** `@mcp.tool()` on both tools; `CASTOR_NIM_EXPLAIN_ROW` gone.
+  Branch `feature/explain-row-reading` at 52a8c1c.
+
+### 2026-11-04: compare masks clock stamps; numbers_changed compares N of M only
+- **Why:** final review on real NQC logs: the doors logs stamp most lines
+  `[HH:MM:SS]` (every trial line differed), and details such as "Sharp
+  contacts 110 128 141" are measurements, so PASS rows were listed as
+  numbers_changed. User let me decide.
+- **How:** `_mask_timings` masks clock stamps and decimals; numbers_changed
+  keys on `(\d+) of (\d+)` pairs only. Spec section 2 amended.
+- **Rejected:** a per-project mask regex in `.castor/run.json` (not needed
+  yet).
+
+### 2026-11-04: Run roots are exact; one castor process watches a run
+- **Why:** the final review of phase 2. With "inside a listed root", the
+  handoff's `CASTOR_RUN_ROOTS=~/Projects/game-development` let any clone
+  dropped there authorize itself; and every Claude session runs its own
+  castor, so two sessions polling one run both watched it (overdue command
+  twice, exit code overwritten as lost; reproduced).
+- **How:** `cwd` must equal an absolute entry or be a git worktree of one
+  (NQC lists `no-questions-cleaning`, which covers every `nqc-lane*`). A
+  monitor holds an exclusive `flock` on `runs/<id>.lock`; record writes
+  use per-writer temp files. Stopped/gave_up runs whose pid is alive count
+  toward `max_running`; the overdue command honours `CASTOR_RUN=0`.
+- **Rejected:** keeping the spec's "inside" rule with docs telling users to
+  list exact lanes (one wrong entry reopens it).
+
+### 2026-11-06: overdue_command is not checked against allow
+- **Decision:** `overdue_command` must be an executable file inside the root
+  (`_run_resolve_program`) but need not match `allow`. This amends the design's
+  "checked against the same allowlist".
+- **Why:** `allow` limits what a caller can start; `overdue_command` is fixed by
+  the committed config and takes no caller input. NQC keeps `dialog.sh` out of
+  `allow` on purpose (suite scripts only) yet wants it on overdue, so the old
+  check refused every run and no NQC suite ever used the tier.
