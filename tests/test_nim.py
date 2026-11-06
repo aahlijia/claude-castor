@@ -4531,6 +4531,25 @@ def test_triage_json_shape(stub, repo):
     assert set(out["agent"]) == {"model", "steps", "seconds"}
 
 
+def test_triage_hits_skip_case_stamps():
+    lines = _verdict_log([("FAIL", "flip row", "1 of 3")])
+    hits, counts = server._triage_hits(lines)
+    assert hits == [1] and counts["FAIL"] == 1
+
+
+def test_triage_json_drops_an_item_citing_a_stamp(stub, repo):
+    log = _verdict_log([("FAIL", "flip row", "1 of 3")])
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - FAIL flip row - slipped\n"
+        "- run.log:2 - @case FAIL flip row - same failure",
+        log=log,
+    )
+    assert [f["log_line"] for f in out["failures"]] == [1]
+    assert out["markers"]["FAIL"] == 1
+
+
 def test_triage_json_maps_failure_to_second_occurrence(stub, repo):
     log = _verdict_log(
         [

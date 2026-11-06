@@ -7388,14 +7388,23 @@ def _triage_item(line: str, label: str) -> dict | None:
     }
 
 
+def _cites_case_stamp(log_line: int, log: list[str]) -> bool:
+    """True when a cited 1-based line of the log is an `@case` stamp."""
+    return 0 < log_line <= len(log) and bool(_CASE_RE.match(log[log_line - 1]))
+
+
 def _triage_failures(
-    lines: list[str], label: str, rows: list[VerdictRow]
+    lines: list[str], label: str, rows: list[VerdictRow], log: list[str]
 ) -> list[dict]:
-    """The answer's items, each tied to the verdict row that holds its line."""
+    """The answer's items, each tied to the verdict row that holds its line.
+
+    An item citing an `@case` stamp is dropped: the stamp's verdict line is
+    the same failure.
+    """
     failures = []
     for line in lines:
         item = _triage_item(line, label)
-        if item is None:
+        if item is None or _cites_case_stamp(item["log_line"], log):
             continue
         row = _row_for_line(rows, item["log_line"])
         failures.append({"row": row.name if row else None, **item})
@@ -7424,7 +7433,7 @@ def _triage_json(
         "verdict": _triage_verdict(body),
         "totals": _verdict_totals(lines),
         "rows": _rows_json(rows),
-        "failures": _triage_failures(body, label, rows),
+        "failures": _triage_failures(body, label, rows, lines),
         "markers": markers,
         "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
     }
@@ -7483,10 +7492,15 @@ def _triage_context(log: Path, label: str) -> str:
 
 
 def _triage_hits(lines: list[str]) -> tuple[list[int], dict[str, int]]:
-    """Line numbers matching any marker, and each marker's line count."""
+    """Line numbers matching any marker, and each marker's line count.
+
+    An `@case` stamp repeats the verdict line above it, so it is no hit.
+    """
     counts = dict.fromkeys((name for name, _ in NIM_TRIAGE_MARKERS), 0)
     hits: list[int] = []
     for number, line in enumerate(lines, 1):
+        if _CASE_RE.match(line):
+            continue
         matched = [n for n, rx in NIM_TRIAGE_MARKERS if rx.search(line)]
         for name in matched:
             counts[name] += 1
