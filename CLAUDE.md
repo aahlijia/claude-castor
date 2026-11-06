@@ -361,6 +361,9 @@ Try `raw=True` to see unfiltered output, which can help diagnose prompt issues.
   ```
   `tests/test_nim.py` exercises the NIM backend against a local stub server (no
   network, no real key). The agy path has no automated tests.
+  `tests/test_run.py` starts real bash subprocesses and shrinks minutes to
+  milliseconds (`RUN_MINUTE_S`); every test ends its own processes, since
+  Castor never kills one.
 - Before changing a NIM role prompt, the agent loop or a default model, score
   it: `uv run --with httpx --with fastmcp python scripts/nim_eval.py
   scripts/eval/cases.json [private cases] --config label=model[,step=model]`
@@ -405,6 +408,8 @@ See `.dev/development-plan.md` for the full roadmap. Key items:
   auto-summarized over budget — replaces the agy `--continue` path) — **done**
 - NVIDIA NIM backend (`nim_*` tools; inline-only, env-configured key, retry/
   rate-limit/cooldown handling) — **done**
+- Run tier and run compare (`castor_run_start`, `castor_runs`,
+  `castor_compare_runs`; allowlisted, never kills): **done**
 - Multi-provider routing: more OpenAI-compatible free-tier providers behind the
   same client, ordered fallback chains with per-candidate cooldowns, and
   context-aware candidate skipping (NIM is the first provider)
