@@ -249,8 +249,13 @@ TABLE = "\n".join(
 
 @pytest.fixture
 def fast(monkeypatch):
-    """Minutes become milliseconds and the monitor ticks quickly."""
+    """Minutes become milliseconds and the monitor ticks quickly.
+
+    An hour stays at 60 s, so the default max_hours (8 minutes here) cannot
+    end a run that is only slow to start on a busy machine.
+    """
     monkeypatch.setattr(server, "RUN_MINUTE_S", 0.001)
+    monkeypatch.setattr(server, "RUN_HOUR_S", 60.0)
     monkeypatch.setattr(server, "RUN_POLL_S", 0.02)
 
 
@@ -352,7 +357,6 @@ def test_poll_after_restart_reattaches(project, fast, sleeper):
     rec = _new_record(
         project, pid=sleeper.pid, pid_start=server._pid_start(sleeper.pid)
     )
-    rec["config"]["max_hours"] = 1000  # 60 s under `fast`
     server._run_record_write(rec)
     Path(rec["capture"]).write_text("  trial 1: going\n")
     out = json.loads(server.gemini_poll(rec["run"]))
@@ -593,7 +597,6 @@ def test_overdue_runs_command_once_and_keeps_watching(project, fast, started):
             "allow": ["t/*.sh"],
             "overdue_command": ["t/dialog.sh"],
             "grace_minutes": 0.001,
-            "max_hours": 1000,
         },
     )
     _script(project / "t" / "slow.sh", "sleep 1\necho finished\n")
@@ -630,6 +633,12 @@ def test_overdue_skipped_once_the_table_is_out(project, fast, started):
     rec = _start(project, started, ["t/tail.sh"], expect=400)
     assert _poll_json(rec["run"])["overdue"] is None
     assert not (project / "count.txt").exists()
+
+
+def test_fast_run_outlives_a_slow_start(project, fast, started):
+    _script(project / "t" / "slow.sh", "sleep 0.6\necho finished\n")
+    rec = _start(project, started, ["t/slow.sh"])
+    assert _poll_json(rec["run"])["status"] == "done"
 
 
 def test_monitor_gives_up_without_killing(project, fast, started):
@@ -753,7 +762,7 @@ def test_run_start_refusals(project, monkeypatch, tmp_path):
 
 def test_run_start_respects_max_running(project, fast, started):
     _write_config(
-        project, {"allow": ["t/*.sh"], "max_running": 1, "max_hours": 1000}
+        project, {"allow": ["t/*.sh"], "max_running": 1}
     )
     _script(project / "t" / "sleep.sh", "sleep 30\n")
     first = _tool_start(project, started, ["t/sleep.sh"])
@@ -1106,7 +1115,6 @@ def test_second_server_does_not_watch_a_watched_run(project, fast, started):
             "allow": ["t/*.sh"],
             "overdue_command": ["t/dialog.sh"],
             "grace_minutes": 0.001,
-            "max_hours": 1000,
         },
     )
     _script(project / "t" / "slow.sh", "sleep 1\nexit 3\n")
@@ -1144,7 +1152,6 @@ def test_overdue_respects_the_off_switch(project, fast, started, monkeypatch):
             "allow": ["t/*.sh"],
             "overdue_command": ["t/dialog.sh"],
             "grace_minutes": 0.001,
-            "max_hours": 1000,
         },
     )
     _script(project / "t" / "slow.sh", "sleep 1\n")
