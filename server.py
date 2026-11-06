@@ -9977,6 +9977,7 @@ RUNS_DIR = "runs"
 RUN_RECORD_DAYS = 30
 _RUN_ID_RE = re.compile(r"^run-[0-9a-f]{8}$")
 RUN_MINUTE_S = 60.0  # seconds in a config minute; tests shrink it
+RUN_HOUR_S = 3600.0  # seconds in a config hour; tests shrink it less
 RUN_POLL_S = 2.0  # monitor tick
 RUN_ATTACH_WAIT_S = 2.0  # a poll waits this long on a monitor it attached
 RUN_PS_TIMEOUT = 5.0
@@ -10504,7 +10505,7 @@ def _run_watch(
     overdue_at = start + (
         (rec["expect_minutes"] + cfg.grace_minutes) * RUN_MINUTE_S
     )
-    give_up_at = start + cfg.max_hours * 60 * RUN_MINUTE_S
+    give_up_at = start + cfg.max_hours * RUN_HOUR_S
     while True:
         ended, exit_code = _run_exit(rec, proc)
         stop = _run_scan(rec, cfg, tail, final=ended)
