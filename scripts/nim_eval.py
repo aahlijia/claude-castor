@@ -130,7 +130,17 @@ EDIT_SCORE_KEYS = (
 
 
 def load_server(path: Path) -> ModuleType:
-    """Import a server.py (the current one, or an older copy to compare)."""
+    """Import a server (the current checkout, or an older copy to compare).
+
+    A checkout with a `castor` package comes back as one namespace over its
+    modules (`castor._namespace.view`); an older single-file server.py is
+    imported as a module.
+    """
+    if (path.parent / "castor" / "app.py").is_file():
+        sys.path.insert(0, str(path.parent))
+        from castor._namespace import view
+
+        return view()  # type: ignore[return-value]
     spec = importlib.util.spec_from_file_location("castor_server", path)
     if spec is None or spec.loader is None:
         sys.exit(f"cannot import {path}")

@@ -2,9 +2,9 @@
 
 - Before committing, run:
   ```bash
-  uvx ruff check server.py
-  uvx ruff format --check server.py
-  python3 -m py_compile server.py
+  uvx ruff check server.py castor
+  uvx ruff format --check server.py castor
+  python3 -m compileall -q server.py castor
   uv run --with pytest --with httpx --with fastmcp pytest tests
   ```
   `tests/test_nim.py` exercises the NIM backend against a local stub server (no
@@ -22,8 +22,8 @@
   line proximity alone overstated hits. Cases for private repos stay outside
   this repo (the NQC set is `~/.cache/claude-castor/eval/nqc-cases.json`).
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
-  the agy flags and subcommands `server.py` depends on. After an intended agy
-  upgrade, update `server.py`, then refresh with `--update-snapshot`.
+  the agy flags and subcommands the `castor` package depends on. After an intended
+  agy upgrade, update `castor/agy.py`, then refresh with `--update-snapshot`.
 - Before a release and after a dekko bump, run `uv run python
   scripts/check_dekko_surface.py` to catch drift in the dekko flags and JSON
   fields Castor relies on; `--update-snapshot` refreshes it.

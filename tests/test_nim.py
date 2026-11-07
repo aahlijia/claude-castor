@@ -21,7 +21,9 @@ import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-server = importlib.import_module("server")
+from castor._namespace import view  # noqa: E402
+
+server = view()
 
 KEY = "nvapi-test-secret-key"
 
@@ -3326,7 +3328,8 @@ def test_make_patch_refuses_a_root_outside_the_top(tmp_path, monkeypatch):
 def test_main_guard_is_the_last_top_level_statement():
     import ast
 
-    tree = ast.parse(Path(server.__file__).read_text())
+    entry = Path(__file__).resolve().parent.parent / "server.py"
+    tree = ast.parse(entry.read_text())
     last = tree.body[-1]
     assert isinstance(last, ast.If)
     assert ast.unparse(last.test) == "__name__ == '__main__'"
