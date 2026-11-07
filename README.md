@@ -15,16 +15,16 @@
 
 > An Antigravity MCP for Claude Code.
 
-Offloads large-context work — file exploration, indexing, summarization, deep
-research — to Google's free [Antigravity CLI](https://antigravity.google)
+Offloads large-context work (file exploration, indexing, summarization, deep
+research) to Google's free [Antigravity CLI](https://antigravity.google)
 (`agy`), the terminal coding agent powered by Gemini models. Claude
 orchestrates and reasons; Antigravity handles the heavy lifting.
 
 No API key required. Uses Google sign-in (free individual tier). Optionally
-add [NVIDIA NIM](#nvidia-nim-optional-second-backend)'s free hosted models as a
+add [NVIDIA NIM](docs/nim.md)'s free hosted models as a
 second offload target (needs a free NVIDIA API key).
 
-If Claude Castor saves you tokens or time, consider starring the repo — it
+If Claude Castor saves you tokens or time, consider starring the repo, it
 helps other Claude Code users find it.
 
 > **Note:** Antigravity CLI replaces the retired Gemini CLI (shut down
@@ -43,8 +43,8 @@ helps other Claude Code users find it.
 
 In **agent mode** (`trust=True`), agy auto-approves tool actions
 (`--dangerously-skip-permissions`) and, rooted at `cwd`, actively explores the
-project on its own — navigating files, grepping for patterns, following
-imports — rather than working from pre-loaded context.
+project on its own (navigating files, grepping for patterns, following
+imports) rather than working from pre-loaded context.
 
 ---
 
@@ -69,14 +69,14 @@ Verify with `agy --version`.
 ### 2. Sign in with Google
 
 Run `/castor:auth` (or call the `gemini_auth` tool) for guided sign-in. It hands
-you the command to run — sign-in is interactive, so you run it yourself in the
+you the command to run. Sign-in is interactive, so you run it yourself in the
 Claude Code prompt or a terminal:
 
 ```bash
 agy -p "ok"
 ```
 
-Complete the Google consent in your browser. One-time step — the token is
+Complete the Google consent in your browser. One-time step. The token is
 stored in the system keyring.
 
 ### 3. Clone the repo
@@ -126,7 +126,7 @@ entry under `mcpServers`:
 Get your `uv` path with `which uv`. Restart the desktop app after saving.
 
 If you already signed in to Antigravity for Claude Code, authentication carries
-over via the system keyring — no extra steps needed.
+over via the system keyring, so no extra steps are needed.
 
 ---
 
@@ -152,321 +152,23 @@ over via the system keyring — no extra steps needed.
 
 ---
 
-## MCP Tools
+## Tools
 
-| Tool | Description |
-|---|---|
-| `gemini_prompt` | Send a prompt to Antigravity and get a response |
-| `gemini_index` | Produce a structured map of a codebase for use as context; schema-enforced JSON |
-| `gemini_review` | Free second-opinion review of a code diff; runs agy's `code-reviewer` agent by default |
-| `gemini_security_review` | Free security-focused review of a code diff; runs agy's `security-engineer` agent by default |
-| `gemini_find_usages` | Find where and how a symbol is used across a codebase |
-| `gemini_explain_error` | Explain an error or stack trace against the codebase; runs agy's `root-cause-analyst` agent by default |
-| `gemini_summarize` | Token-lean `{summary, key_points}` of a file or directory |
-| `gemini_semantic_search` | Natural-language code search → ranked `[{path, line, reason}]` |
-| `gemini_document` | Draft docstrings/docs for a symbol or file (return-only) |
-| `gemini_start` | Start a prompt in the background; returns a job id |
-| `gemini_poll` | Check a background job; returns its result when done |
-| `gemini_jobs` | List background jobs and their status |
-| `gemini_sessions` | List a project's conversation sessions |
-| `gemini_session_show` | Print a session's stored transcript |
-| `gemini_session_delete` | Delete a session |
-| `gemini_reset` | Clear the project's default session (requires `cwd`) |
-| `gemini_cache_clear` | Delete all cached responses to force fresh runs |
-| `gemini_models` | List the models available to agy |
-| `gemini_agents` | List agy's built-in specialized agents |
-| `gemini_auth` | Get sign-in instructions when not authenticated |
-| `gemini_status` | Check CLI installation and sign-in; lists available models and agents when READY |
-| `gemini_setup` | Get step-by-step setup instructions |
-| `nim_prompt` / `nim_start` / `nim_review` / `nim_security_review` / `nim_explain_error` / `nim_summarize` / `nim_models` / `nim_status` / `nim_agent` / `nim_agent_start` / `nim_scout` / `nim_first_pass_review` / `nim_triage_log` (each role also has a `_start` variant) | Optional NVIDIA NIM backend — see [below](#nvidia-nim-optional-second-backend) |
+The MCP server exposes three families of tools. Full reference in [docs/](docs/README.md).
 
-### `gemini_prompt` parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `prompt` | `str` | required | The prompt Claude constructs |
-| `files` | `list[str]` | `None` | File paths to inline (user-provided only) |
-| `directory` | `str` | `None` | Directory to inline (user-provided only) |
-| `raw` | `bool` | `false` | Skip structured response instructions |
-| `trust` | `bool` | `false` | Enable full agent mode (requires `cwd`) |
-| `cwd` | `str` | `None` | Project root for agy's workspace |
-| `add_dirs` | `list[str]` | `None` | Extra dirs to grant agy read access (`--add-dir`) |
-| `continue_session` | `bool` | `false` | Resume the project's default session (requires `cwd`) |
-| `session` | `str` | `None` | Name a project-scoped session to continue (requires `cwd`; never cached) |
-| `model` | `str` | `None` | Select the agy model (see `gemini_models`) |
-| `agent` | `str` | `None` | Route the prompt to one of agy's built-in agents (see `gemini_agents`) |
-| `sandbox` | `bool` | `false` | Explore with auto-approved commands inside agy's OS sandbox, workspace read-only (middle tier; ignored if `trust`) |
-| `use_cache` | `bool` | `true` | Reuse a stored response for the same prompt against an unchanged repo |
-
----
-
-## Agent Mode
-
-By default, agy runs read-only and responds in Q&A mode. With `trust=True`
-(which requires `cwd`), agy runs with `--dangerously-skip-permissions` — it can
-read files, search the codebase, follow imports, and auto-approve tool actions
-on its own without needing content pre-loaded.
-
-`sandbox=True` is a safer middle tier: agy explores the filesystem and runs
-read commands (find, grep, git) inside its OS sandbox, which keeps the project
-read-only. Castor auto-approves those commands, because since agy 1.3 headless
-print mode denies any command it can't prompt for, and one denial ends the run
-with no output. The sandbox blocks writes to the workspace, but not writes
-elsewhere in your home directory or network access. `trust` takes precedence
-if both are set. Prefer `sandbox` unless the task needs agy to write project
-files.
-
-Best for (trust or sandbox):
-- Deep codebase exploration
-- Cross-file symbol resolution
-- Large projects where pre-loading is impractical
-
-agy is rooted at the `cwd` you pass; grant access to additional directories
-with `add_dirs` (mapped to repeated `--add-dir` flags).
-
----
-
-## Sessions
-
-By default each `gemini_prompt` call is independent. For multi-step work on the
-same codebase, pass a `session` name (e.g. `session="refactor-auth"`) — or
-`continue_session=True` for the project's default session. Sessions are
-**Castor-owned**: the transcript is stored under
-`~/.cache/claude-castor/sessions/<project>/<name>.json` and replayed as context
-into a fresh `agy --print` call on each turn (agy's own `--continue` is not used).
-
-That makes sessions project-scoped (keyed by repo-root path, so they survive
-commits and server restarts) and free of cross-project contamination. They require
-`cwd`, are never cached, and are evicted after 30 idle days. When a replay grows
-past ~24k characters, older turns are folded into a rolling summary (using a cheap
-model), keeping the last 3 turns verbatim.
-
-Inspect them with `gemini_sessions(cwd)` / `gemini_session_show(cwd, name)`,
-delete one with `gemini_session_delete(cwd, name)`, or clear the default with
-`gemini_reset(cwd)`.
-
----
-
-## Model Selection
-
-Leave `model` unset to use agy's default. Pass `model="…"` to pick a specific
-model — a faster one for light summarization, a stronger one for deep reasoning.
-Call `gemini_models` to list what's available.
-
----
-
-## Workflow Tools
-
-Beyond the general `gemini_prompt`, several purpose-built tools bake in the right
-prompt and access tier for common shapes — so Claude doesn't have to assemble
-them by hand. Each takes a `cwd` (the project root) and an optional `model`.
-
-| Tool | What it does | Tier |
+| Family | Tools | Reference |
 |---|---|---|
-| `gemini_index(cwd)` | Compact repo map: layout, entry points, key symbols, how they connect | sandbox, schema-enforced JSON |
-| `gemini_review(cwd, diff=None)` | Correctness-focused review of a diff (defaults to `git diff HEAD`) | read-only, agent `code-reviewer` |
-| `gemini_security_review(cwd, diff=None)` | Security-focused review of a diff (defaults to `git diff HEAD`) | read-only, agent `security-engineer` |
-| `gemini_find_usages(cwd, symbol)` | Every use of a symbol, with paths and line refs | sandbox |
-| `gemini_explain_error(cwd, error)` | Ranked root-cause hypotheses for an error/stack trace | sandbox, agent `root-cause-analyst` |
-| `gemini_summarize(cwd, target)` | Token-lean `{summary, key_points}` of a file or directory | sandbox, schema-enforced JSON |
-| `gemini_semantic_search(cwd, query)` | NL code search → ranked `[{path, line, reason}]` (≤20) | sandbox, schema-enforced JSON |
-| `gemini_document(cwd, target)` | Proposed docstrings/docs in the project's style (return-only) | sandbox |
-
-All are side-effect-free, so their results are cached against the repo state when
-`cwd` is a git repo (see below). `gemini_index` is the canonical "give me context
-I can reuse" call — run it once, then build on it. `gemini_review` complements
-(does not replace) Claude's own `/code-review`; `gemini_security_review`
-complements `gemini_review` the same way — correctness vs. security are separate
-passes, run both for full coverage. `gemini_semantic_search` finds code by
-intent, where `gemini_find_usages` needs an exact symbol name. The four
-agent-defaulting tools (`gemini_index`, `gemini_review`,
-`gemini_security_review`, `gemini_explain_error`) each accept an `agent`
-override, or `agent=None` to fall back to agy's own default agent (see
-`gemini_agents`). "Schema-enforced JSON" means the shape is a contract agy
-validates via `--json-schema`, not just a prompt request — informational only,
-it doesn't change how these tools are called or what they return.
+| Antigravity (`gemini_*`) | `gemini_prompt`, workflow tools (`gemini_index`, `gemini_review`, `gemini_security_review`, `gemini_find_usages`, `gemini_explain_error`, `gemini_summarize`, `gemini_semantic_search`, `gemini_document`), background jobs, sessions, caching, status | [docs/agy.md](docs/agy.md) |
+| NVIDIA NIM (`nim_*`, optional) | Prompts, reviews, a read-only agent and its roles (scout, first-pass review, log triage, explain row) | [docs/nim.md](docs/nim.md) |
+| Run tier (`castor_*`) | Start an allowlisted suite script in the background, list runs, compare logs | [docs/run-tier.md](docs/run-tier.md) |
 
 ---
 
-## Background Jobs
+## Documentation
 
-`gemini_prompt` blocks until agy responds (up to 300s). For long explorations —
-or fan-out, where you start several jobs across subtrees and synthesize the
-results — run them in the background instead:
-
-1. `gemini_start(prompt, …)` spawns the agy run off-thread and returns a job id.
-2. Do other work.
-3. `gemini_poll(job_id)` returns `running` (with elapsed time), the response when
-   `done`, or a message on error. `gemini_jobs()` lists everything outstanding.
-
-`gemini_start` takes the same arguments as `gemini_prompt` except the session
-ones: background jobs are **fresh-only** by construction (concurrent jobs would
-race on the shared session), so for stateful multi-turn work use the synchronous
-`gemini_prompt`. Concurrency is capped (4 workers, or 4 per NVIDIA key up to 8), and a cache hit completes a
-job immediately. Jobs live in memory only — a server restart forgets them.
-
----
-
-## NVIDIA NIM (optional second backend)
-
-Castor can also offload to [NVIDIA NIM](https://build.nvidia.com)'s hosted
-models, which have a free tier for developers. It is a second target next to
-agy — useful for an independent second opinion, for spreading load when agy's
-free quota is tight, or for fanning one question out to both and comparing.
-
-**It is not an agent.** agy explores the workspace on its own; NIM is a plain
-chat endpoint with no filesystem access. Castor reads whatever the model needs
-(`files`, `directory`, a diff) and inlines it into one request. So NIM suits
-review, summarize and explain over content you supply; for open-ended
-exploration of a codebase, stay on `gemini_prompt` with `cwd`.
-
-**Privacy:** everything inlined is sent to NVIDIA's hosted API, under NVIDIA's
-free-tier data terms. Don't send secrets or code you haven't cleared for a
-third party.
-
-### Setup
-
-1. Create a free API key at <https://build.nvidia.com/settings/api-keys>.
-2. Register it with the MCP server's environment (the key is read from the
-   environment only — it is never a tool argument and is never logged):
-
-   ```bash
-   claude mcp add -s user claude-castor -e NVIDIA_API_KEY=nvapi-... \
-     -- /absolute/path/to/uv run --directory /absolute/path/to/claude-castor server.py
-   ```
-
-   (If already registered, `claude mcp remove claude-castor -s user` first.
-   `install.py` does not forward your key, so re-run this command to add it.
-   Claude Code stores the value in `~/.claude.json`.)
-3. Restart Claude Code and run `/castor:nim-status` (or the `nim_status`
-   tool). It sends one tiny completion to prove the key and model work.
-
-### Tools
-
-| Tool | What it does |
-|---|---|
-| `nim_prompt` | General prompt; `files` / `directory` are inlined; supports `session`, `model`, `temperature`, `max_tokens`, caching |
-| `nim_start` | Same, in the background — collect with `gemini_poll` / `gemini_jobs` |
-| `nim_review` | Correctness review of a diff (defaults to `git diff HEAD`) |
-| `nim_security_review` | Security-focused review of a diff |
-| `nim_explain_error` | Ranked root causes for an error; pass the relevant source via `files` |
-| `nim_summarize` | `{summary, key_points}` of a file or directory under `cwd` |
-| `nim_agent` / `nim_agent_start` | Read-only investigation: the model gets `grep`, `read_range` and `list_dir` (run locally, confined to `cwd`, secrets and `.git` off limits) and cited `path:line` are verified; `_start` runs it in the background |
-| `nim_scout` / `nim_first_pass_review` / `nim_triage_log` | Roles on the agent loop: the lines a task needs, a first-pass review of a diff read server-side (file, range or `git diff HEAD`), and a log boiled down to its failures. Each has a `_start` variant for the background |
-| `nim_models` | List served models (optional `query` filter) |
-| `nim_usage` | Requests, failures, tokens and agent runs per day and per model, from Castor's local records (no network call) |
-| `nim_status` | Key, default model, limits, rate-limit state (`verify=False` skips the live check) |
-
-Caching, sessions and background jobs work as they do for agy. Sessions are
-shared across backends, so a session name continues whichever tool you call
-next, and compaction of long NIM sessions uses NIM (agy isn't needed).
-
-### Configuration
-
-All optional, set as environment variables on the MCP server:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `NVIDIA_API_KEY` (or `NVIDIA_NIM_API_KEY`) | — | API key (required unless `NVIDIA_API_KEYS` is set) |
-| `NVIDIA_API_KEYS` | — | Several keys, comma-separated. Requests rotate across them; each key has its own rate limit and cooldown, a 429 moves on to the next key, and a rejected key (401/402) is skipped while another remains |
-| `CASTOR_NIM_MODEL` | `nvidia/nemotron-3.5-super-vl-120b-a12b` | Model used when a call names none; see `nim_models` |
-| `CASTOR_NIM_AGENT_MODEL` | `nvidia/nemotron-3.5-super-vl-120b-a12b` (or `CASTOR_NIM_MODEL` when that is set) | Model for `nim_agent` and the roles; scored as accurate as Nemotron 3 Ultra there and about 2.5 times faster |
-| `CASTOR_NIM_AGENT_STEP_MODEL` | the agent model | Model for the agent's tool steps (picking the next lookup); the agent model still writes the answer |
-| `CASTOR_NIM_AGENT_ANSWER_TOKENS` | `16384` | Token cap for the agent's final answer, which reasons over everything it read |
-| `CASTOR_NIM_TRACES` | `1` | `0` turns off the local usage log and agent traces under `~/.cache/claude-castor/` (kept 30 days) |
-| `CASTOR_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint (https only; http allowed for localhost, e.g. a self-hosted NIM) |
-| `CASTOR_NIM_RPM` | `40` | Client-side requests per minute, per key |
-| `CASTOR_NIM_CONCURRENCY` | `4` per key, at most `12` | Simultaneous in-flight requests; background jobs wait up to 300 s for a slot, foreground calls 30 s |
-| `CASTOR_NIM_MAX_INPUT_CHARS` | `300000` | Prompt size budget (~75k tokens); larger prompts are rejected up front |
-| `CASTOR_NIM_MAX_TOKENS` | `4096` | Completion cap per request |
-| `CASTOR_NIM_TIMEOUT` | `60` | Seconds with no new streamed data before Castor gives up on a reply (a stalled answer keeps its partial text); with streaming off, seconds for the whole reply (default `180`) |
-| `CASTOR_NIM_STREAM` | `1` | `0` turns off streaming, for an OpenAI-compatible endpoint without server-sent events |
-
-NVIDIA sets the real free-tier limits and they change; the defaults above are
-conservative guesses, so tune them to what your account shows.
-
-### Resilience
-
-Retryable failures (429, 5xx, network errors, one timeout) are retried with
-exponential backoff and jitter, honoring `Retry-After`. A 429 also sets a shared
-cooldown so concurrent background jobs back off together, and if the wait
-would exceed 30 seconds Castor returns a "try again in Ns" error rather than
-blocking Claude. Auth, billing, permission, not-found and context-window errors
-are never retried and come back with a specific fix. Replies that never
-arrive or come back empty return a clear bracketed error, and `<think>` blocks
-from reasoning models are stripped.
-
----
-
-## Caching
-
-Identical prompts against an unchanged codebase return a stored response instead
-of re-running agy — instant, and free. The cache key combines the full prompt,
-the `model`, the `sandbox` flag, and (when `cwd` is a git repo) the repo state:
-`git HEAD` plus a hash of `git status --porcelain`, so any commit or working-tree
-change busts the cache.
-
-Caching is **side-effect-free only**:
-
-- `trust=True` calls are never cached (they may write files or run commands).
-- Session calls (`session` / `continue_session`) are never cached — they are
-  stateful, and their own transcripts live under `sessions/` (kept separate from
-  the response cache, so `gemini_cache_clear` does not touch them).
-- `sandbox=True` explore calls are cached only inside a git repo, where the repo
-  fingerprint can prove the code is unchanged.
-- Bracketed error/status responses are never stored.
-
-Entries live under `~/.cache/claude-castor/` (or `$XDG_CACHE_HOME`) and expire
-after 7 days. Pass `use_cache=False` to force a fresh run, or call
-`gemini_cache_clear` to wipe the cache.
-
----
-
-## Troubleshooting
-
-**`agy` not found** — Run
-`curl -fsSL https://antigravity.google/cli/install.sh | bash`
-
-**Not signed in** — Run `/castor:auth` (or call the `gemini_auth` tool) for the
-sign-in command, then run `agy -p "ok"` to complete Google sign-in
-
-**Timeout** — agy print mode has a 300s limit. For large projects, prefer
-agent mode (`trust=True`) over pre-loading a full directory
-
-**Empty response** — Try `raw=True` to see unfiltered output
-
-**NVIDIA NIM: not configured / key rejected** — Run `/castor:nim-status`. Set
-`NVIDIA_API_KEY` in the MCP server's environment (see
-[NVIDIA NIM](#nvidia-nim-optional-second-backend)); a 401 means the key is
-wrong or revoked
-
-**NVIDIA NIM: rate-limited** — The free tier is capped by NVIDIA. Castor retries
-with backoff and then reports how long to wait; lower `CASTOR_NIM_RPM` or retry
-later, or use the agy tools meanwhile
-
----
-
-## Maintainer Notes
-
-Before releasing, run `python3 scripts/check_agy_surface.py` to check that
-agy's CLI (the flags/subcommands `server.py` depends on) hasn't drifted since
-the last release. It diffs a live `agy --help` against a checked-in snapshot
-and exits non-zero on drift; pass `--update-snapshot` to refresh the snapshot
-after a deliberate agy upgrade.
-
----
-
-## Roadmap
-
-Recently shipped: model selection (`gemini_models`), a sandbox tier,
-skipped-file listing on truncation, richer `gemini_status`, response caching
-(`gemini_cache_clear`), workflow tools (`gemini_index`, `gemini_review`,
-`gemini_find_usages`, `gemini_explain_error`, `gemini_summarize`,
-`gemini_semantic_search`, `gemini_document`), async background jobs
-(`gemini_start` / `gemini_poll` / `gemini_jobs`), and Castor-owned client-side
-sessions (`session` param + `gemini_sessions` / `_show` / `_delete`) that replace
-the agy `--continue` path.
-
-Still planned:
-
-- Streaming output (token-by-token, vs. the current poll model)
+- [docs/agy.md](docs/agy.md): the `gemini_*` tools, agent mode, sessions, caching
+- [docs/nim.md](docs/nim.md): the optional NVIDIA NIM backend (setup, tools, configuration)
+- [docs/run-tier.md](docs/run-tier.md): background suite runs and run compare
+- [docs/troubleshooting.md](docs/troubleshooting.md)
+- [docs/development.md](docs/development.md): checks to run before committing, evals, roadmap
+- [GEMINI.md](GEMINI.md): the prompting guide Claude reads (installed to `~/.claude/`)

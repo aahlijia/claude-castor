@@ -110,7 +110,7 @@ def main() -> None:
         "  /castor:usages    — trace where a symbol is used\n"
         "  /castor:explain   — diagnose an error against the codebase\n"
         "\nOptional: add NVIDIA NIM's free hosted models as a second backend —\n"
-        "see the 'NVIDIA NIM' section of README.md, then /castor:nim-status."
+        "see docs/nim.md, then /castor:nim-status."
     )
 
 
