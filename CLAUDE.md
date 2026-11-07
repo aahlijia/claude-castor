@@ -243,9 +243,21 @@ that waits on a long run). Two keys open it, and both are needed:
   once at `expect_minutes + grace_minutes` while no verdict table is out;
   it must be an executable file inside the root but need not match `allow`,
   which only limits what callers can start),
-  `grace_minutes` (10), `max_hours` (8), `max_running` (4) and `flags`
-  (`{name, pattern, stop}`, matched on whole console lines). Unknown keys
-  and bad regexes are errors.
+  `grace_minutes` (10), `max_hours` (8), `max_running` (4), `flags`
+  (`{name, pattern, stop}`, matched on whole console lines) and `log_format`
+  (below). Unknown keys and bad regexes are errors.
+- `log_format` says how the suite log spells its verdicts, for the run
+  result, `castor_compare_runs`, `nim_triage_log` and `nim_explain_row`.
+  Absent means NQC's `verdict.sh` layout. `"pytest"` reads only pytest
+  `FAILED` / `ERROR` lines and the pytest result line. An object takes an
+  optional `profile` (`default` or `pytest`) plus overrides: `case` (stamp
+  regex, two groups: status with `_` for spaces, name), `totals` (three
+  groups: total, fail, not assessed), `name_start` / `name_end` (the
+  fixed-column name field of unstamped lines) and `reprint` (the line that
+  starts the summary table). `null` turns `case`, `totals` or `reprint`
+  off. Compare, triage and explain-row read only this key, so they work
+  without `allow` or `CASTOR_RUN_ROOTS`; a bad `log_format` is an error
+  there.
 - the castor registration lists the root in `CASTOR_RUN_ROOTS`
   (colon-separated absolute paths). `cwd` must be an entry itself or a git
   worktree of one (list the main repo and every lane is covered), never a

@@ -6299,23 +6299,67 @@ def _start_agent_job(
 # ---------------------------------------------------------------------------
 # Verdict rows
 #
-# A deterministic reader for suite logs. NQC's verdict.sh prints each row as
-# `%-13s %-34s %s` (STATUS NAME DETAIL) followed by a stamp line
+# A deterministic reader for suite logs. The default format (first used by
+# NQC's verdict.sh) prints each row as `%-13s %-34s %s` (STATUS NAME DETAIL)
+# followed by a stamp line
 # `@case <epoch> <STATUS_> <NAME>`; the stamp is the reliable split because
 # a long name overflows its column. Plain pytest output is the fallback.
 # ---------------------------------------------------------------------------
 
-_CASE_RE = re.compile(r"^@case \d+ (PASS|FAIL|NOT_ASSESSED) (.+)$")
 _PYTEST_ROW_RE = re.compile(r"^(FAILED|ERROR) (\S+)(?: - (.*))?$")
-_NQC_TOTALS_RE = re.compile(r"^total (\d+), fail (\d+), not assessed (\d+)$")
 _PYTEST_TOTALS_RE = re.compile(r"\d+ (?:failed|passed|errors?)\b.* in [\d.]+s")
 _PYTEST_COUNT_RE = re.compile(r"(\d+) (failed|passed|errors?)\b")
-# Unstamped verdict lines: `%-13s %-34s %s`, so the name field is columns
-# 14 to 48 and column 48 is the space before the detail.
 _VERDICT_STATUSES = ("PASS", "FAIL", "NOT ASSESSED")
-_VERDICT_NAME_START = 14
-_VERDICT_NAME_END = 48
-_VERDICT_REPRINT = "--- verdicts ---"
+
+
+@dataclass(frozen=True)
+class LogFormat:
+    """How a project's suite log spells its verdicts.
+
+    The default is the layout of NQC's verdict.sh. A project picks another
+    with the `log_format` key of `.castor/run.json`; pytest `FAILED` lines
+    and the pytest result line are always read as a fallback.
+
+    Attributes:
+        case_re: Matches a stamp line; group 1 is the status with `_` for
+            spaces, group 2 the test name. None when the suite has none.
+        totals_re: Matches the totals line; groups are total, fail and not
+            assessed. None when the suite has none.
+        unstamped: Whether to read fixed-column verdict lines when a log
+            has no stamps.
+        name_start: Column where an unstamped line's name starts.
+        name_end: Column of the space after the name field.
+        reprint: The line that starts the summary reprint, or None.
+    """
+
+    case_re: re.Pattern | None
+    totals_re: re.Pattern | None
+    unstamped: bool
+    name_start: int
+    name_end: int
+    reprint: str | None
+
+
+DEFAULT_LOG_FORMAT = LogFormat(
+    case_re=re.compile(r"^@case \d+ (PASS|FAIL|NOT_ASSESSED) (.+)$"),
+    totals_re=re.compile(r"^total (\d+), fail (\d+), not assessed (\d+)$"),
+    unstamped=True,
+    name_start=14,
+    name_end=48,
+    reprint="--- verdicts ---",
+)
+PYTEST_LOG_FORMAT = LogFormat(
+    case_re=None,
+    totals_re=None,
+    unstamped=False,
+    name_start=14,
+    name_end=48,
+    reprint=None,
+)
+LOG_FORMAT_PROFILES = {
+    "default": DEFAULT_LOG_FORMAT,
+    "pytest": PYTEST_LOG_FORMAT,
+}
 
 
 @dataclass(frozen=True)
@@ -6354,10 +6398,14 @@ def _verdict_line_index(lines: list[str], stamp: int) -> int | None:
 
 
 def _stamped_row(
-    lines: list[str], stamp: int, prev_stamp: int, counts: dict[str, int]
+    lines: list[str],
+    stamp: int,
+    prev_stamp: int,
+    counts: dict[str, int],
+    case_re: re.Pattern,
 ) -> VerdictRow | None:
     """Builds the row for one stamp line, or None if its verdict is absent."""
-    match = _CASE_RE.match(lines[stamp])
+    match = case_re.match(lines[stamp])
     if not match:
         return None
     status = match.group(1).replace("_", " ")
@@ -6379,15 +6427,15 @@ def _stamped_row(
     return VerdictRow(name, status, detail, idx + 1, block, occurrence)
 
 
-def _stamped_rows(lines: list[str]) -> list[VerdictRow]:
+def _stamped_rows(lines: list[str], case_re: re.Pattern) -> list[VerdictRow]:
     """Reads every stamped verdict row, in log order."""
     rows: list[VerdictRow] = []
     counts: dict[str, int] = {}
     prev_stamp = -1
     for i, text in enumerate(lines):
-        if not _CASE_RE.match(text):
+        if not case_re.match(text):
             continue
-        row = _stamped_row(lines, i, prev_stamp, counts)
+        row = _stamped_row(lines, i, prev_stamp, counts, case_re)
         if row:
             rows.append(row)
         prev_stamp = i
@@ -6410,7 +6458,9 @@ def _pytest_rows(lines: list[str]) -> list[VerdictRow]:
     return rows
 
 
-def _verdict_rows(lines: list[str]) -> list[VerdictRow]:
+def _verdict_rows(
+    lines: list[str], fmt: LogFormat = DEFAULT_LOG_FORMAT
+) -> list[VerdictRow]:
     """Parses verdict rows from log lines.
 
     Stamped rows win when the log has any stamp. A log without stamps
@@ -6419,32 +6469,48 @@ def _verdict_rows(lines: list[str]) -> list[VerdictRow]:
 
     Args:
         lines: The log, one string per line.
+        fmt: The project's log format.
 
     Returns:
         The rows in log order, empty when the log has none.
     """
     cleaned = _clean_lines(lines)
-    if _has_case_stamps(cleaned):
-        return _stamped_rows(cleaned) or _pytest_rows(cleaned)
-    return _unstamped_rows(cleaned) or _pytest_rows(cleaned)
+    if fmt.case_re is not None and _has_case_stamps(cleaned, fmt):
+        return _stamped_rows(cleaned, fmt.case_re) or _pytest_rows(cleaned)
+    if fmt.unstamped:
+        return _unstamped_rows(cleaned, fmt) or _pytest_rows(cleaned)
+    return _pytest_rows(cleaned)
 
 
-def _has_case_stamps(lines: list[str]) -> bool:
-    """True when any line is an `@case` stamp."""
-    return any(_CASE_RE.match(text) for text in lines)
+def _has_case_stamps(
+    lines: list[str], fmt: LogFormat = DEFAULT_LOG_FORMAT
+) -> bool:
+    """True when any line is a stamp line."""
+    case_re = fmt.case_re
+    return case_re is not None and any(case_re.match(t) for t in lines)
 
 
-def _unstamped_status(text: str) -> str | None:
-    """A verdict line's status (padded to 13 columns), else None."""
-    head = text[:_VERDICT_NAME_START]
+def _is_case_stamp(text: str, fmt: LogFormat = DEFAULT_LOG_FORMAT) -> bool:
+    """True when `text` is a stamp line."""
+    return fmt.case_re is not None and bool(fmt.case_re.match(text))
+
+
+def _is_totals_line(text: str, fmt: LogFormat = DEFAULT_LOG_FORMAT) -> bool:
+    """True when `text` is the suite totals line."""
+    return fmt.totals_re is not None and bool(fmt.totals_re.match(text))
+
+
+def _unstamped_status(text: str, fmt: LogFormat) -> str | None:
+    """A verdict line's status (padded to the name column), else None."""
+    head = text[: fmt.name_start]
     for status in _VERDICT_STATUSES:
-        if head == status.ljust(_VERDICT_NAME_START - 1) + " ":
+        if head == status.ljust(fmt.name_start - 1) + " ":
             return status
     return None
 
 
 def _unstamped_verdict_lines(
-    lines: list[str],
+    lines: list[str], fmt: LogFormat
 ) -> list[tuple[int, str | None]]:
     """(index, status) of each verdict line outside the summary reprint.
 
@@ -6457,25 +6523,25 @@ def _unstamped_verdict_lines(
     in_reprint = False
     for i, text in enumerate(lines):
         if in_reprint:
-            if _NQC_TOTALS_RE.match(text):
+            if _is_totals_line(text, fmt):
                 found.append((i, None))
                 in_reprint = False
                 continue
-            if not text.strip() or _unstamped_status(text):
+            if not text.strip() or _unstamped_status(text, fmt):
                 continue
             found.append((i - 1, None))
             in_reprint = False
-        if text.rstrip() == _VERDICT_REPRINT:
+        if fmt.reprint is not None and text.rstrip() == fmt.reprint:
             in_reprint = True
             continue
-        status = _unstamped_status(text)
+        status = _unstamped_status(text, fmt)
         if status:
             found.append((i, status))
     return found
 
 
 def _unstamped_blocks(
-    lines: list[str],
+    lines: list[str], fmt: LogFormat
 ) -> list[tuple[int, str, tuple[int, int] | None]]:
     """(index, status, block) of each verdict line outside the reprint.
 
@@ -6485,7 +6551,7 @@ def _unstamped_blocks(
     """
     out = []
     prev = -1
-    for i, status in _unstamped_verdict_lines(lines):
+    for i, status in _unstamped_verdict_lines(lines, fmt):
         first = prev + 2
         if status is not None:
             out.append((i, status, (first, i) if first <= i else None))
@@ -6493,23 +6559,25 @@ def _unstamped_blocks(
     return out
 
 
-def _unstamped_rows(lines: list[str]) -> list[VerdictRow]:
+def _unstamped_rows(lines: list[str], fmt: LogFormat) -> list[VerdictRow]:
     """Reads verdict lines without stamps; overflowing names are skipped.
 
-    The name field is columns 14 to 48. A name longer than 34 characters
-    runs into the detail, so its line is left out (an overflowing name
-    with a space at column 48 is misread; accepted).
+    The name field runs from `fmt.name_start` to `fmt.name_end` (14 to 48
+    by default). A name longer than the field runs into the detail, so its
+    line is left out (an overflowing name with a space at the end column is
+    misread; accepted).
     """
     rows: list[VerdictRow] = []
     counts: dict[str, int] = {}
-    for i, status, block in _unstamped_blocks(lines):
+    end = fmt.name_end
+    for i, status, block in _unstamped_blocks(lines, fmt):
         text = lines[i]
-        if len(text) > _VERDICT_NAME_END and text[_VERDICT_NAME_END] != " ":
+        if len(text) > end and text[end] != " ":
             continue
-        name = text[_VERDICT_NAME_START:_VERDICT_NAME_END].rstrip()
+        name = text[fmt.name_start : end].rstrip()
         if not name:
             continue
-        detail = text[_VERDICT_NAME_END + 1 :].strip()
+        detail = text[end + 1 :].strip()
         occurrence = counts.get(name, 0)
         counts[name] = occurrence + 1
         rows.append(VerdictRow(name, status, detail, i + 1, block, occurrence))
@@ -6517,7 +6585,7 @@ def _unstamped_rows(lines: list[str]) -> list[VerdictRow]:
 
 
 def _unstamped_named_rows(
-    lines: list[str], name: str
+    lines: list[str], name: str, fmt: LogFormat = DEFAULT_LOG_FORMAT
 ) -> tuple[list[VerdictRow], str | None]:
     """Rows for verdict lines whose name field starts with exactly `name`.
 
@@ -6528,8 +6596,8 @@ def _unstamped_named_rows(
     """
     rows: list[VerdictRow] = []
     tails: dict[str, list[str]] = {}
-    for i, status, block in _unstamped_blocks(lines):
-        rest = lines[i][_VERDICT_NAME_START:]
+    for i, status, block in _unstamped_blocks(lines, fmt):
+        rest = lines[i][fmt.name_start :]
         after = rest[len(name) :]
         if not rest.startswith(name) or after[:1] not in ("", " "):
             continue
@@ -6556,11 +6624,15 @@ def _unstamped_prefix_error(name: str, tails: list[list[str]]) -> str:
     )
 
 
-def _last_nqc_totals(lines: list[str]) -> dict[str, int] | None:
-    """Returns the last `total N, fail N, not assessed N` line, if any."""
+def _last_suite_totals(
+    lines: list[str], fmt: LogFormat
+) -> dict[str, int] | None:
+    """Returns the last totals line (total, fail, not assessed), if any."""
+    if fmt.totals_re is None:
+        return None
     found = None
     for text in lines:
-        match = _NQC_TOTALS_RE.match(text)
+        match = fmt.totals_re.match(text)
         if match:
             total, fail, na = (int(g) for g in match.groups())
             found = {"total": total, "fail": fail, "not_assessed": na}
@@ -6585,18 +6657,21 @@ def _last_pytest_totals(lines: list[str]) -> dict[str, int] | None:
     return found
 
 
-def _verdict_totals(lines: list[str]) -> dict[str, int] | None:
+def _verdict_totals(
+    lines: list[str], fmt: LogFormat = DEFAULT_LOG_FORMAT
+) -> dict[str, int] | None:
     """Reads the suite totals line.
 
     Args:
         lines: The log, one string per line.
+        fmt: The project's log format.
 
     Returns:
         A dict with `total`, `fail` and `not_assessed`, or None when the
         log has no totals line. The last match wins.
     """
     cleaned = _clean_lines(lines)
-    return _last_nqc_totals(cleaned) or _last_pytest_totals(cleaned)
+    return _last_suite_totals(cleaned, fmt) or _last_pytest_totals(cleaned)
 
 
 def _row_for_line(rows: list[VerdictRow], n: int) -> VerdictRow | None:
@@ -7269,10 +7344,13 @@ def _triage_task(
     target, root, error = _role_log(cwd, log_path)
     if error or target is None:
         return None, root, error, None
+    fmt, error = _log_format(Path(root))
+    if error:
+        return None, str(root), f"[Error: {error}]", None
     extra = f"\nAlso determine: {question.strip()}\n" if question else ""
     label = str(target.relative_to(root))
     task = NIM_TRIAGE_PROMPT.format(
-        log=label, question=extra, context=_triage_context(target, label)
+        log=label, question=extra, context=_triage_context(target, label, fmt)
     )
     return task, str(root), None, target
 
@@ -7388,13 +7466,17 @@ def _triage_item(line: str, label: str) -> dict | None:
     }
 
 
-def _cites_case_stamp(log_line: int, log: list[str]) -> bool:
-    """True when a cited 1-based line of the log is an `@case` stamp."""
-    return 0 < log_line <= len(log) and bool(_CASE_RE.match(log[log_line - 1]))
+def _cites_case_stamp(log_line: int, log: list[str], fmt: LogFormat) -> bool:
+    """True when a cited 1-based line of the log is a stamp line."""
+    return 0 < log_line <= len(log) and _is_case_stamp(log[log_line - 1], fmt)
 
 
 def _triage_failures(
-    lines: list[str], label: str, rows: list[VerdictRow], log: list[str]
+    lines: list[str],
+    label: str,
+    rows: list[VerdictRow],
+    log: list[str],
+    fmt: LogFormat,
 ) -> list[dict]:
     """The answer's items, each tied to the verdict row that holds its line.
 
@@ -7404,7 +7486,7 @@ def _triage_failures(
     failures = []
     for line in lines:
         item = _triage_item(line, label)
-        if item is None or _cites_case_stamp(item["log_line"], log):
+        if item is None or _cites_case_stamp(item["log_line"], log, fmt):
             continue
         row = _row_for_line(rows, item["log_line"])
         failures.append({"row": row.name if row else None, **item})
@@ -7412,7 +7494,11 @@ def _triage_failures(
 
 
 def _triage_json(
-    answer: str, stats: dict, label: str, lines: list[str]
+    answer: str,
+    stats: dict,
+    label: str,
+    lines: list[str],
+    fmt: LogFormat = DEFAULT_LOG_FORMAT,
 ) -> dict:
     """Castor's JSON reading of a triage answer.
 
@@ -7421,19 +7507,20 @@ def _triage_json(
         stats: The run's stats (model, steps, seconds).
         label: The log's path relative to the project root.
         lines: The log, one string per line.
+        fmt: The project's log format.
 
     Returns:
         The object described in the NQC asks design, section 4.
     """
-    rows = _verdict_rows(lines)
-    _, markers = _triage_hits(lines)
+    rows = _verdict_rows(lines, fmt)
+    _, markers = _triage_hits(lines, fmt)
     body = _answer_lines(answer)
     return {
         "log": label,
         "verdict": _triage_verdict(body),
-        "totals": _verdict_totals(lines),
+        "totals": _verdict_totals(lines, fmt),
         "rows": _rows_json(rows),
-        "failures": _triage_failures(body, label, rows, lines),
+        "failures": _triage_failures(body, label, rows, lines, fmt),
         "markers": markers,
         "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
     }
@@ -7467,12 +7554,15 @@ def _dispatch_triage_json(
         return json.dumps(_nim_error_json(text), ensure_ascii=False)
     data = _read_bytes(log) or b""
     lines = data.decode("utf-8", errors="replace").splitlines()
+    fmt, _ = _log_format(Path(cwd))
     return json.dumps(
-        _triage_json(text, stats, label, lines), ensure_ascii=False
+        _triage_json(text, stats, label, lines, fmt), ensure_ascii=False
     )
 
 
-def _triage_context(log: Path, label: str) -> str:
+def _triage_context(
+    log: Path, label: str, fmt: LogFormat = DEFAULT_LOG_FORMAT
+) -> str:
     """The [CONTEXT] block for triage: counts, collapsed hits, head/tail.
 
     Head and tail are always kept (verdict tables sit at the end of most
@@ -7480,7 +7570,7 @@ def _triage_context(log: Path, label: str) -> str:
     """
     data = _read_bytes(log) or b""
     lines = data.decode("utf-8", errors="replace").splitlines()
-    hits, counts = _triage_hits(lines)
+    hits, counts = _triage_hits(lines, fmt)
     count_rows = "\n".join(f"{name}: {counts[name]}" for name in counts)
     ends = _triage_ends(lines, label)
     room = NIM_TRIAGE_CONTEXT_CHARS - len(count_rows) - len(ends) - 200
@@ -7491,15 +7581,17 @@ def _triage_context(log: Path, label: str) -> str:
     )
 
 
-def _triage_hits(lines: list[str]) -> tuple[list[int], dict[str, int]]:
+def _triage_hits(
+    lines: list[str], fmt: LogFormat = DEFAULT_LOG_FORMAT
+) -> tuple[list[int], dict[str, int]]:
     """Line numbers matching any marker, and each marker's line count.
 
-    An `@case` stamp repeats the verdict line above it, so it is no hit.
+    A stamp line repeats the verdict line above it, so it is no hit.
     """
     counts = dict.fromkeys((name for name, _ in NIM_TRIAGE_MARKERS), 0)
     hits: list[int] = []
     for number, line in enumerate(lines, 1):
-        if _CASE_RE.match(line):
+        if _is_case_stamp(line, fmt):
             continue
         matched = [n for n, rx in NIM_TRIAGE_MARKERS if rx.search(line)]
         for name in matched:
@@ -7743,9 +7835,12 @@ def _explain_row_build(
     if data is None:
         return None, root, f"[Error: {log_path!r} is unreadable.]", {}
     lines = _clean_lines(data.decode("utf-8", errors="replace").splitlines())
-    unstamped = None if _has_case_stamps(lines) else lines
+    fmt, error = _log_format(Path(root))
+    if error:
+        return None, str(root), f"[Error: {error}]", {}
+    unstamped = None if _has_case_stamps(lines, fmt) else lines
     found, error = _explain_row_find(
-        _verdict_rows(lines), row, occurrence, unstamped
+        _verdict_rows(lines, fmt), row, occurrence, unstamped, fmt
     )
     if error or found is None:
         return None, root, error, {}
@@ -7764,6 +7859,7 @@ def _explain_row_find(
     row: str,
     occurrence: int,
     lines: list[str] | None = None,
+    fmt: LogFormat = DEFAULT_LOG_FORMAT,
 ) -> tuple[VerdictRow | None, str | None]:
     """The row to explain: exact name, else the one name holding `row`.
 
@@ -7778,8 +7874,8 @@ def _explain_row_find(
     same: list[VerdictRow] = []
     if matches:
         same = [r for r in rows if r.name == matches[0]]
-    elif lines and row:
-        same, error = _unstamped_named_rows(lines, row)
+    elif lines and row and fmt.unstamped:
+        same, error = _unstamped_named_rows(lines, row, fmt)
         if error:
             return None, error
     if not same and not rows:
@@ -9772,6 +9868,7 @@ RUN_CONFIG_KEYS = frozenset(
         "max_hours",
         "max_running",
         "flags",
+        "log_format",
     }
 )
 RUN_DEFAULT_LOG_LINE = "^log: (.+)$"
@@ -9801,6 +9898,7 @@ class RunConfig:
     max_hours: float
     max_running: int
     flags: tuple[RunFlag, ...]
+    log_format: LogFormat = DEFAULT_LOG_FORMAT
 
 
 def _run_enabled_for(root: Path) -> str | None:
@@ -9894,7 +9992,111 @@ def _run_config_from(data: dict) -> RunConfig:
             _run_number(data, "max_running", RUN_DEFAULT_MAX_RUNNING)
         ),
         flags=tuple(_run_flags(data.get("flags", []))),
+        log_format=_log_format_from(data.get("log_format")),
     )
+
+
+LOG_FORMAT_KEYS = frozenset(
+    {"profile", "case", "totals", "name_start", "name_end", "reprint"}
+)
+
+
+def _log_format_from(value: Any) -> LogFormat:
+    """Build a LogFormat from run.json's `log_format`; ValueError names it.
+
+    `value` is None (the default), a profile name, or an object with an
+    optional `profile` (the base, default "default") and overrides: `case`
+    and `totals` (regex strings, or null for none; `case` needs two groups
+    and `totals` three), `name_start` and `name_end` (columns) and
+    `reprint` (a line, or null).
+    """
+    if value is None:
+        return DEFAULT_LOG_FORMAT
+    if isinstance(value, str):
+        value = {"profile": value}
+    if not isinstance(value, dict):
+        raise ValueError("log_format must be a profile name or an object.")
+    extra = sorted(set(value) - LOG_FORMAT_KEYS)
+    if extra:
+        raise ValueError(f"log_format has unknown key(s): {extra}")
+    name = value.get("profile", "default")
+    base = LOG_FORMAT_PROFILES.get(name) if isinstance(name, str) else None
+    if base is None:
+        known = sorted(LOG_FORMAT_PROFILES)
+        raise ValueError(f"log_format.profile must be one of {known}.")
+    return LogFormat(
+        case_re=_log_format_regex(value, "case", base.case_re, 2),
+        totals_re=_log_format_regex(value, "totals", base.totals_re, 3),
+        unstamped=base.unstamped,
+        name_start=_log_format_column(value, "name_start", base.name_start),
+        name_end=_log_format_column(value, "name_end", base.name_end),
+        reprint=_log_format_reprint(value, base.reprint),
+    )
+
+
+def _log_format_regex(
+    value: dict, key: str, default: re.Pattern | None, groups: int
+) -> re.Pattern | None:
+    """A log_format regex with exactly `groups` groups, else ValueError."""
+    if key not in value:
+        return default
+    if value[key] is None:
+        return None
+    pattern = _run_regex(value[key], f"log_format.{key}")
+    if pattern.groups != groups:
+        raise ValueError(f"log_format.{key} needs exactly {groups} group(s).")
+    return pattern
+
+
+def _log_format_column(value: dict, key: str, default: int) -> int:
+    """A log_format column number (an integer of at least 1)."""
+    raw = value.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError(f"log_format.{key} must be an integer of 1 or more.")
+    return raw
+
+
+def _log_format_reprint(value: dict, default: str | None) -> str | None:
+    """The log_format reprint line: a non-empty string or null."""
+    raw = value.get("reprint", default)
+    if raw is not None and (not isinstance(raw, str) or not raw):
+        raise ValueError("log_format.reprint must be a string or null.")
+    return raw
+
+
+def _log_format(root: Path) -> tuple[LogFormat, str | None]:
+    """The project's log format from `root/.castor/run.json`.
+
+    Reads only `log_format`, so it works without the run tier (no `allow`,
+    no CASTOR_RUN_ROOTS).
+
+    Args:
+        root: The project root.
+
+    Returns:
+        (format, None), or (the default format, a sentence naming the
+        problem) when the file or its `log_format` is bad. A missing file
+        is the default format with no error.
+    """
+    path = root / RUN_CONFIG_FILE
+    if not path.is_file():
+        return DEFAULT_LOG_FORMAT, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return (
+            DEFAULT_LOG_FORMAT,
+            f"{RUN_CONFIG_FILE} is not valid JSON: {exc}",
+        )
+    if not isinstance(data, dict):
+        return (
+            DEFAULT_LOG_FORMAT,
+            f"{RUN_CONFIG_FILE} must hold a JSON object.",
+        )
+    try:
+        return _log_format_from(data.get("log_format")), None
+    except ValueError as exc:
+        return DEFAULT_LOG_FORMAT, f"{RUN_CONFIG_FILE}: {exc}"
 
 
 def _run_str_list(value: Any, key: str) -> list[str]:
@@ -10257,19 +10459,24 @@ def _run_capture_lines(rec: dict) -> list[str]:
     return _clean_lines(data.decode("utf-8", errors="replace").splitlines())
 
 
-def _run_has_table(lines: list[str]) -> bool:
+def _run_has_table(lines: list[str], fmt: LogFormat) -> bool:
     """True when the output reached a verdict table or a totals line."""
-    return _run_table(lines) is not None or _verdict_totals(lines) is not None
+    return (
+        _run_table(lines, fmt) is not None
+        or _verdict_totals(lines, fmt) is not None
+    )
 
 
-def _run_table(lines: list[str]) -> str | None:
-    """The last `--- verdicts ---` block through its totals line."""
-    starts = [i for i, ln in enumerate(lines) if ln == _VERDICT_REPRINT]
+def _run_table(lines: list[str], fmt: LogFormat) -> str | None:
+    """The last reprint block (`--- verdicts ---`) through its totals line."""
+    if fmt.reprint is None:
+        return None
+    starts = [i for i, ln in enumerate(lines) if ln == fmt.reprint]
     if not starts:
         return None
     block = lines[starts[-1] :]
     for i, line in enumerate(block):
-        if _NQC_TOTALS_RE.match(line):
+        if _is_totals_line(line, fmt):
             return "\n".join(block[: i + 1])
     return "\n".join(block).rstrip()
 
@@ -10319,7 +10526,8 @@ def _run_result(
         lines = _clean_lines(
             data.decode("utf-8", errors="replace").splitlines()
         )
-    totals = _verdict_totals(lines)
+    fmt = cfg.log_format
+    totals = _verdict_totals(lines, fmt)
     result = {
         "run": rec["run"],
         "status": status,
@@ -10331,8 +10539,8 @@ def _run_result(
         ),
         "verdict": _run_verdict(exit_code, totals),
         "totals": totals,
-        "rows": _rows_json(_verdict_rows(lines)),
-        "table": _run_table(capture),
+        "rows": _rows_json(_verdict_rows(lines, fmt)),
+        "table": _run_table(capture, fmt),
         "log": log,
         "flags": flags,
         "overdue": overdue,
@@ -10543,7 +10751,7 @@ def _run_watch(
         stop = _run_scan(rec, cfg, tail, final=ended)
         if ended:
             lines = _run_capture_lines(rec)
-            if proc is None and not _run_has_table(lines):
+            if proc is None and not _run_has_table(lines, cfg.log_format):
                 return None, "lost"
             return exit_code, "done"
         if stop:
@@ -10581,7 +10789,7 @@ def _run_wants_overdue(rec: dict, cfg: RunConfig) -> bool:
     """True once: an overdue command is set and no table is out yet."""
     if rec.get("overdue") is not None or not cfg.overdue_command:
         return False
-    return not _run_has_table(_run_capture_lines(rec))
+    return not _run_has_table(_run_capture_lines(rec), cfg.log_format)
 
 
 def _run_overdue(rec: dict, cfg: RunConfig) -> dict:
@@ -10821,7 +11029,9 @@ def _mask_timings(text: str) -> str:
 
 
 def _compare_rows(
-    runs: list[tuple[str, list[str]]], same_code: bool = False
+    runs: list[tuple[str, list[str]]],
+    same_code: bool = False,
+    fmt: LogFormat = DEFAULT_LOG_FORMAT,
 ) -> list[RowCompare]:
     """Every row across the runs, sorted by class order, then name.
 
@@ -10829,6 +11039,7 @@ def _compare_rows(
         runs: (label, log lines) per run, oldest first.
         same_code: True when no fix landed between the runs, so any
             PASS and FAIL mix is flaky.
+        fmt: The project's log format.
 
     Returns:
         One RowCompare per (name, occurrence) seen in any run; `same` rows
@@ -10838,7 +11049,7 @@ def _compare_rows(
     keys: dict[tuple[str, int], None] = {}
     for label, lines in runs:
         clean = _clean_lines(lines)
-        by_key = {(r.name, r.occurrence): r for r in _verdict_rows(clean)}
+        by_key = {(r.name, r.occurrence): r for r in _verdict_rows(clean, fmt)}
         parsed.append((label, clean, by_key))
         keys.update(dict.fromkeys(by_key))
     out = []
@@ -10990,10 +11201,13 @@ def castor_compare_runs(
         return f"[Error: cwd must be an absolute directory, not {cwd!r}.]"
     if len(logs) < 2 or len(logs) > COMPARE_MAX_LOGS:
         return f"[Error: give two logs to {COMPARE_MAX_LOGS}, oldest first.]"
+    fmt, error = _log_format(Path(root))
+    if error:
+        return f"[Error: {error}]"
     runs, error = _compare_read_logs(root, logs)
     if error:
         return f"[Error: {error}]"
-    found = _compare_rows(runs, same_code)
+    found = _compare_rows(runs, same_code, fmt)
     if rows:
         found = [r for r in found if any(w in r.name for w in rows)]
     return _compare_text(found)

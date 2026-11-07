@@ -789,9 +789,7 @@ def test_run_start_refusals(project, monkeypatch, tmp_path):
 
 
 def test_run_start_respects_max_running(project, fast, started):
-    _write_config(
-        project, {"allow": ["t/*.sh"], "max_running": 1}
-    )
+    _write_config(project, {"allow": ["t/*.sh"], "max_running": 1})
     _script(project / "t" / "sleep.sh", "sleep 30\n")
     first = _tool_start(project, started, ["t/sleep.sh"])
     out = server.castor_run_start(str(project), ["t/sleep.sh"], 5)
@@ -1190,3 +1188,161 @@ def test_overdue_respects_the_off_switch(project, fast, started, monkeypatch):
     assert out["overdue"]["exit_code"] is None, out
     assert "CASTOR_RUN=0" in out["overdue"]["output"]
     assert not (project / "count.txt").exists()
+
+
+# --- log_format: suites that do not print NQC's verdict layout ---------------
+
+_PYTEST_LOG = [
+    "FAILED tests/test_a.py::test_one - assert 1 == 2",
+    "ERROR tests/test_b.py::test_two",
+    "=== 2 failed, 5 passed in 1.20s ===",
+]
+_CUSTOM_LOG = [
+    "PASS          alpha                              fine",
+    "# case PASS alpha",
+    "FAIL          beta                               broke",
+    "# case FAIL beta",
+    "summary: 2 run, 1 bad, 0 skipped",
+]
+_CUSTOM_FORMAT = {
+    "case": r"^# case (PASS|FAIL) (.+)$",
+    "totals": r"^summary: (\d+) run, (\d+) bad, (\d+) skipped$",
+}
+
+
+def test_log_format_default_is_nqc():
+    fmt, error = server._log_format(Path("/nonexistent-castor-root"))
+    assert error is None
+    assert fmt is server.DEFAULT_LOG_FORMAT
+
+
+def test_log_format_reads_only_its_key(tmp_path):
+    """No `allow` and no CASTOR_RUN_ROOTS are needed to set a log format."""
+    _write_config(tmp_path, {"log_format": "pytest"})
+    fmt, error = server._log_format(tmp_path)
+    assert error is None
+    assert fmt == server.PYTEST_LOG_FORMAT
+
+
+def test_log_format_object_overrides_the_default_profile(tmp_path):
+    _write_config(tmp_path, {"log_format": _CUSTOM_FORMAT})
+    fmt, error = server._log_format(tmp_path)
+    assert error is None
+    assert fmt.case_re.pattern == _CUSTOM_FORMAT["case"]
+    assert fmt.unstamped and fmt.name_start == 14
+
+
+@pytest.mark.parametrize(
+    "value, needle",
+    [
+        ("nope", "profile"),
+        ({"profile": 3}, "profile"),
+        ({"bogus": 1}, "unknown key"),
+        ({"case": "(a)"}, "exactly 2 group"),
+        ({"totals": "(a)(b)"}, "exactly 3 group"),
+        ({"case": "("}, "valid regex"),
+        ({"name_start": 0}, "name_start"),
+        ({"name_end": True}, "name_end"),
+        ({"reprint": ""}, "reprint"),
+        (5, "profile name or an object"),
+    ],
+)
+def test_log_format_rejects_bad_values(tmp_path, value, needle):
+    _write_config(tmp_path, {"log_format": value})
+    fmt, error = server._log_format(tmp_path)
+    assert fmt is server.DEFAULT_LOG_FORMAT
+    assert needle in error and "run.json" in error
+
+
+def test_log_format_rejects_bad_json(tmp_path):
+    (tmp_path / ".castor").mkdir()
+    (tmp_path / ".castor" / "run.json").write_text("{nope")
+    _, error = server._log_format(tmp_path)
+    assert "not valid JSON" in error
+
+
+def test_run_config_accepts_log_format(project):
+    _write_config(project, {"allow": ["t/*.sh"], "log_format": "pytest"})
+    cfg, error = server._run_config(project)
+    assert error is None
+    assert cfg.log_format == server.PYTEST_LOG_FORMAT
+
+
+def test_run_config_rejects_bad_log_format(project):
+    _write_config(project, {"allow": ["t/*.sh"], "log_format": "nope"})
+    cfg, error = server._run_config(project)
+    assert cfg is None and "log_format" in error
+
+
+def test_pytest_profile_reads_pytest_rows_and_totals():
+    fmt = server.PYTEST_LOG_FORMAT
+    rows = server._verdict_rows(_PYTEST_LOG, fmt)
+    assert [(r.name, r.status) for r in rows] == [
+        ("tests/test_a.py::test_one", "FAIL"),
+        ("tests/test_b.py::test_two", "FAIL"),
+    ]
+    assert server._verdict_totals(_PYTEST_LOG, fmt) == {
+        "total": 7,
+        "fail": 2,
+        "not_assessed": 0,
+    }
+
+
+def test_pytest_profile_ignores_nqc_lines():
+    """A pytest suite never gets NQC stamps or totals read out of its log."""
+    log = ["PASS          alpha                              ok", *_PYTEST_LOG]
+    fmt = server.PYTEST_LOG_FORMAT
+    assert len(server._verdict_rows(log, fmt)) == 2
+    assert not server._has_case_stamps(["@case 1 PASS x"], fmt)
+    assert not server._is_totals_line("total 1, fail 0, not assessed 0", fmt)
+    assert (
+        server._run_table(
+            ["--- verdicts ---", "total 1, fail 0, not assessed 0"], fmt
+        )
+        is None
+    )
+
+
+def test_custom_stamp_and_totals_formats():
+    fmt = server._log_format_from(_CUSTOM_FORMAT)
+    rows = server._verdict_rows(_CUSTOM_LOG, fmt)
+    assert [(r.name, r.status, r.detail) for r in rows] == [
+        ("alpha", "PASS", "fine"),
+        ("beta", "FAIL", "broke"),
+    ]
+    assert server._verdict_totals(_CUSTOM_LOG, fmt) == {
+        "total": 2,
+        "fail": 1,
+        "not_assessed": 0,
+    }
+    assert server._has_case_stamps(_CUSTOM_LOG, fmt)
+    # The default format finds no stamp in this log.
+    assert not server._has_case_stamps(_CUSTOM_LOG)
+
+
+def test_custom_unstamped_columns_follow_name_start_and_end():
+    fmt = server._log_format_from({"name_start": 6, "name_end": 16})
+    log = ["PASS  alpha      all good", "FAIL  beta       broke"]
+    rows = server._verdict_rows(log, fmt)
+    assert [(r.name, r.status, r.detail) for r in rows] == [
+        ("alpha", "PASS", "all good"),
+        ("beta", "FAIL", "broke"),
+    ]
+
+
+def test_compare_runs_uses_the_projects_log_format(tmp_path):
+    _write_config(tmp_path, {"log_format": "pytest"})
+    one = tmp_path / "20260101-000000.log"
+    two = tmp_path / "20260102-000000.log"
+    one.write_text("1 passed in 0.1s\n")
+    two.write_text("\n".join(_PYTEST_LOG) + "\n")
+    out = server.castor_compare_runs(str(tmp_path), [str(one), str(two)])
+    assert "tests/test_a.py::test_one" in out
+
+
+def test_compare_runs_reports_a_bad_log_format(tmp_path):
+    _write_config(tmp_path, {"log_format": "nope"})
+    one = tmp_path / "a.log"
+    one.write_text("x\n")
+    out = server.castor_compare_runs(str(tmp_path), [str(one), str(one)])
+    assert out.startswith("[Error:") and "log_format" in out
