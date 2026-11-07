@@ -16,9 +16,9 @@ Homepage = "https://github.com/aahlijia/claude-castor"
 Repository = "https://github.com/aahlijia/claude-castor"
 Changelog = "https://github.com/aahlijia/claude-castor/blob/main/CHANGELOG.md"
 
-# Temporary: points at the local checkout until dekko 1.9.35 is on PyPI.
+# Temporary: dekko 1.9.35 is not on PyPI yet. Pinned to a commit on its public repo.
 [tool.uv.sources]
-dekko = { path = "/Users/austinahlijian/Projects/dekko" }
+dekko = { git = "https://github.com/aahlijia/dekko.git", rev = "b76cff01fb44688cebaf11fd4f980c05b8436257" }
 
 [dependency-groups]
 dev = [
