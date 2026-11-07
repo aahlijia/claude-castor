@@ -459,3 +459,16 @@ and `gemini_index` needs ~2 min; 45 s rejected).
   the committed config and takes no caller input. NQC keeps `dialog.sh` out of
   `allow` on purpose (suite scripts only) yet wants it on overdue, so the old
   check refused every run and no NQC suite ever used the tier.
+
+### 2026-11-06: server.py split into the castor package
+- **Decision:** the 11k-line `server.py` is now a thin entry point over a
+  `castor/` package (`app`, `common`, `jobs`, `logs`, `agy`, `nim/*`, `run/*`;
+  map in `CLAUDE.md`). The MCP registration still runs `server.py`.
+- **Why:** gemini and NIM code were interleaved in one file; the split follows
+  the old section banners. Cycles were broken by moving small helpers down
+  (log format into `logs`, path confinement and JSON-fence parsers into
+  `common`, the edit store into `nim/edit_tools`), not by lazy imports, except
+  two (`common._compact_session`, `jobs._run_job`, both reaching `castor.agy`).
+- **Tests:** they read and patch through `castor._namespace.view()`, which
+  sets a name in its defining module and every `from`-importer, so the old
+  `monkeypatch.setattr(server, ...)` calls kept working unchanged.

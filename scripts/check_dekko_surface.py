@@ -58,7 +58,7 @@ TRACKED_ACTIONS = ["callers", "symbol"]
 # so the trace has a path.
 PROBE_SYMBOL = "_agent_grep"
 PROBE_CALLER = "_agent_run_tool"
-PROBE_FILE = "server.py"
+PROBE_FILE = "castor/common.py"
 _BUDGET = ["--no-regen", "--budget", "1200"]
 JSON_PROBES: dict[str, tuple[list[str], dict[str, tuple]]] = {
     "callers": (

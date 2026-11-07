@@ -98,7 +98,7 @@ from reasoning models are stripped.
 
 ## Internals
 
-For people changing `server.py`.
+For people changing the `castor/nim/` modules (see the code map in `CLAUDE.md`).
 
 A non-agentic backend: an OpenAI-compatible chat endpoint
 (`https://integrate.api.nvidia.com/v1`) with no filesystem access, so Castor

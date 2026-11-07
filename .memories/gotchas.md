@@ -146,3 +146,12 @@
   awk keeps verdict lines, `log:`, `wait_until:`, `RESTARTED` and `start.sh:
   REFUSED|BLOCKED` only, so a run.json flag on anything else (e.g. "No space
   left on device") never fires for output inside a quieted command.
+- **Patching a castor name only reaches the module you patch.** After the split,
+  `from castor.x import name` copies the binding, so `monkeypatch.setattr` on
+  the defining module misses importers. Tests and `scripts/nim_eval.py` use
+  `castor._namespace.view()`, which patches the definer and every importer. New
+  tests should use it too. pytest's undo calls `delattr` on the view, which
+  restores the saved originals.
+- **`ast` name collection counts `sys.argv = x` as defining `sys`.** The split
+  script took it for a top-level def and added `from castor.app import sys`;
+  drop such imports (ruff F811 flags them).

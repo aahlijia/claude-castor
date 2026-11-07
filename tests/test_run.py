@@ -20,7 +20,9 @@ import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-server = importlib.import_module("server")
+from castor._namespace import view  # noqa: E402
+
+server = view()
 
 
 def _script(path: Path, body: str) -> Path:

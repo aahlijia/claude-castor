@@ -763,11 +763,12 @@ def test_summarize_edit_counts_error_rows():
 
 
 def test_build_task_triage_case_returns_task(tmp_path):
-    import importlib
     import sys
 
     sys.path.insert(0, str(ROOT))
-    server = importlib.import_module("server")
+    from castor._namespace import view
+
+    server = view()
     (tmp_path / "run.log").write_text("FAIL x\n")
     case = {"_base": str(tmp_path), "role": "triage", "log": "run.log"}
     task, error = nim_eval.build_task(case, tmp_path, server)
@@ -1001,11 +1002,12 @@ def test_explain_run_misses_site_bar():
 
 
 def _real_server():
-    import importlib
     import sys
 
     sys.path.insert(0, str(ROOT))
-    return importlib.import_module("server")
+    from castor._namespace import view
+
+    return view()
 
 
 def _git(root: Path, *args: str) -> str:

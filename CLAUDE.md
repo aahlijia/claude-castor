@@ -49,22 +49,33 @@ installs with the server's dependencies. Full steps are in `README.md`.
 
 ## Code map
 
-`server.py` is one file, in sections (search for the banner comments):
+`server.py` is the entry point: it imports the `castor` package, which registers
+every `@mcp.tool()` on the shared `mcp` object, then runs it. The code:
 
-| Section | What it holds |
+| Module | What it holds |
 |---|---|
-| top to `NVIDIA NIM backend` | agy runner, prompt assembly, cache, sessions, `gemini_*` tools, background jobs |
-| `NVIDIA NIM backend` | key rotation, limiter, retries, `nim_*` chat tools |
-| `NIM agent` | read-only tool loop, dekko tools, citation checks |
-| `Verdict rows` | suite log parsing (`LogFormat`) |
-| `NIM agent roles` | scout, first-pass review, triage |
-| `Explain a verdict row` | `nim_explain_row` |
-| `NIM edit` | `nim_edit` (gated by `CASTOR_NIM_EDIT=1`) |
-| `Run tier` | `.castor/run.json`, `castor_run_start`, `gemini_poll` on runs |
-| `Compare runs` | `castor_compare_runs` |
+| `castor/app.py` | Logging, `--log-file`, the `mcp` object, `_register_gated` |
+| `castor/common.py` | Shared helpers: prompts and schemas, file inlining, git, response cache, project state, sessions, `_assemble_prompt`, agent path confinement |
+| `castor/jobs.py` | Background job table and worker (`_run_job`) |
+| `castor/logs.py` | Suite log parsing: `LogFormat`, verdict rows, totals |
+| `castor/agy.py` | Antigravity: the `agy` runner, `_dispatch`, every `gemini_*` tool |
+| `castor/nim/backend.py` | NIM chat: keys, limiter, retries, streaming, `nim_*` chat tools, usage |
+| `castor/nim/edit_tools.py` | The edit store and `propose_edit` / `drop_edit` tools the agent loop offers |
+| `castor/nim/agent.py` | The read-only tool loop, dekko tools, citation checks, `nim_agent` |
+| `castor/nim/roles.py` | Scout, first-pass review, log triage |
+| `castor/nim/explain.py` | `nim_explain_row` |
+| `castor/nim/edit.py` | `nim_edit` (gated by `CASTOR_NIM_EDIT=1`) |
+| `castor/run/tier.py` | `.castor/run.json`, `castor_run_start`, run polling |
+| `castor/run/compare.py` | `castor_compare_runs` |
+| `castor/_namespace.py` | Test and eval support only: one `server`-like view over all modules |
+
+`common`, `logs` and `app` import no other castor module. `common` and `jobs`
+each import `castor.agy` inside one function, because `agy` imports them.
 
 Tests: `tests/test_nim.py` (NIM against a local stub server), `tests/test_run.py`
 (run tier, compare, `log_format`), `tests/test_nim_eval.py` (the eval script).
+They read and patch names through `castor._namespace.view()`, so a patch
+reaches every module that imported the name.
 The agy path has no automated tests.
 
 ## Development
@@ -72,9 +83,9 @@ The agy path has no automated tests.
 Before committing:
 
 ```bash
-uvx ruff check server.py
-uvx ruff format --check server.py
-python3 -m py_compile server.py
+uvx ruff check server.py castor
+uvx ruff format --check server.py castor
+python3 -m compileall -q server.py castor
 uv run --with pytest --with httpx --with fastmcp pytest tests
 ```
 
