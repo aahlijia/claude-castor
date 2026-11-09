@@ -332,7 +332,7 @@ def nim_scout_start(
     model: str | None = None,
     max_steps: int | None = None,
 ) -> str:
-    """Start nim_scout in the background; collect it with gemini_poll.
+    """Start nim_scout in the background; collect it with castor_poll.
 
     Args:
         question: See nim_scout.
@@ -341,7 +341,7 @@ def nim_scout_start(
         max_steps: See nim_scout.
 
     Returns:
-        A message with the job id to pass to gemini_poll.
+        A message with the job id to pass to castor_poll.
     """
     kwargs = {
         "task": _scout_task(question),
@@ -411,7 +411,7 @@ def nim_first_pass_review_start(
     model: str | None = None,
     max_steps: int | None = None,
 ) -> str:
-    """Start nim_first_pass_review in the background; poll with gemini_poll.
+    """Start nim_first_pass_review in the background; poll with castor_poll.
 
     A review takes a few minutes, so start it, do other work, then
     collect it. The diff is read now, so later edits don't change what is
@@ -426,7 +426,7 @@ def nim_first_pass_review_start(
         max_steps: See nim_first_pass_review.
 
     Returns:
-        A message with the job id to pass to gemini_poll, or a bracketed
+        A message with the job id to pass to castor_poll, or a bracketed
         error.
     """
     task, error = _review_task(cwd, diff_file, rev_range, focus)
@@ -665,7 +665,7 @@ def nim_triage_log_start(
     max_steps: int | None = None,
     format: str = "text",  # noqa: A002 (the tool arg is named format)
 ) -> str:
-    """Start nim_triage_log in the background; collect it with gemini_poll.
+    """Start nim_triage_log in the background; collect it with castor_poll.
 
     Args:
         cwd: See nim_triage_log.
@@ -677,7 +677,7 @@ def nim_triage_log_start(
             object, including an error object (the job still reads "done").
 
     Returns:
-        A message with the job id to pass to gemini_poll, or a bracketed
+        A message with the job id to pass to castor_poll, or a bracketed
         error.
     """
     if format not in ROLE_FORMATS:

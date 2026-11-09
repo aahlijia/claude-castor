@@ -293,7 +293,7 @@ def _poll_json(run_id: str, timeout: float = 5.0) -> dict:
     """Poll a run until it is not running; the final object."""
     end = time.monotonic() + timeout
     while True:
-        out = json.loads(server.gemini_poll(run_id))
+        out = json.loads(server.castor_poll(run_id))
         if out["status"] != "running":
             return out
         if time.monotonic() > end:
@@ -314,7 +314,7 @@ def test_run_record_round_trip(project):
 def test_run_record_read_refuses_odd_ids(project):
     assert server._run_record_read("run-../../etc") is None
     assert server._run_record_read("run-deadbeef") is None
-    assert server.gemini_poll("run-deadbeef") == "[Unknown run run-deadbeef]"
+    assert server.castor_poll("run-deadbeef") == "[Unknown run run-deadbeef]"
 
 
 def test_run_records_filter_by_root_newest_first(project, tmp_path):
@@ -361,7 +361,7 @@ def test_poll_after_restart_reattaches(project, fast, sleeper):
     )
     server._run_record_write(rec)
     Path(rec["capture"]).write_text("  trial 1: going\n")
-    out = json.loads(server.gemini_poll(rec["run"]))
+    out = json.loads(server.castor_poll(rec["run"]))
     try:
         assert out["status"] == "running" and out["pid"] == sleeper.pid
         assert set(out) == {
@@ -607,7 +607,7 @@ def test_overdue_runs_command_once_and_keeps_watching(project, fast, started):
     end = time.monotonic() + 5
     seen = None
     while time.monotonic() < end:
-        out = json.loads(server.gemini_poll(rec["run"]))
+        out = json.loads(server.castor_poll(rec["run"]))
         if out["status"] == "running" and out["overdue"]:
             seen = out["overdue"]
             break
@@ -731,14 +731,14 @@ def test_attach_after_finish_leaves_the_result(project, fast, started):
     _join_monitor(rec["run"])
     thread = server._run_attach(rec["run"])
     thread.join(timeout=5)
-    assert json.loads(server.gemini_poll(rec["run"])) == first
+    assert json.loads(server.castor_poll(rec["run"])) == first
 
 
 # --- Task 4: run tools -----------------------------------------------------
 
 _STARTED_RE = re.compile(
     r"^Run (run-[0-9a-f]{8}) started: (.+); collect it with "
-    r'gemini_poll\("run-[0-9a-f]{8}"\)\.$'
+    r'castor_poll\("run-[0-9a-f]{8}"\)\.$'
 )
 
 

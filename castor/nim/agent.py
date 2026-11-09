@@ -1842,7 +1842,7 @@ def nim_agent_start(
     """Start a nim_agent investigation in the background; returns a job id.
 
     Same job table and pool as gemini_start, so collect it with
-    gemini_poll. Use it to fan several investigations out at once; the
+    castor_poll. Use it to fan several investigations out at once; the
     shared rate limiter and concurrency cap keep the endpoint from being
     flooded.
 
@@ -1854,7 +1854,7 @@ def nim_agent_start(
         max_tokens: See nim_agent.
 
     Returns:
-        A message with the job id to pass to gemini_poll.
+        A message with the job id to pass to castor_poll.
     """
     kwargs: dict[str, Any] = {
         "task": task,
@@ -1883,5 +1883,5 @@ def _start_agent_job(
     _job_pool.submit(_run_job, job_id, kwargs, runner or _dispatch_nim_agent)
     return (
         f"Started background {label} job {job_id}. Poll it with "
-        f'gemini_poll("{job_id}") — do other work first, then check back.'
+        f'castor_poll("{job_id}") — do other work first, then check back.'
     )

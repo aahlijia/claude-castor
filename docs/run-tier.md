@@ -48,12 +48,12 @@ every `NVIDIA_*` and `CASTOR_*` variable removed. `castor_run_start`'s
 printable ASCII without `$` or backtick, at most 500 characters, at most 20
 variables, and a value beats a server variable of the same name. The env
 file is sourced after, so it can still override them. The variables are
-kept in the run record, shown by `gemini_poll` and as `env=NAMES` in
+kept in the run record, shown by `castor_poll` and as `env=NAMES` in
 `castor_runs`; do not put secrets in them. **Castor never kills,
 signals or restarts a process**: a stop flag, `max_hours` or an overdue run
 ends the watching, not the run, and the result gives the `pid`. Records and
 captures live in `~/.cache/claude-castor/runs/` (30 days), so a run
-survives a server restart: `gemini_poll` reattaches when the pid is alive
+survives a server restart: `castor_poll` reattaches when the pid is alive
 with its recorded start time, else finishes the run from its capture
 (`exit_code` null; `lost` with no table). A monitor holds an exclusive
 `flock` on `runs/<id>.lock`, so when several Claude sessions (each with
@@ -61,11 +61,11 @@ its own Castor) poll one run, only one watches it.
 
 | Tool | Signature | Purpose |
 |---|---|---|
-| `castor_run_start` | `(cwd, command, expect_minutes, triage=True, label=None, env=None)` | Start a run; collect it with `gemini_poll("run-...")`. Refuses past `max_running` live processes under the root (running, or stopped / given up but still alive), naming them |
+| `castor_run_start` | `(cwd, command, expect_minutes, triage=True, label=None, env=None)` | Start a run; collect it with `castor_poll("run-...")`. Refuses past `max_running` live processes under the root (running, or stopped / given up but still alive), naming them |
 | `castor_runs` | `(cwd=None)` | Runs on record, newest first: id, status, label, seconds, verdict |
 | `castor_compare_runs` | `(cwd, logs, rows=None, same_code=False)` | Two to 12 suite logs (oldest first, inside `cwd` or any worktree of its repo, labelled by their `YYYYMMDD-HHMMSS` stamp) row by row. Each row (name and occurrence) gets a class, first match wins: `flaky` (PASS and FAIL with `same_code=True`, or two or more switches), `regressed` / `fixed` (one switch), `failing`, `not_assessed`, `numbers_changed` (the detail's `N of M` counts differ; other integers are measurements and ignored), `missing` (absent from a later run, or with a gap), `new` (absent from the first runs, present from some run on), `same` (counted, not listed). Text: the rows by class, a line per run and the trial lines that differ from the first run's, with decimals and clock stamps (`02:41`, `02:41:07`) masked as timings, plus any `log_format.noise` matches (at most 12 per run). Trial lines a later run lacks are one note per row (`(no trial lines 3 to 6; run1 trial line 3: ...)`; the numbers count the row's trial lines, not lines of the log file), not one per line. A differing line that shows under two or more rows of one run is listed once, after the rows, under "lines shared by several rows". No model call (its NIM reading was cut: the free models cannot tell harness from game faults). Runs anywhere, not only POSIX |
 
-`gemini_poll` on a run id returns progress (`run`, `status`, `elapsed_s`,
+`castor_poll` on a run id returns progress (`run`, `status`, `elapsed_s`,
 `pid`, `flags`, `overdue`) and then the result: `status` (`done`,
 `stopped`, `gave_up`, `lost`), `command`, `cwd`, `exit_code`, `wall_s`,
 `verdict` (exit 0 passed, 1 failed, 2 inconclusive, else from the totals),

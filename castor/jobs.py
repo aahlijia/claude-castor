@@ -7,7 +7,7 @@ from typing import Any
 
 # Background-job subsystem, shared by every backend. A long prompt runs
 # off-thread so Claude can keep working and collect the result later via
-# gemini_poll. Jobs are in-memory only: a server restart drops them. Each
+# castor_poll. Jobs are in-memory only: a server restart drops them. Each
 # backend owns its worker pool and sizes it to its own limits; none may
 # exceed JOB_POOL_MAX workers.
 JOB_POOL_MAX = 8
@@ -87,7 +87,7 @@ def _run_job(
 ) -> None:
     """Worker body: run the prompt, then record the outcome on the job.
 
-    Every backend shares this one job table and one gemini_poll; `runner`
+    Every backend shares this one job table and one castor_poll; `runner`
     is the backend's dispatch function.
 
     Background jobs are session-free by construction, so concurrent workers

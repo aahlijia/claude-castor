@@ -1365,7 +1365,7 @@ def nim_edit_start(
     model: str | None = None,
     max_steps: int | None = None,
 ) -> str:
-    """Start nim_edit in the background; collect it with gemini_poll.
+    """Start nim_edit in the background; collect it with castor_poll.
 
     Mechanical edits only; NIM never writes files. Read the diff the poll
     returns, then `git apply <patch>` from the repo top level. The task,
@@ -1380,7 +1380,7 @@ def nim_edit_start(
         max_steps: See nim_edit.
 
     Returns:
-        A message with the job id to pass to gemini_poll, or a bracketed
+        A message with the job id to pass to castor_poll, or a bracketed
         error for bad input.
     """
     error = _edit_input_error(task, cwd, files, must_cover)
