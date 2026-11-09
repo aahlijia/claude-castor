@@ -33,7 +33,7 @@
 
 The longer plan lives in `.dev/development-plan.md` (kept locally, not tracked). Key items:
 
-- Persistent chat sessions with `gemini_reset` tool (agy `--continue`): **done**
+- Persistent chat sessions with `castor_reset` tool (agy `--continue`): **done**
 - Model selection (`model` param + `gemini_models` tool): **done**
 - Sandbox tier (`--sandbox`) between read-only and full trust: **done**
 - Directory structure map when content is truncated: **done**
@@ -41,15 +41,15 @@ The longer plan lives in `.dev/development-plan.md` (kept locally, not tracked).
   (account/freshness skipped: agy has no whoami command and `agy update`
   mutates rather than checks)
 - `/castor:auth` slash command for onboarding: **done**
-- Response caching (`use_cache` param + `gemini_cache_clear` tool; keyed by
+- Response caching (`use_cache` param + `castor_cache_clear` tool; keyed by
   prompt + model + git HEAD/working-tree state): **done**
 - Workflow tools (`gemini_index`, `gemini_review`, `gemini_find_usages`,
   `gemini_explain_error`; thin wrappers over the shared `_dispatch` core): **done**
-- Async / background jobs (`gemini_start` / `gemini_poll` / `gemini_jobs`;
+- Async / background jobs (`gemini_start` / `castor_poll` / `castor_jobs`;
   thread-pool workers, poll model, fresh-only): **done**
 - More workflow tools (`gemini_summarize`, `gemini_semantic_search`,
   `gemini_document`; thin wrappers over `_dispatch`): **done**
-- Client-side sessions (`session` param + `gemini_sessions` / `_show` /
+- Client-side sessions (`session` param + `castor_sessions` / `_show` /
   `_delete`; Castor-owned transcripts replayed into fresh `agy --print`,
   auto-summarized over budget, replaces the agy `--continue` path): **done**
 - NVIDIA NIM backend (`nim_*` tools; inline-only, env-configured key, retry/

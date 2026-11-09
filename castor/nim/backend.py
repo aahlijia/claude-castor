@@ -1311,7 +1311,7 @@ def nim_start(
     """Start a NVIDIA NIM prompt in the background and return a job id.
 
     The NIM counterpart of gemini_start: same job table, same worker pool,
-    and the same gemini_poll / gemini_jobs to collect results. Use it for
+    and the same castor_poll / castor_jobs to collect results. Use it for
     long prompts or to fan the same question out to NIM and agy at once
     (start both, then compare). Background jobs are session-free. The
     client-side rate limiter and concurrency cap apply across all NIM
@@ -1329,7 +1329,7 @@ def nim_start(
         max_tokens: Completion cap (default 4096).
 
     Returns:
-        A message with the job id to pass to gemini_poll.
+        A message with the job id to pass to castor_poll.
     """
     kwargs: dict[str, Any] = {
         "prompt": prompt,
@@ -1348,7 +1348,7 @@ def nim_start(
     _job_pool.submit(_run_job, job_id, kwargs, _dispatch_nim)
     return (
         f"Started background NIM job {job_id}. Poll it with "
-        f'gemini_poll("{job_id}") — do other work first, then check back.'
+        f'castor_poll("{job_id}") — do other work first, then check back.'
     )
 
 

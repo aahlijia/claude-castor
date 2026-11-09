@@ -326,7 +326,7 @@ def _run_resolve_command(
 
 
 # Run records live beside their capture files under the cache, so a run
-# survives a server restart: gemini_poll reads the record and reattaches a
+# survives a server restart: castor_poll reads the record and reattaches a
 # monitor when the process is still the one Castor started.
 RUNS_DIR = "runs"
 
@@ -491,7 +491,7 @@ def _run_alive(rec: dict) -> bool:
 
 
 def _run_poll(run_id: str) -> str:
-    """gemini_poll for a run: the result, or progress while it runs.
+    """castor_poll for a run: the result, or progress while it runs.
 
     A run whose monitor is not in this server (a restart) gets one
     attached; a poll waits briefly for it, so a run that ended while no
@@ -514,7 +514,7 @@ _register_poller("run-", _run_poll)
 
 
 def _run_progress(rec: dict) -> dict:
-    """The object gemini_poll returns while a run is going."""
+    """The object castor_poll returns while a run is going."""
     return {
         "run": rec["run"],
         "status": "running",
@@ -653,7 +653,7 @@ def _run_result(
     flags: list[dict],
     overdue: dict | None,
 ) -> dict:
-    """The final object gemini_poll returns for a run.
+    """The final object castor_poll returns for a run.
 
     Rows and totals come from the full log when its `log:` line resolves
     inside the project, else from the console output.
@@ -1117,7 +1117,7 @@ def castor_run_start(
             500 characters, 20 variables. They are kept in the run record.
 
     Returns:
-        "Run <id> started: <label>; collect it with gemini_poll(...)", or a
+        "Run <id> started: <label>; collect it with castor_poll(...)", or a
         bracketed error.
     """
     error = _run_start_error(cwd, command, expect_minutes)
@@ -1144,7 +1144,7 @@ def castor_run_start(
     run_id = rec["run"]
     return (
         f"Run {run_id} started: {name}; collect it with "
-        f'gemini_poll("{run_id}").'
+        f'castor_poll("{run_id}").'
     )
 
 
@@ -1181,7 +1181,7 @@ def _run_capacity_error(root: Path, cfg: RunConfig) -> str | None:
     return (
         f"{len(live)} run(s) already going under this root (max_running "
         f"{cfg.max_running}): {', '.join(live)}. Collect them with "
-        "gemini_poll first."
+        "castor_poll first."
     )
 
 

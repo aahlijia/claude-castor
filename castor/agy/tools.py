@@ -85,8 +85,8 @@ def gemini_prompt(
     (or continue_session=True for the default session) so the prior
     transcript is replayed as context. Sessions are Castor-owned and
     project-scoped (they require cwd), and they survive restarts. Clear
-    the default session with gemini_reset; manage named ones with
-    gemini_sessions / gemini_session_delete.
+    the default session with castor_reset; manage named ones with
+    castor_sessions / castor_session_delete.
 
     Args:
         prompt: The fully-formed prompt Claude has constructed.
@@ -130,7 +130,7 @@ def gemini_prompt(
             same prompt is re-sent against an unchanged repo (matched by
             git HEAD + working-tree state). Only side-effect-free calls
             are cached — never trust mode or session calls. Set False to
-            force a fresh run. Clear with gemini_cache_clear.
+            force a fresh run. Clear with castor_cache_clear.
     """
     resolved = session or (DEFAULT_SESSION if continue_session else None)
     return _dispatch(
@@ -535,7 +535,7 @@ def gemini_start(
 
     Use this for long explorations or fan-out (start several jobs across
     subtrees, then synthesize) so Claude is not blocked for the full agy
-    timeout. The job runs off-thread; collect its result with gemini_poll.
+    timeout. The job runs off-thread; collect its result with castor_poll.
 
     Background jobs are fresh-only by construction — they take no session
     param and never touch a transcript, because concurrent jobs would race
@@ -565,7 +565,7 @@ def gemini_start(
             immediately without spawning agy.
 
     Returns:
-        A message with the job id to pass to gemini_poll, or a bracketed
+        A message with the job id to pass to castor_poll, or a bracketed
         error string (e.g. when trust=True is missing cwd).
     """
     if trust and not cwd:
@@ -596,7 +596,7 @@ def gemini_start(
     _agy_job_pool.submit(_run_job, job_id, kwargs, _dispatch)
     return (
         f"Started background job {job_id}. Poll it with "
-        f'gemini_poll("{job_id}") — do other work first, then check back.'
+        f'castor_poll("{job_id}") — do other work first, then check back.'
     )
 
 

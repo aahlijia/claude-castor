@@ -641,7 +641,7 @@ def test_nim_start_and_poll(stub):
     started = _tool(server.nim_start)("background q", use_cache=False)
     job_id = re.search(r"job (\w+)\.", started).group(1)
     for _ in range(100):
-        result = _tool(server.gemini_poll)(job_id)
+        result = _tool(server.castor_poll)(job_id)
         if not result.startswith("[Job"):
             break
         time.sleep(0.05)
@@ -1081,7 +1081,7 @@ def test_agent_start_and_poll(stub, repo):
     started = _tool(server.nim_agent_start)("t", str(repo))
     job_id = re.search(r"job (\w+)\.", started).group(1)
     for _ in range(100):
-        out = _tool(server.gemini_poll)(job_id)
+        out = _tool(server.castor_poll)(job_id)
         if "bg answer" in out:
             break
         time.sleep(0.05)
@@ -1216,7 +1216,7 @@ def test_role_end_to_end_through_the_loop(stub, repo):
 
 def _poll_until_done(job_id):
     for _ in range(100):
-        out = _tool(server.gemini_poll)(job_id)
+        out = _tool(server.castor_poll)(job_id)
         if not out.startswith("[Job"):
             return out
         time.sleep(0.05)
@@ -3817,7 +3817,7 @@ def test_nim_edit_start_and_poll(stub, repo):
     started = _tool(server.nim_edit_start)("set TARGET to 2", str(repo))
     job_id = _job_id(started)
     for _ in range(200):
-        out = _tool(server.gemini_poll)(job_id)
+        out = _tool(server.castor_poll)(job_id)
         if "still running" not in out:
             break
         time.sleep(0.05)
@@ -3958,7 +3958,7 @@ def test_nim_edit_start_refusal_polls_as_a_failed_job(stub, repo):
     _answers(stub, _BAD_EDIT, _BAD_EDIT)
     job_id = _job_id(_tool(server.nim_edit_start)("t", str(repo)))
     for _ in range(200):
-        out = _tool(server.gemini_poll)(job_id)
+        out = _tool(server.castor_poll)(job_id)
         if "still running" not in out:
             break
         time.sleep(0.05)

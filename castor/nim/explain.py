@@ -112,7 +112,7 @@ def nim_explain_row_start(
     model: str | None = None,
     max_steps: int | None = None,
 ) -> str:
-    """Start nim_explain_row in the background; collect it with gemini_poll.
+    """Start nim_explain_row in the background; collect it with castor_poll.
 
     Args:
         cwd: See nim_explain_row.
@@ -125,7 +125,7 @@ def nim_explain_row_start(
         max_steps: See nim_explain_row.
 
     Returns:
-        A message with the job id to pass to gemini_poll, or a bracketed
+        A message with the job id to pass to castor_poll, or a bracketed
         error.
     """
     kwargs, error = _explain_row_job(

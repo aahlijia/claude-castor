@@ -138,9 +138,9 @@ session is project-scoped and survives restarts.
 - Long transcripts auto-compress: once a replay exceeds the budget, older turns are
   folded into a rolling summary and the last few are kept verbatim — you don't manage
   this.
-- Call `gemini_reset(cwd)` to clear the **default** session at a task boundary.
-  For named sessions, use `gemini_session_delete(cwd, name)`; list with
-  `gemini_sessions(cwd)` and inspect with `gemini_session_show(cwd, name)`.
+- Call `castor_reset(cwd)` to clear the **default** session at a task boundary.
+  For named sessions, use `castor_session_delete(cwd, name)`; list with
+  `castor_sessions(cwd)` and inspect with `castor_session_show(cwd, name)`.
 
 Pattern: run a broad `/castor:explore` first, then follow up with narrower
 `session="…"` prompts that build on what agy already learned.
@@ -241,9 +241,9 @@ exploration ties you up for the full timeout. For those, run the work in the
 background:
 
 - `gemini_start(prompt, …)` returns a job id immediately and runs agy off-thread.
-- Do other useful work, then `gemini_poll(job_id)` to collect the result (it
+- Do other useful work, then `castor_poll(job_id)` to collect the result (it
   returns `running` with elapsed time until the job finishes).
-- `gemini_jobs()` lists outstanding jobs.
+- `castor_jobs()` lists outstanding jobs.
 
 When to reach for it:
 - A single long/deep exploration where you have other things to do meanwhile.
@@ -284,7 +284,7 @@ Implications for how you call the tool:
 - A cached explore answer is "a prior good answer for this question against this
   code," not a guarantee of bit-identical regeneration. Inline-only calls are
   fully deterministic from their input.
-- Call `gemini_cache_clear` only when the user changes agy's config/default model
+- Call `castor_cache_clear` only when the user changes agy's config/default model
   or wants to reclaim disk — not as part of normal flow.
 
 ---
@@ -305,7 +305,7 @@ the prompt). So pick the backend by the shape of the task:
 | Explain an error where you can name the source files | `nim_explain_error` with `files` |
 | Summarize a file or directory that fits the inline budget | `nim_summarize` |
 | agy is rate-limited or unavailable | `nim_prompt` with the content inlined |
-| Compare two models on one question | `gemini_start` + `nim_start`, then `gemini_poll` both |
+| Compare two models on one question | `gemini_start` + `nim_start`, then `castor_poll` both |
 
 **Agent mode (`nim_agent`) changes this.** `nim_agent`, `nim_agent_start` and
 the tools below give NIM read-only tools run by Castor and confined to `cwd`:
@@ -410,7 +410,7 @@ Rules of thumb:
 
 Use `castor_run_start` for a long suite command (a playtest suite, a
 nightly check) instead of a subagent or a shell that waits on it: Castor
-watches the run, and `gemini_poll("run-...")` returns progress, then the
+watches the run, and `castor_poll("run-...")` returns progress, then the
 verdict, failing rows, the verdict table, flags and a triage of the log.
 It is not a shell. The project must commit `.castor/run.json` naming the
 scripts it allows, and the user must list the root in `CASTOR_RUN_ROOTS`;
@@ -457,15 +457,15 @@ your call, from the trial lines and the code.
 | Need raw output | `gemini_prompt` with `raw=True` |
 | Explore safely (project stays read-only) | `gemini_prompt` with `sandbox=True` + `cwd` |
 | Follow-up on the same codebase | `gemini_prompt` with `session="…"` (+ `cwd`) |
-| Long job — keep working meanwhile | `gemini_start`, then `gemini_poll` |
+| Long job — keep working meanwhile | `gemini_start`, then `castor_poll` |
 | Fan-out across subtrees | several `gemini_start`, then poll each |
-| Check on background jobs | `gemini_jobs` |
-| Clear the default session | `gemini_reset` with `cwd` |
+| Check on background jobs | `castor_jobs` |
+| Clear the default session | `castor_reset` with `cwd` |
 | Force a fresh run (skip cache) | `gemini_prompt` with `use_cache=False` |
 | Second opinion on a diff from another model | `nim_review` / `nim_security_review` with `cwd` |
 | Offload inline-able work to NVIDIA NIM | `nim_prompt` with `files` |
 | Check NIM setup | `nim_status` |
-| Clear all cached responses | `gemini_cache_clear` |
+| Clear all cached responses | `castor_cache_clear` |
 | Pick a specific model | `gemini_prompt` with `model=...` |
 | See available models | `gemini_models` |
 | agy CLI not working | `gemini_status` |

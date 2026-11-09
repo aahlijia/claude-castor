@@ -21,7 +21,7 @@ from castor.jobs import (
 
 
 @mcp.tool()
-def gemini_poll(job_id: str) -> str:
+def castor_poll(job_id: str) -> str:
     """Check a background job (gemini_start, nim_*_start) or a run.
 
     Args:
@@ -43,7 +43,7 @@ def gemini_poll(job_id: str) -> str:
         if job is None:
             return (
                 f"[Unknown job {job_id} — it may have been evicted or "
-                "never existed. Run gemini_jobs to list current jobs.]"
+                "never existed. Run castor_jobs to list current jobs.]"
             )
         status, response = job.status, job.response
         started, finished = job.started_at, job.finished_at
@@ -62,7 +62,7 @@ def gemini_poll(job_id: str) -> str:
 
 
 @mcp.tool()
-def gemini_jobs() -> str:
+def castor_jobs() -> str:
     """List background jobs and their status (runs: castor_runs).
 
     Returns:
@@ -81,12 +81,12 @@ def gemini_jobs() -> str:
 
 
 @mcp.tool()
-def gemini_reset(cwd: str | None = None) -> str:
+def castor_reset(cwd: str | None = None) -> str:
     """Clear a project's default session so the next call starts fresh.
 
     Deletes the reserved "__default__" session (the one continue_session
     resumes) for cwd. Named sessions are untouched — manage those with
-    gemini_sessions and gemini_session_delete. Sessions are project-
+    castor_sessions and castor_session_delete. Sessions are project-
     scoped, so cwd is required to know which project's default to clear.
 
     Args:
@@ -106,7 +106,7 @@ def gemini_reset(cwd: str | None = None) -> str:
 
 
 @mcp.tool()
-def gemini_sessions(cwd: str) -> str:
+def castor_sessions(cwd: str) -> str:
     """List the client-side sessions stored for a project.
 
     Evicts any sessions past the TTL, then lists the rest with turn count
@@ -137,7 +137,7 @@ def gemini_sessions(cwd: str) -> str:
 
 
 @mcp.tool()
-def gemini_session_show(cwd: str, session: str) -> str:
+def castor_session_show(cwd: str, session: str) -> str:
     """Return a session's stored transcript as JSON.
 
     Args:
@@ -154,7 +154,7 @@ def gemini_session_show(cwd: str, session: str) -> str:
 
 
 @mcp.tool()
-def gemini_session_delete(cwd: str, session: str) -> str:
+def castor_session_delete(cwd: str, session: str) -> str:
     """Delete a stored session.
 
     Args:
@@ -170,7 +170,7 @@ def gemini_session_delete(cwd: str, session: str) -> str:
 
 
 @mcp.tool()
-def gemini_cache_clear() -> str:
+def castor_cache_clear() -> str:
     """Delete all cached responses, from every backend.
 
     gemini_prompt and nim_prompt reuse a stored response when the same

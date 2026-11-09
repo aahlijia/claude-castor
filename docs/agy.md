@@ -19,13 +19,13 @@ for compatibility. For NVIDIA NIM see [nim.md](nim.md).
 | `gemini_semantic_search` | Natural-language code search → ranked `[{path, line, reason}]` |
 | `gemini_document` | Draft docstrings/docs for a symbol or file (return-only) |
 | `gemini_start` | Start a prompt in the background; returns a job id |
-| `gemini_poll` | Check a background job; returns its result when done |
-| `gemini_jobs` | List background jobs and their status |
-| `gemini_sessions` | List a project's conversation sessions |
-| `gemini_session_show` | Print a session's stored transcript |
-| `gemini_session_delete` | Delete a session |
-| `gemini_reset` | Clear the project's default session (requires `cwd`) |
-| `gemini_cache_clear` | Delete all cached responses to force fresh runs |
+| `castor_poll` | Check a background job; returns its result when done |
+| `castor_jobs` | List background jobs and their status |
+| `castor_sessions` | List a project's conversation sessions |
+| `castor_session_show` | Print a session's stored transcript |
+| `castor_session_delete` | Delete a session |
+| `castor_reset` | Clear the project's default session (requires `cwd`) |
+| `castor_cache_clear` | Delete all cached responses to force fresh runs |
 | `gemini_models` | List the models available to agy |
 | `gemini_agents` | List agy's built-in specialized agents |
 | `gemini_auth` | Get sign-in instructions when not authenticated |
@@ -92,9 +92,9 @@ commits and server restarts) and free of cross-project contamination. They requi
 past ~24k characters, older turns are folded into a rolling summary (using a cheap
 model), keeping the last 3 turns verbatim.
 
-Inspect them with `gemini_sessions(cwd)` / `gemini_session_show(cwd, name)`,
-delete one with `gemini_session_delete(cwd, name)`, or clear the default with
-`gemini_reset(cwd)`.
+Inspect them with `castor_sessions(cwd)` / `castor_session_show(cwd, name)`,
+delete one with `castor_session_delete(cwd, name)`, or clear the default with
+`castor_reset(cwd)`.
 
 
 ## Model Selection
@@ -144,8 +144,8 @@ results), run them in the background instead:
 
 1. `gemini_start(prompt, …)` spawns the agy run off-thread and returns a job id.
 2. Do other work.
-3. `gemini_poll(job_id)` returns `running` (with elapsed time), the response when
-   `done`, or a message on error. `gemini_jobs()` lists everything outstanding.
+3. `castor_poll(job_id)` returns `running` (with elapsed time), the response when
+   `done`, or a message on error. `castor_jobs()` lists everything outstanding.
 
 `gemini_start` takes the same arguments as `gemini_prompt` except the session
 ones: background jobs are **fresh-only** by construction (concurrent jobs would
@@ -167,13 +167,13 @@ Caching is **side-effect-free only**:
 - `trust=True` calls are never cached (they may write files or run commands).
 - Session calls (`session` / `continue_session`) are never cached, they are
   stateful, and their own transcripts live under `sessions/` (kept separate from
-  the response cache, so `gemini_cache_clear` does not touch them).
+  the response cache, so `castor_cache_clear` does not touch them).
 - `sandbox=True` explore calls are cached only inside a git repo, where the repo
   fingerprint can prove the code is unchanged.
 - Bracketed error/status responses are never stored.
 
 Entries live under `~/.cache/claude-castor/` (or `$XDG_CACHE_HOME`) and expire
 after 7 days. Pass `use_cache=False` to force a fresh run, or call
-`gemini_cache_clear` to wipe the cache.
+`castor_cache_clear` to wipe the cache.
 
 ---

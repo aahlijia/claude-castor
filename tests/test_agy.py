@@ -68,7 +68,7 @@ def _result_event(**result):
 def _collect(job_id):
     """Poll a background job until it finishes."""
     for _ in range(200):
-        out = server.gemini_poll(job_id)
+        out = server.castor_poll(job_id)
         if "still running" not in out:
             return out
         time.sleep(0.02)
@@ -299,13 +299,13 @@ def test_start_with_trust_needs_cwd(agy):
 
 
 def test_poll_of_unknown_job_says_so():
-    assert server.gemini_poll("nope").startswith("[Unknown job nope")
+    assert server.castor_poll("nope").startswith("[Unknown job nope")
 
 
 def test_jobs_lists_a_finished_job(agy):
     job = _job_id(server.gemini_start("listed q", use_cache=False))
     _collect(job)
-    assert job in server.gemini_jobs()
+    assert job in server.castor_jobs()
 
 
 # --- sessions and the cache -------------------------------------------------
@@ -314,23 +314,23 @@ def test_jobs_lists_a_finished_job(agy):
 def test_session_tools_list_show_and_delete(agy, tmp_path):
     cwd = str(tmp_path)
     server._dispatch("q", cwd=cwd, session="work")
-    assert server.gemini_sessions(cwd).startswith("work  turns=1")
-    assert json.loads(server.gemini_session_show(cwd, "work"))["turns"]
+    assert server.castor_sessions(cwd).startswith("work  turns=1")
+    assert json.loads(server.castor_session_show(cwd, "work"))["turns"]
     assert (
-        server.gemini_session_delete(cwd, "work") == "Deleted session 'work'."
+        server.castor_session_delete(cwd, "work") == "Deleted session 'work'."
     )
-    assert server.gemini_sessions(cwd) == "[No sessions for this project.]"
+    assert server.castor_sessions(cwd) == "[No sessions for this project.]"
 
 
 def test_reset_clears_the_default_session(agy, tmp_path):
     cwd = str(tmp_path)
     server._dispatch("q", cwd=cwd, session=server.DEFAULT_SESSION)
-    assert server.gemini_reset(cwd).startswith("Default session cleared")
-    assert server.gemini_reset(cwd).startswith("No default session")
+    assert server.castor_reset(cwd).startswith("Default session cleared")
+    assert server.castor_reset(cwd).startswith("No default session")
 
 
 def test_reset_needs_cwd():
-    assert server.gemini_reset().startswith("[Error: cwd is required")
+    assert server.castor_reset().startswith("[Error: cwd is required")
 
 
 def test_cache_clear_keeps_run_records(agy):
@@ -339,7 +339,7 @@ def test_cache_clear_keeps_run_records(agy):
     runs.mkdir(parents=True)
     record = runs / "run-1.json"
     record.write_text("{}")
-    assert "Cleared 1 cached" in server.gemini_cache_clear()
+    assert "Cleared 1 cached" in server.castor_cache_clear()
     assert record.exists()
     server._dispatch("q")
     assert len(agy.calls) == 2
