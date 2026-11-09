@@ -6,7 +6,8 @@ backends: Google's Antigravity CLI (`agy`, Gemini models, Google sign-in, no API
 key) and, optionally, NVIDIA NIM's free hosted models.
 
 > Antigravity CLI replaces the retired Gemini CLI (shut down June 18, 2026). The
-> MCP tools keep their `gemini_*` names for compatibility but drive `agy`.
+> Antigravity tools keep their `gemini_*` names for compatibility but drive
+> `agy`. Tools every backend shares are `castor_*`.
 
 ## Docs
 
@@ -16,7 +17,7 @@ Reference lives in `docs/`; this file is the short orientation.
 |---|---|
 | `README.md` | Install, slash commands, tool overview |
 | `GEMINI.md` | Prompting guide Claude reads; `install.py` copies it to `~/.claude/` |
-| `docs/agy.md` | `gemini_*` tools, agent mode, sessions, caching, background jobs |
+| `docs/agy.md` | `gemini_*` tools, shared `castor_*` tools, agent mode, sessions, caching, background jobs |
 | `docs/nim.md` | NVIDIA NIM backend: setup, tools, config, resilience, agent internals |
 | `docs/run-tier.md` | `castor_run_start`, `castor_runs`, `castor_compare_runs`, `.castor/run.json` (including `log_format`) |
 | `docs/troubleshooting.md` | Common failures |
@@ -54,12 +55,16 @@ every `@mcp.tool()` on the shared `mcp` object, then runs it. The code:
 
 | Module | What it holds |
 |---|---|
-| `castor/app.py` | Logging, `--log-file`, the `mcp` object, `_register_gated` |
-| `castor/common.py` | Shared helpers: prompts and schemas, file inlining, git, response cache, project state, sessions, `_assemble_prompt`, agent path confinement |
-| `castor/jobs.py` | Background job table and worker (`_run_job`) |
-| `castor/logs.py` | Suite log parsing: `LogFormat`, verdict rows, totals |
-| `castor/agy.py` | Antigravity: the `agy` runner, `_dispatch`, every `gemini_*` tool |
-| `castor/nim/backend.py` | NIM chat: keys, limiter, retries, streaming, `nim_*` chat tools, usage |
+| `castor/app.py` | Logging, `--log-file`, the `mcp` object, `_register_gated`, status-line registry |
+| `castor/common.py` | Shared helpers: review prompts, file inlining, git, response cache, project state, sessions, `_assemble_prompt` |
+| `castor/jobs.py` | Background job table, worker (`_run_job`), poller and ok-prefix registries |
+| `castor/logs.py` | Suite log parsing: `LogFormat`, verdict rows, totals, `RUN_CONFIG_FILE` |
+| `castor/tools.py` | Tools every backend shares: `castor_poll`, `castor_jobs`, sessions, cache clear |
+| `castor/agy/prompts.py` | Antigravity constants: install and auth text, timeouts, prompts, JSON schemas |
+| `castor/agy/cli.py` | The `agy` runner, stream-json parsing, cache keys, `_dispatch` |
+| `castor/agy/tools.py` | Every `gemini_*` tool and agy's job pool |
+| `castor/nim/backend.py` | NIM chat: keys, limiter, retries, streaming, `nim_*` chat tools, usage, NIM's job pool |
+| `castor/nim/paths.py` | Agent path confinement |
 | `castor/nim/edit_tools.py` | The edit store and `propose_edit` / `drop_edit` tools the agent loop offers |
 | `castor/nim/agent.py` | The read-only tool loop, dekko tools, citation checks, `nim_agent` |
 | `castor/nim/roles.py` | Scout, first-pass review, log triage |
@@ -69,14 +74,19 @@ every `@mcp.tool()` on the shared `mcp` object, then runs it. The code:
 | `castor/run/compare.py` | `castor_compare_runs` |
 | `castor/_namespace.py` | Test and eval support only: one `server`-like view over all modules |
 
-`common`, `logs` and `app` import no other castor module. `common` and `jobs`
-each import `castor.agy` inside one function, because `agy` imports them.
+`app`, `common`, `jobs` and `logs` import no other castor module, and `tools`
+imports only those. `castor/agy` and `castor/nim` never import each other or the
+run tier; they plug in through `_register_status_line`, `_register_poller` and
+`_register_job_ok_prefix`. The one exception is `_run_triage` in `run/tier.py`,
+which imports NIM inside the function so runs work without it.
+`tests/test_separation.py` enforces these rules.
 
-Tests: `tests/test_nim.py` (NIM against a local stub server), `tests/test_run.py`
-(run tier, compare, `log_format`), `tests/test_nim_eval.py` (the eval script).
-They read and patch names through `castor._namespace.view()`, so a patch
-reaches every module that imported the name.
-The agy path has no automated tests.
+Tests: `tests/test_agy.py` (agy against a fake subprocess), `tests/test_nim.py`
+(NIM against a local stub server), `tests/test_run.py` (run tier, compare,
+`log_format`), `tests/test_nim_eval.py` (the eval script),
+`tests/test_separation.py` (the import rules). Most read and patch names through
+`castor._namespace.view()`, so a patch reaches every module that imported the
+name.
 
 ## Development
 

@@ -28,7 +28,7 @@ If Claude Castor saves you tokens or time, consider starring the repo, it
 helps other Claude Code users find it.
 
 > **Note:** Antigravity CLI replaces the retired Gemini CLI (shut down
-> June 18, 2026). The MCP tools keep their `gemini_*` names for
+> June 18, 2026). The Antigravity tools keep their `gemini_*` names for
 > compatibility, but they now drive the `agy` binary.
 
 ---
@@ -154,12 +154,13 @@ over via the system keyring, so no extra steps are needed.
 
 ## Tools
 
-The MCP server exposes three families of tools. Full reference in [docs/](docs/README.md).
+The MCP server exposes four families of tools. Full reference in [docs/](docs/README.md).
 
 | Family | Tools | Reference |
 |---|---|---|
-| Antigravity (`gemini_*`) | `gemini_prompt`, workflow tools (`gemini_index`, `gemini_review`, `gemini_security_review`, `gemini_find_usages`, `gemini_explain_error`, `gemini_summarize`, `gemini_semantic_search`, `gemini_document`), background jobs, sessions, caching, status | [docs/agy.md](docs/agy.md) |
+| Antigravity (`gemini_*`) | `gemini_prompt`, workflow tools (`gemini_index`, `gemini_review`, `gemini_security_review`, `gemini_find_usages`, `gemini_explain_error`, `gemini_summarize`, `gemini_semantic_search`, `gemini_document`), `gemini_start` for background jobs, status | [docs/agy.md](docs/agy.md) |
 | NVIDIA NIM (`nim_*`, optional) | Prompts, reviews, a read-only agent and its roles (scout, first-pass review, log triage, explain row) | [docs/nim.md](docs/nim.md) |
+| Shared (`castor_*`) | Collect background jobs, manage sessions, clear the cache. Works with either backend. | [docs/agy.md](docs/agy.md#shared-tools) |
 | Run tier (`castor_*`) | Start an allowlisted suite script in the background, list runs, compare logs | [docs/run-tier.md](docs/run-tier.md) |
 
 ---

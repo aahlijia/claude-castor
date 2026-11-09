@@ -2,7 +2,9 @@
 
 
 The `gemini_*` tools drive the Antigravity CLI (`agy`). Names keep `gemini_`
-for compatibility. For NVIDIA NIM see [nim.md](nim.md).
+for compatibility. For NVIDIA NIM see [nim.md](nim.md). The `castor_*` tools
+that manage jobs, sessions and the cache for every backend are listed under
+[Shared tools](#shared-tools).
 
 
 ## Tools
@@ -19,13 +21,6 @@ for compatibility. For NVIDIA NIM see [nim.md](nim.md).
 | `gemini_semantic_search` | Natural-language code search → ranked `[{path, line, reason}]` |
 | `gemini_document` | Draft docstrings/docs for a symbol or file (return-only) |
 | `gemini_start` | Start a prompt in the background; returns a job id |
-| `castor_poll` | Check a background job; returns its result when done |
-| `castor_jobs` | List background jobs and their status |
-| `castor_sessions` | List a project's conversation sessions |
-| `castor_session_show` | Print a session's stored transcript |
-| `castor_session_delete` | Delete a session |
-| `castor_reset` | Clear the project's default session (requires `cwd`) |
-| `castor_cache_clear` | Delete all cached responses to force fresh runs |
 | `gemini_models` | List the models available to agy |
 | `gemini_agents` | List agy's built-in specialized agents |
 | `gemini_auth` | Get sign-in instructions when not authenticated |
@@ -50,6 +45,21 @@ for compatibility. For NVIDIA NIM see [nim.md](nim.md).
 | `agent` | `str` | `None` | Route the prompt to one of agy's built-in agents (see `gemini_agents`) |
 | `sandbox` | `bool` | `false` | Explore with auto-approved commands inside agy's OS sandbox, workspace read-only (middle tier; ignored if `trust`) |
 | `use_cache` | `bool` | `true` | Reuse a stored response for the same prompt against an unchanged repo |
+
+
+## Shared tools
+
+These serve every backend, and none of them needs agy installed.
+
+| Tool | Description |
+|---|---|
+| `castor_poll` | Check a background job or run; returns its result when done |
+| `castor_jobs` | List background jobs and their status |
+| `castor_sessions` | List a project's conversation sessions |
+| `castor_session_show` | Print a session's stored transcript |
+| `castor_session_delete` | Delete a session |
+| `castor_reset` | Clear the project's default session (requires `cwd`) |
+| `castor_cache_clear` | Delete all cached responses, from every backend, to force fresh runs |
 
 
 ## Agent Mode

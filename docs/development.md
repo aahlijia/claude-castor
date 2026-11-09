@@ -23,7 +23,7 @@
   this repo (the NQC set is `~/.cache/claude-castor/eval/nqc-cases.json`).
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands the `castor` package depends on. After an intended
-  agy upgrade, update `castor/agy.py`, then refresh with `--update-snapshot`.
+  agy upgrade, update `castor/agy/cli.py`, then refresh with `--update-snapshot`.
 - Before a release and after a dekko bump, run `uv run python
   scripts/check_dekko_surface.py` to catch drift in the dekko flags and JSON
   fields Castor relies on; `--update-snapshot` refreshes it.
