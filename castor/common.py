@@ -7,15 +7,6 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
-
-
-INSTALL_CMD = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
-
-AUTH_HINT = (
-    'Run the `gemini_auth` tool or type `! agy -p "ok"` '
-    "in the Claude Code prompt to sign in — it is a one-time step."
-)
 
 
 SYSTEM_INSTRUCTION = """\
@@ -27,27 +18,6 @@ You are a technical assistant. Respond with precision and structure.
 - Do NOT narrate your actions (no "I will read..." / "I will view...")
 - Do NOT append a "Summary of Work" or similar trailing section
 - Reference files as plain paths, never as file:// links\
-"""
-
-
-# Baked prompt for gemini_index — requests a structured JSON object.
-INDEX_PROMPT = """\
-You are a technical assistant. Produce a structured JSON index of this
-codebase for use as context by another engineer.
-
-Return a JSON object with exactly these keys:
-
-  "summary"         — one-paragraph description of what this codebase does
-  "entry_points"    — list of top-level entry point paths as strings
-  "modules"         — object mapping each key module or class name to
-                      {"file": "<path>", "line": <int>, "role": "<desc>"}
-  "exception_types" — list of custom exception or error type names
-                      (empty list if none)
-  "architecture"    — short paragraph on how the major pieces connect
-
-Be precise — use real file paths, symbol names, and line numbers from
-the code. Do NOT wrap the output in a code fence. Return only the JSON
-object, nothing else.\
 """
 
 
@@ -72,50 +42,6 @@ would be exploitable if this code ran with attacker-influenced input. Skip
 pure correctness/style nitpicks — that's a separate review. For each finding
 give the file, the relevant hunk, the risk, and a concrete fix. If nothing
 substantive stands out, say so plainly."""
-
-
-# Baked prompt for gemini_summarize — structured, token-lean summary.
-SUMMARIZE_PROMPT = """\
-Read `{target}` (a file or directory under the project root) and summarize
-it. Return ONLY a JSON object with exactly these keys:
-
-  "summary"     — one short paragraph on what {target} is and does
-  "key_points"  — list of terse, information-dense bullets. For a
-                  directory, make each bullet a per-area roll-up prefixed
-                  with the area's path.
-
-Every bullet must carry information. Do NOT wrap the output in a code
-fence. Return only the JSON object, nothing else.\
-"""
-
-
-# Baked prompt for gemini_semantic_search — ranked hits as JSON. Wrapped
-# in a "hits" object (rather than a bare array) because agy's
-# --json-schema enforcement requires a root object schema — see
-# SEMANTIC_SEARCH_JSON_SCHEMA and _parse_hits.
-SEMANTIC_SEARCH_PROMPT = """\
-Search this codebase for code relevant to: "{query}".
-
-Return ONLY a JSON object with one key "hits", an array of at most {n}
-objects, most relevant first:
-
-  {{"hits": [{{"path": "<repo-relative path>", "line": <int>,
-  "reason": "<=12 words"}}]}}
-
-Use real paths and line numbers from the code. Do NOT wrap the output in a
-code fence. Return only the JSON object, nothing else.\
-"""
-
-
-# Baked prompt for gemini_document — proposed docs in the project's style.
-DOCUMENT_PROMPT = """\
-Generate documentation for `{target}` in this project. If `{target}`
-resolves to a file, document its public items; otherwise treat it as a
-symbol name and document that symbol. Match the project's existing
-docstring and comment style — infer it from neighboring code. Return only
-the proposed docstrings or markdown; do not restate or rewrite the
-implementation, and do not modify any file.\
-"""
 
 
 # Internal prompt for compressing a session transcript (FR-F4).
@@ -175,13 +101,6 @@ MAX_TOTAL_BYTES = 800 * 1024  # 800 KB total inline content
 MAX_SKIPPED_LISTED = 50
 
 
-# agy print mode waits this long for a single prompt to resolve.
-PRINT_TIMEOUT = "300s"
-
-# Subprocess wall-clock guard, slightly above PRINT_TIMEOUT.
-SUBPROCESS_TIMEOUT = 310
-
-
 # Cached responses older than this are treated as misses, bounding
 # staleness even when the git-SHA match would otherwise hold an entry.
 CACHE_TTL_SECONDS = 7 * 24 * 3600
@@ -202,106 +121,6 @@ SESSION_BUDGET_CHARS = 24000  # replay size before older turns are summarized
 SESSION_KEEP_VERBATIM = 3  # most-recent turns kept uncompressed
 
 SESSION_TTL_SECONDS = 30 * 24 * 3600  # idle sessions evicted after this
-
-
-# Max hits gemini_semantic_search asks agy to return.
-SEMANTIC_SEARCH_MAX_HITS = 20
-
-
-_INDEX_KEYS = frozenset(
-    {
-        "summary",
-        "entry_points",
-        "modules",
-        "exception_types",
-        "architecture",
-    }
-)
-
-
-# --json-schema payloads enforced on the three JSON-emitting workflow
-# tools (gemini_index, gemini_summarize, gemini_semantic_search), so
-# structure is a contract agy enforces rather than a request it might
-# ignore (see _parse_ndjson_result). Confirmed live against agy 1.1.9
-# that --json-schema requires a root object schema — a root array
-# schema returns an error result with no structured_output at all —
-# which is why SEMANTIC_SEARCH_JSON_SCHEMA wraps its array in a "hits"
-# object instead of matching gemini_semantic_search's bare-array prompt
-# shape 1:1 (see SEMANTIC_SEARCH_PROMPT and _parse_hits).
-INDEX_JSON_SCHEMA = json.dumps(
-    {
-        "type": "object",
-        "properties": {
-            "summary": {"type": "string"},
-            "entry_points": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "modules": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "file": {"type": "string"},
-                        "line": {"type": "integer"},
-                        "role": {"type": "string"},
-                    },
-                    "required": ["file", "line", "role"],
-                },
-            },
-            "exception_types": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "architecture": {"type": "string"},
-        },
-        "required": [
-            "summary",
-            "entry_points",
-            "modules",
-            "exception_types",
-            "architecture",
-        ],
-    }
-)
-
-
-SUMMARIZE_JSON_SCHEMA = json.dumps(
-    {
-        "type": "object",
-        "properties": {
-            "summary": {"type": "string"},
-            "key_points": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-        },
-        "required": ["summary", "key_points"],
-    }
-)
-
-
-SEMANTIC_SEARCH_JSON_SCHEMA = json.dumps(
-    {
-        "type": "object",
-        "properties": {
-            "hits": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "line": {"type": "integer"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["path", "line", "reason"],
-                },
-                "maxItems": SEMANTIC_SEARCH_MAX_HITS,
-            },
-        },
-        "required": ["hits"],
-    }
-)
 
 
 def _read_bytes(path: Path) -> bytes | None:
@@ -415,16 +234,6 @@ def _inline_directory(directory: str) -> str:
             f"request explicitly if needed]\n{listing}{more}"
         )
     return result
-
-
-def _is_side_effect_free(trust: bool, session: str | None) -> bool:
-    """True when a call only reads — safe to cache.
-
-    trust=True may write files or run commands; a session call is
-    stateful (its result feeds the transcript and depends on prior
-    turns). Neither is safely cacheable.
-    """
-    return not trust and not session
 
 
 def _repo_fingerprint(cwd: str | None) -> str | None:
@@ -552,66 +361,6 @@ def _cache_size_mb() -> float:
     except OSError:
         pass
     return total / (1024 * 1024)
-
-
-def _cache_key(
-    prompt: str,
-    model: str | None,
-    sandbox: bool,
-    fingerprint: str | None,
-    effort: str | None = None,
-    agent: str | None = None,
-    json_schema: str | None = None,
-) -> str:
-    """Hash everything that affects the response into a stable key."""
-    payload = json.dumps(
-        {
-            "version": CACHE_KEY_VERSION,
-            "prompt": prompt,
-            "model": model or "",
-            "sandbox": sandbox,
-            "repo": fingerprint or "",
-            "effort": effort or "",
-            "agent": agent or "",
-            "json_schema": json_schema or "",
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _cache_lookup_key(
-    prompt: str,
-    model: str | None,
-    sandbox: bool,
-    trust: bool,
-    session: str | None,
-    cwd: str | None,
-    effort: str | None = None,
-    agent: str | None = None,
-    json_schema: str | None = None,
-) -> str | None:
-    """Return a cache key if this call is cacheable, else None.
-
-    Cacheable only when side-effect-free. Sandbox explores the
-    filesystem, so it is cached only when a repo fingerprint can prove
-    the code is unchanged; non-explore (inline/read-only) calls are
-    determined by the prompt alone and cache without one.
-    """
-    if not _is_side_effect_free(trust, session):
-        return None
-    fingerprint = _repo_fingerprint(cwd)
-    if sandbox and fingerprint is None:
-        return None
-    return _cache_key(
-        prompt,
-        model,
-        sandbox,
-        fingerprint,
-        effort,
-        agent,
-        json_schema,
-    )
 
 
 def _cache_get(key: str) -> str | None:
@@ -834,27 +583,13 @@ def _append_turn(
     _save_session(cwd, name, session)
 
 
-def _parse_summary(raw: str) -> str:
-    """Parse agy's summarize response into a {summary, key_points} JSON.
+def _parse_summary(text: str) -> str:
+    """Parse a summarize reply into a {summary, key_points} JSON string.
 
-    First tries the schema-enforced NDJSON path (_parse_ndjson_result) —
-    raw is stream-json output produced with SUMMARIZE_JSON_SCHEMA — then
-    falls back to extracting a JSON object the old way (best-effort)
-    when that path comes back empty. That fallback text is narrowed via
-    _fallback_text first when raw is NDJSON, so a schema miss
-    degrades to the old plain-text failure surface rather than the full
-    multi-line transcript. Falls back to {"summary": raw, "key_points":
-    []} when neither path yields a valid summary.
+    Pulls a JSON object out of the text, allowing for prose or a code fence
+    around it. Falls back to {"summary": text, "key_points": []} when no
+    valid summary object is found.
     """
-    structured = _parse_ndjson_result(raw)
-    if isinstance(structured, dict) and "summary" in structured:
-        return json.dumps(
-            {
-                "summary": structured.get("summary", ""),
-                "key_points": structured.get("key_points", []),
-            }
-        )
-    text = _fallback_text(raw)
     fallback = {"summary": text, "key_points": []}
     try:
         data = json.loads(_extract_json_blob(text))
@@ -897,43 +632,6 @@ def _assemble_prompt(
     return "\n\n".join(parts)
 
 
-def _try_cache(
-    use_cache: bool,
-    prompt: str,
-    model: str | None,
-    sandbox: bool,
-    trust: bool,
-    session: str | None,
-    cwd: str | None,
-    effort: str | None = None,
-    agent: str | None = None,
-    json_schema: str | None = None,
-) -> tuple[str | None, str | None]:
-    """Resolve the cache for a call.
-
-    Returns:
-        A (key, cached_response) pair. key is None when the call is not
-        cacheable (so the caller skips storing too); cached_response is
-        None on a miss.
-    """
-    if not use_cache:
-        return None, None
-    key = _cache_lookup_key(
-        prompt,
-        model,
-        sandbox,
-        trust,
-        session,
-        cwd,
-        effort,
-        agent,
-        json_schema,
-    )
-    if key is None:
-        return None, None
-    return key, _cache_get(key)
-
-
 def _strip_fences(text: str) -> str:
     """Strip a single outermost markdown code fence from text."""
     stripped = text.strip()
@@ -965,138 +663,3 @@ def _extract_json_blob(text: str) -> str:
     if end == -1 or end < start:
         return stripped
     return stripped[start : end + 1]
-
-
-def _ndjson_result_event(stdout: str) -> dict | None:
-    """Return the terminal NDJSON "result" event's payload, or None.
-
-    The payload is the dict under `event["result"]` (see
-    _parse_ndjson_result for the event layout). None means stdout is
-    empty, is not NDJSON, or ended without a result event.
-    """
-    lines = [line for line in stdout.strip().splitlines() if line.strip()]
-    if not lines:
-        return None
-    try:
-        event = json.loads(lines[-1])
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(event, dict) or event.get("event") != "result":
-        return None
-    result = event.get("result")
-    return result if isinstance(result, dict) else None
-
-
-def _parse_ndjson_result(stdout: str) -> Any:
-    """Extract structured_output from the terminal NDJSON result event.
-
-    With `--output-format stream-json` + `--json-schema` (see
-    _json_schema_args), agy emits one JSON object per line: an "init"
-    event, N "step_update" events, and exactly one terminal event
-    carrying the schema-validated payload.
-
-    Confirmed live against agy 1.1.9: the terminal event's discriminator
-    is the top-level "event" key with value "result" — NOT a "type" key
-    as agy's own docs describe — and the payload sits one level down,
-    at `event["result"]["structured_output"]`, not flattened onto the
-    event itself. A schema-validation failure surfaces as a "result"
-    event with no `structured_output` key at all (status "ERROR"), which
-    this naturally returns None for. Re-checked on agy 1.4.7: the layout
-    is unchanged, and structured_output sits beside a `response` string
-    holding the same JSON as text. A run that ended on a denied tool
-    action has neither (empty response plus a `denied_actions` list);
-    _run_agy turns that into an error before any parser sees it.
-
-    Args:
-        stdout: The full NDJSON stdout from an agy run.
-
-    Returns:
-        The parsed structured_output value (dict or list, depending on
-        the schema's root type), or None on any parse failure, missing
-        terminal event, or missing structured_output.
-    """
-    result = _ndjson_result_event(stdout)
-    return result.get("structured_output") if result else None
-
-
-def _fallback_text(stdout: str) -> str:
-    """Recover the terminal event's plain response text from NDJSON.
-
-    Used as the fallback input when _parse_ndjson_result finds no
-    structured_output (confirmed live: schema enforcement is not fully
-    reliable once an --agent is combined with --sandbox multi-turn
-    exploration — the terminal result event can omit structured_output
-    entirely). Falling back to the *full* multi-line NDJSON stdout
-    (tool-call step_updates, the tool list, permission_mode, the schema
-    echo) would be a far noisier failure surface than a schema miss
-    deserves — the terminal event's own "response" field is the same
-    plain text `--output-format text` would have returned directly, so
-    recovering just that keeps the old, narrow fallback shape.
-
-    An NDJSON stream with an empty or missing response yields "", never
-    the stream itself. The old `response or stdout` fallback leaked the
-    whole stream (starting with the "init" event) into raw_markdown
-    whenever agy answered with an empty string.
-
-    Args:
-        stdout: The full NDJSON stdout from an agy run, or plain text.
-
-    Returns:
-        The terminal event's response string ("" when absent), or
-        stdout unchanged when it is not NDJSON with a result event.
-    """
-    result = _ndjson_result_event(stdout)
-    if result is None:
-        return stdout
-    response = result.get("response")
-    return response if isinstance(response, str) else ""
-
-
-# .dekko holds dekko's map and notes: read through the dekko tools only.
-_NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg", ".dekko"}
-
-_AGENT_DENIED_ERROR = "path is off limits (secrets, .git and .dekko)"
-
-_NIM_AGENT_DENIED_NAMES = {
-    "id_rsa",
-    "id_ed25519",
-    ".netrc",
-    ".npmrc",
-    ".pypirc",
-}
-
-_NIM_AGENT_DENIED_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
-
-
-def _agent_denied(relative: Path) -> bool:
-    """True for paths the agent may never read (secrets, .git, .dekko)."""
-    if _NIM_AGENT_DENIED_DIRS & set(relative.parts):
-        return True
-    name = relative.name.lower()
-    return (
-        name.startswith(".env")
-        or name in _NIM_AGENT_DENIED_NAMES
-        or name.endswith(_NIM_AGENT_DENIED_SUFFIXES)
-    )
-
-
-def _agent_resolve(root: Path, raw: str) -> tuple[Path | None, str | None]:
-    """Resolve `raw` inside `root`: (path, None) or (None, error).
-
-    Symlinks are followed before the containment check, so a link out of
-    the project is refused like any other outside path.
-    """
-    try:
-        target = (root / (raw or ".")).resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None, "invalid path"
-    if not target.is_relative_to(root):
-        return None, "path is outside the project"
-    if _agent_denied(target.relative_to(root)):
-        return None, _AGENT_DENIED_ERROR
-    return target, None
-
-
-def _edit_one_line(text: str) -> str:
-    """`text` with its line breaks folded into spaces."""
-    return " ".join(text.split())

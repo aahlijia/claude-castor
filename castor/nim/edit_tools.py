@@ -6,11 +6,18 @@ from typing import Any
 
 
 from castor.common import (
-    _AGENT_DENIED_ERROR,
-    _agent_resolve,
     _is_binary_bytes,
     _read_bytes,
 )
+from castor.nim.paths import (
+    _AGENT_DENIED_ERROR,
+    _agent_resolve,
+)
+
+
+def _edit_one_line(text: str) -> str:
+    """`text` with its line breaks folded into spaces."""
+    return " ".join(text.split())
 
 
 @dataclass(frozen=True)
