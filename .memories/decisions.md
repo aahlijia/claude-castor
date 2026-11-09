@@ -473,6 +473,18 @@ and `gemini_index` needs ~2 min; 45 s rejected).
   sets a name in its defining module and every `from`-importer, so the old
   `monkeypatch.setattr(server, ...)` calls kept working unchanged.
 
+### 2026-11-09: agy and NIM separated; shared tools renamed castor_* (user)
+- **Decision:** `castor/agy` and `castor/nim` never import each other or the run
+  tier. Seven tools that serve every backend moved to `castor/tools.py` and were
+  renamed `gemini_*` to `castor_*`, with no aliases. Each backend owns its job
+  pool. `tests/test_separation.py` enforces the import rules.
+- **Why:** agy could not load without NIM, and NIM's concurrency settings set
+  agy's background worker count (4 with no keys, 8 with three).
+- **How the links were cut:** backends register with neutral modules
+  (`_register_status_line`, `_register_poller`, `_register_job_ok_prefix`). The
+  run tier imports NIM only inside `_run_triage`, which is the one allowed edge.
+- **Rejected:** keeping `gemini_*` aliases, since the user chose the rename.
+
 ### 2026-11-09: compare noise is a per-project regex list, not blanket integer masking (user)
 - **Why:** NQC asked compare to ignore counters like `group=N`. Masking every integer would also hide `sent=0` vs `sent=10`, the signal in the litigious host row. `log_format.noise` lists the patterns a project names; matches become `#` before trial lines are compared. A pattern that matches empty is refused.
 - **Rejected:** masking all integers in trial lines.
