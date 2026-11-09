@@ -1,10 +1,10 @@
+from collections.abc import Callable
 import fnmatch
 import hashlib
 import json
 import os
 import re
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -781,15 +781,17 @@ def _session_prefix(cwd: str, name: str) -> str:
     return _render_session(_load_session(cwd, name))
 
 
-def _compact_session(session: dict, summarizer: Any = None) -> dict:
+def _compact_session(
+    session: dict,
+    summarizer: Callable[[str], str],
+) -> dict:
     """Summarize older turns when the replay exceeds the char budget.
 
     Folds everything but the most recent SESSION_KEEP_VERBATIM turns into
-    the rolling `summary` prefix via `summarizer` (default
-    _summarize_text, which uses agy; NVIDIA NIM sessions pass their own
-    so they never need agy installed). If summarization fails (bracketed
-    response), the session is left untouched so a transient error never
-    corrupts the transcript.
+    the rolling `summary` prefix via `summarizer`, which each backend
+    supplies so a session never needs another backend installed. If
+    summarization fails (bracketed response), the session is left
+    untouched so a transient error never corrupts the transcript.
     """
     if len(_render_session(session)) <= SESSION_BUDGET_CHARS:
         return session
@@ -798,9 +800,6 @@ def _compact_session(session: dict, summarizer: Any = None) -> dict:
     if not old:
         return session
     text = (session.get("summary") or "") + "\n" + _render_turns(old)
-    if summarizer is None:
-        # agy imports this module, so it is imported here, not at the top.
-        from castor.agy import _summarize_text as summarizer
     summary = summarizer(text)
     if summary.startswith("["):
         return session
@@ -814,7 +813,7 @@ def _append_turn(
     name: str,
     prompt: str,
     response: str,
-    summarizer: Any = None,
+    summarizer: Callable[[str], str],
 ) -> None:
     """Append a successful exchange to a session, compacting if needed."""
     now = time.time()
@@ -1052,8 +1051,6 @@ def _fallback_text(stdout: str) -> str:
     response = result.get("response")
     return response if isinstance(response, str) else ""
 
-
-_nim_patience = threading.local()
 
 # .dekko holds dekko's map and notes: read through the dekko tools only.
 _NIM_AGENT_DENIED_DIRS = {".git", ".ssh", ".aws", ".gnupg", ".dekko"}

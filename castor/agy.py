@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import time
@@ -48,6 +49,7 @@ from castor.common import (
     _try_cache,
 )
 from castor.jobs import (
+    JOB_POOL_MAX,
     _Job,
     _evict_jobs,
     _jobs,
@@ -55,7 +57,6 @@ from castor.jobs import (
     _run_job,
 )
 from castor.nim.backend import (
-    _job_pool,
     _nim_api_keys,
     _nim_default_model,
 )
@@ -559,7 +560,7 @@ def _dispatch(
     if not response.startswith("["):
         logger.info(f"dispatch: success, response_len={len(response)}")
         if in_session:
-            _append_turn(cwd, session, prompt, response)
+            _append_turn(cwd, session, prompt, response, _summarize_text)
         if cache_key is not None:
             _cache_put(cache_key, response, model, effort, agent)
     else:
@@ -1027,6 +1028,10 @@ def gemini_document(cwd: str, target: str, model: str | None = None) -> str:
     )
 
 
+# agy runs are local subprocesses, so this pool is not tied to NIM's gate.
+_agy_job_pool = ThreadPoolExecutor(max_workers=JOB_POOL_MAX)
+
+
 @mcp.tool()
 def gemini_start(
     prompt: str,
@@ -1104,7 +1109,7 @@ def gemini_start(
     with _jobs_lock:
         _evict_jobs()
         _jobs[job_id] = _Job(status="running", started_at=time.time())
-    _job_pool.submit(_run_job, job_id, kwargs)
+    _agy_job_pool.submit(_run_job, job_id, kwargs, _dispatch)
     return (
         f"Started background job {job_id}. Poll it with "
         f'gemini_poll("{job_id}") — do other work first, then check back.'

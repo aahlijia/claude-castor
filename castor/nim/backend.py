@@ -40,7 +40,6 @@ from castor.common import (
     _git_diff,
     _is_binary_bytes,
     _load_gitignore,
-    _nim_patience,
     _parse_summary,
     _read_bytes,
     _session_prefix,
@@ -52,6 +51,7 @@ from castor.jobs import (
     _jobs,
     _jobs_lock,
     _run_job,
+    _worker_patience,
 )
 
 
@@ -418,7 +418,7 @@ def _nim_max_wait() -> float:
     """
     return (
         _nim_job_max_wait()
-        if getattr(_nim_patience, "on", False)
+        if getattr(_worker_patience, "on", False)
         else (NIM_MAX_WAIT)
     )
 

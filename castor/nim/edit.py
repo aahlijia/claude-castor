@@ -18,6 +18,9 @@ from castor.common import (
     _edit_one_line,
     _repo_fingerprint,
 )
+from castor.jobs import (
+    _register_job_ok_prefix,
+)
 from castor.nim.agent import (
     NIM_AGENT_LINE_CHARS,
     NIM_AGENT_MAX_STEPS,
@@ -53,6 +56,9 @@ from castor.nim.edit_tools import (
 from castor.nim.roles import (
     NIM_REVIEW_MAX_DIFF_CHARS,
 )
+
+
+_register_job_ok_prefix("[nim_edit: OK")  # its patch report is bracketed
 
 
 # ---------------------------------------------------------------------------
