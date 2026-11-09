@@ -513,3 +513,17 @@ and `gemini_index` needs ~2 min; 45 s rejected).
 ### 2026-11-09: nim/backend.py split by job, imports one way; NIM reset is one per module
 - **Why:** 1921 lines mixed settings, limits, records, HTTP and tools. `config` imports no NIM module, `limits` and `records` import `config`, `transport` imports those, `backend` sits above, `summarize` above it. `_nim_reset_state` lives in `agent.py` and calls `_reset_limits` and `_reset_client`, because a `global` rebind only reaches its own module. `_NIM_CONTEXT_MARKERS` and `_nim_retire_key` sit in `transport` to keep imports one way.
 - **Rejected:** a holder object for rebound state (more change for no gain); splitting agent, roles or edit (out of scope). On `refactor/backend-separation` until merged.
+
+### 2026-11-09: Triage causes are verbatim log text that Castor checks
+- **Why:** NQC's first JSON triage on `guns-20261109-134031.log` returned 9 causes,
+  all `verified: true`, several invented ("client-side pellet registration") or lifted
+  from the row's name or `| at:` suffix. `verified` only meant the line number existed.
+- **How:** the agent answers `line N: <copied text>`; Castor keeps it only if the text
+  is on line N and is the row's reason (after its name, minus `LogFormat.detail_suffix`;
+  source "row") or another line (source "log"). `verified`/`quote_ok` replaced by
+  `line_exists` plus `cause_source`/`cause_line` (breaking for NQC). Context shows a
+  row's trial lines before it (not the next test's after it) and up to 600 chars of
+  the row; reprint copies are no longer hits or repeats. Text mode applies the same rule.
+- **Rejected:** a prompt nudge to prefer trial lines (Super then cited the line just
+  above each row, e.g. `wait_until:`); a deterministic row-detail fallback (duplicates
+  `rows[].detail`). Super never cited NQC's line 387 for T5 in 7 live runs.
