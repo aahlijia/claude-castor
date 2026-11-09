@@ -351,12 +351,24 @@ matched quote proves the location, not the claim.
 consumes the result. Castor parses the model's usual answer, so the model is
 never asked for JSON. You get `verdict`, `totals`, `rows` (the log's FAIL and
 NOT ASSESSED rows, read by Castor from the log, not the model), `failures`
-(each with its `row`, `log_line`, `cause_shown`, `verified`, `quote_ok`),
-`markers` and `agent` stats. Errors are objects with `error` set to
-`rate_limited` (with `retry_after_s`), `failed` or `bad_input`. There is no
-confidence or owner field: a self-rated number is not calibrated, and triage
-reads no code, so it cannot say whose bug it is. `verified` and `quote_ok`
-are the checks Castor can stand behind.
+(each with its `row`, `log_line`, `line_exists`, `what` and a checked cause:
+`cause_hint`, `cause_shown`, `cause_source`, `cause_line`), `markers` and
+`agent` stats. Errors are objects with `error` set to `rate_limited` (with
+`retry_after_s`), `failed` or `bad_input`. There is no confidence or owner
+field: a self-rated number is not calibrated, and triage reads no code, so it
+cannot say whose bug it is.
+
+Triage causes are bound to the log. The agent must answer `line N: <text
+copied from line N>`, and Castor keeps the cause only when that text is on
+line N and is either the row's stated reason (the words after its name, not
+its name or the `| at:` location: `cause_source` "row") or a different line
+(`cause_source` "log"). Anything else becomes `cause_hint` "" with
+`cause_shown` false, and text mode prints "cause not shown". So `cause_hint`
+is always the log's own words, never the model's. A "row" cause only repeats
+the row's detail; a "log" cause proves where the text is, not that it
+explains the failure, so read that line before acting on it. `line_exists`
+only says the cited line number is in the log. The verdict table reprinted at
+the end of a log is not a repeat and not a marker hit.
 
 `nim_explain_row` (and its `_start`) is a locator: it finds the code that
 decides a row, and you decide whether the harness or the game is wrong.

@@ -1558,7 +1558,7 @@ def test_triage_context_counts_collapses_and_keeps_the_tail(tmp_path):
     assert f"{len(lines)}: total 2, fail 0, not assessed 1" in ctx
 
 
-def test_triage_collapses_a_row_repeated_in_the_verdict_table(tmp_path):
+def test_triage_does_not_count_the_verdict_table_as_a_repeat(tmp_path):
     log = tmp_path / "v.log"
     log.write_text(
         "NOT ASSESSED  room A\nplace one\n"
@@ -1566,7 +1566,8 @@ def test_triage_collapses_a_row_repeated_in_the_verdict_table(tmp_path):
         + "--- verdicts ---\nNOT ASSESSED  room A\n"
     )
     ctx = server._triage_context(log, "v.log")
-    assert "v.log:1 - NOT ASSESSED  room A (repeats 2 times, last at " in ctx
+    assert "NOT ASSESSED: 1\n" in ctx and "repeats" not in ctx
+    assert "v.log:1 - NOT ASSESSED  room A\n" in ctx
 
 
 def test_triage_context_with_no_markers_has_zero_counts_and_the_ends(
@@ -4546,7 +4547,7 @@ def test_triage_json_shape(stub, repo):
     out = _triage_json(
         stub,
         repo,
-        "Verdict: failed\n- suite.log:1 - trial missed - start not on top",
+        "Verdict: failed\n- suite.log:2 - trial missed - line 1: trial 1: none",
         "suite.log",
         log,
     )
@@ -4562,12 +4563,12 @@ def test_triage_json_shape(stub, repo):
     f = out["failures"][0]
     assert (f["row"], f["log_line"], f["what"], f["cause_hint"]) == (
         "tops: x",
-        1,
+        2,
         "trial missed",
-        "start not on top",
+        "trial 1: none",
     )
-    assert f["verified"] is True and f["cause_shown"] is True
-    assert f["quote_ok"] is None
+    assert f["line_exists"] is True and f["cause_shown"] is True
+    assert f["cause_source"] == "log" and f["cause_line"] == 1
     assert set(out["agent"]) == {"model", "steps", "seconds"}
 
 
@@ -4669,7 +4670,7 @@ def test_triage_json_reads_a_path_ending_in_the_label(stub, repo):
     assert [f["log_line"] for f in out["failures"]] == [3]
 
 
-def test_triage_json_marks_unverified_and_quote_tags(stub, repo):
+def test_triage_json_strips_check_tags_and_flags_a_missing_line(stub, repo):
     out = _triage_json(
         stub,
         repo,
@@ -4679,9 +4680,243 @@ def test_triage_json_marks_unverified_and_quote_tags(stub, repo):
         log=["FAIL x"],
     )
     first, second = out["failures"]
-    assert first["verified"] is False and first["what"] == "gone"
-    assert second["quote_ok"] is False and second["verified"] is True
-    assert "[" not in second["what"]
+    assert first["line_exists"] is False and first["what"] == "gone"
+    assert second["line_exists"] is True and "[" not in second["what"]
+
+
+def _guns_log():
+    """A trimmed suite log in the layout of NQC's guns run."""
+    at = "| at: phase Scrubbing, host Probe, client Probe"
+    t2 = "T2 client: range 4 m"
+    t5 = "T5 host: launch on a floor"
+    t12 = "T12 bytes (ShotResult)"
+    t2_row = (
+        f"NOT ASSESSED  {t2} 9 of 10 trials met the precondition; first "
+        f"miss: the control shot at 5 m hit nothing {at}"
+    )
+    t5_row = f"NOT ASSESSED  {t5} 1 of 10 trials logged; sent=0 asset=- {at}"
+    t12_row = (
+        f"NOT ASSESSED  {t12} the runner's: guns.sh fire ROWS=f12 "
+        f"(lane-exclusive, takes the lock itself) {at}"
+    )
+    return [
+        "wait_until: the clicks met after 2 s",  # 1
+        t2_row,  # 2
+        f"@case 1700000000 NOT_ASSESSED {t2}",  # 3
+        "wait_until: the recoil click met after 3 s",  # 4
+        "t5 host 1: done travel=3.165 sent=1 fallen=1 fellany=1",  # 5
+        "wait_until: the recoil click met after 4 s",  # 6
+        t5_row,  # 7
+        f"@case 1700000001 NOT_ASSESSED {t5}",  # 8
+        "t7 next test starts here",  # 9
+        t12_row,  # 10
+        f"@case 1700000002 NOT_ASSESSED {t12}",  # 11
+        "--- verdicts ---",  # 12
+        t2_row,  # 13
+        t5_row,  # 14
+        t12_row,  # 15
+        "total 3, fail 0, not assessed 3",  # 16
+    ]
+
+
+def test_triage_reprint_copy_is_no_hit():
+    hits, counts = server._triage_hits(_guns_log())
+    assert hits == [2, 7, 10] and counts["NOT ASSESSED"] == 3
+
+
+def test_triage_row_only_in_the_reprint_stays_a_hit():
+    lines = ["--- verdicts ---", "FAIL          lost row", "total 1, fail 1, not assessed 0"]
+    hits, counts = server._triage_hits(lines)
+    assert hits == [2] and counts["FAIL"] == 1
+
+
+def test_triage_context_has_no_false_repeat(repo):
+    (repo / "run.log").write_text("\n".join(_guns_log()) + "\n")
+    ctx = server._triage_context(repo / "run.log", "run.log")
+    assert "repeats" not in ctx
+
+
+def test_triage_context_shows_a_rows_own_trial_lines(repo):
+    (repo / "run.log").write_text("\n".join(_guns_log()) + "\n")
+    ctx = server._triage_context(repo / "run.log", "run.log")
+    matching = ctx.split("== matching lines")[1].split("== ")[0]
+    t5 = matching[matching.index("run.log:7 - ") :]
+    t5 = t5[: t5.index("run.log:10 - ")]
+    assert "5: t5 host 1: done travel=3.165" in t5
+    assert "t7 next test" not in t5
+
+
+def test_triage_context_keeps_a_long_rows_reason(repo):
+    reason = "x" * 300 + " the real reason"
+    log = _verdict_log([("NOT ASSESSED", "long row", reason)])
+    (repo / "run.log").write_text("\n".join(log) + "\n")
+    ctx = server._triage_context(repo / "run.log", "run.log")
+    assert "the real reason" in ctx
+
+
+def test_triage_context_long_block_keeps_both_ends(repo):
+    trials = [(f"trial {i}", None) for i in range(1, 41)]
+    log = _verdict_log([*trials, ("FAIL", "row", "1 of 40")])
+    (repo / "run.log").write_text("\n".join(log) + "\n")
+    ctx = server._triage_context(repo / "run.log", "run.log")
+    matching = ctx.split("== matching lines")[1].split("== ")[0]
+    assert "1: trial 1\n" in matching and "40: trial 40" in matching
+    assert "lines cut" in matching and "20: trial 20" not in matching
+
+
+def test_triage_json_takes_the_rows_own_reason(stub, repo):
+    reason = "the runner's: guns.sh fire ROWS=f12"
+    out = _triage_json(
+        stub,
+        repo,
+        f"inconclusive\n- run.log:10 - T12 deferred - line 10: {reason}",
+        log=_guns_log(),
+    )
+    f = out["failures"][0]
+    assert f["cause_hint"] == reason and f["cause_shown"] is True
+    assert f["cause_source"] == "row" and f["cause_line"] == 10
+
+
+@pytest.mark.parametrize("cited", [10, 15])
+def test_triage_json_keeps_only_the_reason_of_a_quoted_row(
+    stub, repo, cited
+):
+    row = _guns_log()[9]
+    out = _triage_json(
+        stub,
+        repo,
+        f"inconclusive\n- run.log:10 - T12 - line {cited}: {row}",
+        log=_guns_log(),
+    )
+    f = out["failures"][0]
+    assert f["cause_hint"] == (
+        "the runner's: guns.sh fire ROWS=f12 "
+        "(lane-exclusive, takes the lock itself)"
+    )
+    assert f["cause_source"] == "row" and f["cause_line"] == 10
+
+
+def test_triage_json_takes_another_line_as_evidence(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "inconclusive\n- run.log:7 - T5 lost trials - line 5: `fallen=1 fellany=1`",
+        log=_guns_log(),
+    )
+    f = out["failures"][0]
+    assert f["cause_hint"] == "fallen=1 fellany=1"
+    assert f["cause_source"] == "log" and f["cause_line"] == 5
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        # A plausible mechanism, no evidence at all.
+        "- run.log:2 - T2 - client-side pellet registration failed",
+        # Text that is not on the cited line.
+        "- run.log:2 - T2 - line 5: pellet registration failed",
+        # The row's generic location suffix.
+        "- run.log:2 - T2 - line 2: phase Scrubbing",
+        # The row's name is its title, not its reason.
+        "- run.log:2 - T2 - line 2: range 4 m",
+        # A line past the end of the log.
+        "- run.log:2 - T2 - line 99: the control shot",
+        # The row's stamp is the row again.
+        "- run.log:2 - T2 - line 3: T2 client",
+    ],
+)
+def test_triage_json_drops_a_cause_without_evidence(stub, repo, item):
+    out = _triage_json(
+        stub, repo, f"inconclusive\n{item}", log=_guns_log()
+    )
+    f = out["failures"][0]
+    assert f["cause_hint"] == "" and f["cause_shown"] is False
+    assert f["cause_source"] is None and f["cause_line"] is None
+
+
+def test_triage_json_hit_cannot_be_its_own_evidence(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - boom - line 1: ERROR door stuck",
+        log=["ERROR door stuck"],
+    )
+    assert out["failures"][0]["cause_shown"] is False
+
+
+def test_triage_json_says_what_the_line_check_means(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - here - cause not shown\n"
+        "- run.log:99 - gone - cause not shown",
+        log=["FAIL x"],
+    )
+    first, second = out["failures"]
+    assert first["line_exists"] is True and second["line_exists"] is False
+    assert "verified" not in first and "quote_ok" not in first
+
+
+def test_triage_json_line_exists_ignores_a_quoted_path(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - other.py:999 broke - cause not shown\n",
+        log=["FAIL at other.py:999"],
+    )
+    assert out["failures"][0]["line_exists"] is True
+
+
+def test_triage_json_folds_a_cited_reprint_copy_into_its_row(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "inconclusive\n- run.log:10 - T12 - cause not shown\n"
+        "- run.log:15 - T12 again - cause not shown",
+        log=_guns_log(),
+    )
+    assert [f["log_line"] for f in out["failures"]] == [10]
+    assert out["failures"][0]["row"] == "T12 bytes (ShotResult)"
+    assert out["markers"]["NOT ASSESSED"] == 3
+
+
+def test_triage_json_reprint_copy_alone_maps_to_the_row(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "inconclusive\n- run.log:15 - T12 - cause not shown",
+        log=_guns_log(),
+    )
+    f = out["failures"][0]
+    assert f["log_line"] == 10 and f["row"] == "T12 bytes (ShotResult)"
+
+
+def test_triage_text_replaces_an_unbacked_cause(stub, repo):
+    (repo / "run.log").write_text("\n".join(_guns_log()) + "\n")
+    stub.queue.append(
+        (
+            200,
+            {},
+            _completion(
+                "inconclusive\n"
+                "- run.log:2 - T2 - client-side registration failed\n"
+                "- run.log:7 - T5 - line 5: fallen=1 fellany=1"
+            ),
+        )
+    )
+    out = _tool(server.nim_triage_log)(str(repo), "run.log")
+    assert "registration" not in out
+    assert "run.log:2 - T2 - cause not shown" in out
+    assert "run.log:7 - T5 - line 5: fallen=1 fellany=1" in out
+    assert out.splitlines()[0] == "inconclusive"
+
+
+def test_triage_prompt_binds_causes_to_evidence(repo):
+    (repo / "run.log").write_text("\n".join(_guns_log()) + "\n")
+    task, _, error, _ = server._triage_task(str(repo), "run.log", None)
+    assert error is None
+    assert "line N:" in task and "copied exactly" in task
+    assert "likely cause" not in task
 
 
 def test_triage_json_rate_limit_error(stub, repo, monkeypatch):
