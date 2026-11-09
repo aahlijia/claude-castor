@@ -50,9 +50,11 @@
   Super are in the catalog but return 404 "Function … not found for account";
   Gemma 4 31B and DeepSeek V4.1 Flash timed out. Probe a model with a live call
   before presenting it as an option.
-- **Slash commands are copies, not served from the repo.** The CLI reads
-  `~/.claude/commands/castor/`; after changing `commands/castor/*.md` copy them
-  over (`cp commands/castor/*.md ~/.claude/commands/castor/`).
+- **Slash commands and `GEMINI.md` are copies, not served from the repo.** The CLI
+  reads `~/.claude/commands/castor/` and `~/.claude/GEMINI.md`; after changing
+  `commands/castor/*.md` or `GEMINI.md`, `diff` then `cp` them over. Do not rerun
+  `install.py` for that: it re-registers the server and can disturb the env
+  block. The installed `GEMINI.md` had drifted by whole sections before 2026-11-09.
 - **The citation check proves a line exists, not that the claim is true.** The
   scout named a function that does not exist at a real line, and review findings
   of absence ("no tests", "not documented") were often wrong. Verify before
@@ -73,11 +75,10 @@
   (and `nvext.max_thinking_tokens`) exactly; `reasoning_effort` does nothing;
   `chat_template_kwargs.enable_thinking=False` turns it off. At ~55 tokens/s a
   1,024-token step budget is ~18 s before any output, so a 2-request triage
-  cannot finish in 15 s.
-- **Agent timing:** Ultra spends every tool step it is given whatever the
-  prompt says (cap steps in code). The answer request can outrun 180 s
-  (6,144 thinking tokens plus the answer); it has its own 360 s timeout, and
-  each timeout is retried once, so a stuck request costs about 6 minutes.
+  cannot finish in 15 s. Ultra spends every tool step it is given whatever the
+  prompt says (cap steps in code). The answer request can outrun 180 s; it has
+  its own 360 s timeout, and each timeout is retried once, so a stuck request
+  costs about 6 minutes.
 - **Nemotron review findings repeat the same false beliefs**: that braces in a
   value passed to `str.format` raise KeyError, and that taking a lock twice in
   sequence deadlocks, and that a `..HEAD` rev range is rejected. Expect them
@@ -142,21 +143,32 @@
   that was the `test_run_args_reach_script_literally` flake (it runs first).
   Overdue tests need `expect_minutes` far enough past the script's first
   output (100 = 0.1 s was flaky; use 400 with a 1 s script).
-- **NQC's `quiet` filters the console the run tier watches.** verdict.sh's
-  awk keeps verdict lines, `log:`, `wait_until:`, `RESTARTED` and `start.sh:
-  REFUSED|BLOCKED` only, so a run.json flag on anything else (e.g. "No space
-  left on device") never fires for output inside a quieted command.
+- **NQC's `quiet` filters the console the run tier watches.** The awk at
+  `Tools/playtest/lib/verdict.sh:117` keeps verdict lines, `POLLGUARD`, `log:`,
+  `wait_until:`, `RESTARTED` and `start.sh: REFUSED|BLOCKED|lock wait timed out`
+  only, so a run.json flag on anything else (NQC's `disk_full`, "No space left on
+  device") never fires for output inside a quieted command. Fix is in NQC; lane B
+  did not have it on 2026-11-09.
 - **Patching a castor name only reaches the module you patch.** After the split,
   `from castor.x import name` copies the binding, so `monkeypatch.setattr` on
   the defining module misses importers. Tests and `scripts/nim_eval.py` use
   `castor._namespace.view()`, which patches the definer and every importer. New
   tests should use it too. pytest's undo calls `delattr` on the view, which
   restores the saved originals.
-- **`ast` name collection counts `sys.argv = x` as defining `sys`.** The split
-  script took it for a top-level def and added `from castor.app import sys`;
-  drop such imports (ruff F811 flags them).
 - **Splitting a diff with `git apply --cached --unidiff-zero` can misplace hunks.**
   Applying only some `-U0` hunks put an insertion on the wrong line and the
   commit had a syntax error, with no apply error. To split a file across
   commits, build each version from the base blob (`git hash-object -w`,
   `git update-index --cacheinfo`), then test each commit from `git archive`.
+- **The run monitor rebuilds its config from the run record, not run.json.**
+  `_run_monitor` calls `_run_config_from(rec["config"])`, so any `RunConfig` field
+  the monitor or the result needs must round-trip through `_run_config_dict`.
+  `log_format` did not, and every run's result parsed with the default layout
+  (fixed f4c70bf, test `test_run_record_keeps_log_format_for_the_monitor`). A new
+  field that only start-up reads (like `env_allow`) does not need to.
+- **`env_file` is sourced after a run's `env`, so it can override it.** If NQC's
+  `Library/lane.env` sets `ROWS` or `TROWS`, the caller's value is lost. The
+  child env is built first, then bash sources the file, then execs.
+- **No `timeout` command on this Mac.** `timeout 60 cmd` fails with "command not
+  found" and the rest of the call can still run. Use `asyncio.timeout` in a
+  Python check, or `perl -e 'alarm N; exec @ARGV'`.

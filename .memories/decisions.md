@@ -472,3 +472,23 @@ and `gemini_index` needs ~2 min; 45 s rejected).
 - **Tests:** they read and patch through `castor._namespace.view()`, which
   sets a name in its defining module and every `from`-importer, so the old
   `monkeypatch.setattr(server, ...)` calls kept working unchanged.
+
+### 2026-11-09: compare noise is a per-project regex list, not blanket integer masking (user)
+- **Why:** NQC asked compare to ignore counters like `group=N`. Masking every integer would also hide `sent=0` vs `sent=10`, the signal in the litigious host row. `log_format.noise` lists the patterns a project names; matches become `#` before trial lines are compared. A pattern that matches empty is refused.
+- **Rejected:** masking all integers in trial lines.
+
+### 2026-11-09: compare lists a line shared by several rows once; `new` is a class
+- **Why:** NQC saw `haul:` and `briefing:` repeated under every changed row. The rule is generic: a differing line (after masking) that shows under two or more rows of one run is printed once after the rows. It has no knowledge of those names and is untested on a real NQC log. `new` means absent from the first runs and present from some run on; a gap or a vanished row stays `missing`; a new row that FAILs is still `failing`.
+- **Rejected:** a rule keyed to `haul:` / `briefing:` prefixes (project-specific).
+- **Correction 2026-11-09:** NQC found it had misread its logs: `haul:` and `briefing:` sit under one row, once per compared run. The section never appeared on its real logs and is still untested there. Kept because it is harmless and may help other suites.
+
+### 2026-11-09: castor_run_start takes `env`, limited to names in run.json `env_allow` (user)
+- **Why:** row-limited NQC runs (`ROWS`, `TROWS`, `N`) had to go through `nqc-runner`. The project's committed run.json names the allowed variables, so a caller cannot widen it; `NVIDIA_*`, `CASTOR_*`, `LD_*`, `DYLD_*`, `BASH_FUNC_*` and shell or loader names (`PATH`, `BASH_ENV`, `IFS`...) can never be allowed. Values: printable ASCII without `$` or backtick, 500 chars, 20 variables. Kept in the run record, `gemini_poll` and `castor_runs`.
+- **Rejected:** a tight safe-character set for values (NQC row names have spaces, parentheses and apostrophes); free-form env from the caller (a cloned repo could not authorize itself, but a caller could inject loader variables).
+
+### 2026-11-09: develop fast-forwarded in the main checkout; installed copies synced by hand
+- **Why:** the registration runs `server.py` from this checkout, so merging to `develop` here is the install. `commands/castor/compare.md` and `GEMINI.md` were copied to `~/.claude/` with `cp`, not `install.py`, which would re-register and could disturb the env block.
+
+### 2026-11-09: missing trial lines collapse into one note, worded "trial line"
+- **Why:** NQC's `twists` compare had 16 of 45 diff lines as `(no line N; ...)`, one per line a later run lacked. Now one note per row and run (`(no trial lines 7 to 20; run1 trial line 7: ...)`); 45 lines became 33 with nothing real lost. The numbers count a row's trial lines, so the wording says so: NQC read "line 7" as a log line (it was line 25).
+- **Rejected:** absolute log line numbers (the row block offsets pass through `_clean_lines`, so they could be wrong); masking more of the diff (NQC: the remaining `haul:` coordinates are real differences).
