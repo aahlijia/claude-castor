@@ -1,3 +1,2 @@
 fastmcp
 httpx
-dekko[all]>=1.9.35
