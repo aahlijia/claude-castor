@@ -10,4 +10,4 @@ Call `castor_compare_runs` with:
 - `rows`: optional row names, or pieces of them, to keep
 - `same_code`: true when no fix landed between the runs
 
-It returns the rows that changed, by class (regressed, flaky, failing, not assessed, numbers changed, missing, fixed), with the trial lines that differ from the first run. No model reads it: decide harness or game yourself from the trial lines and the code.
+It returns the rows that changed, by class (regressed, flaky, failing, not assessed, numbers changed, missing, new, fixed), with the trial lines that differ from the first run. No model reads it: decide harness or game yourself from the trial lines and the code.
