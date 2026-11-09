@@ -112,8 +112,8 @@ CACHE_KEY_VERSION = 2
 
 
 # Client-side session machinery (FR-F). Castor owns the transcript and
-# replays it into fresh `agy --print` calls — agy's own --continue is not
-# used, so sessions are project-scoped and survive restarts.
+# replays it into each fresh backend call, so sessions are project-scoped
+# and survive restarts.
 DEFAULT_SESSION = "__default__"  # name continue_session=True maps to
 
 SESSION_BUDGET_CHARS = 24000  # replay size before older turns are summarized
@@ -646,7 +646,7 @@ def _strip_fences(text: str) -> str:
 def _extract_json_blob(text: str) -> str:
     """Pull the outermost JSON object/array out of a prose-wrapped reply.
 
-    agy is told to return bare JSON but sometimes leads with a line of
+    A model told to return bare JSON sometimes leads with a line of
     narration anyway (e.g. "Let me produce the JSON index.\\n\\n{...}").
     Strips fences, then — if the result isn't already clean JSON — slices
     from the first '{' or '[' to the last matching close bracket.

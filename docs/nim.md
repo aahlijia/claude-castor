@@ -39,7 +39,7 @@ third party.
 | Tool | Signature | Purpose |
 |---|---|---|
 | `nim_prompt` | `(prompt, files, directory, raw, cwd, continue_session, session, model, use_cache, temperature, max_tokens)` | General prompt; files/directory inlined |
-| `nim_start` | same minus session args | Background job on the shared pool; poll with `castor_poll` |
+| `nim_start` | same minus session args | Background job on NIM's worker pool; poll with `castor_poll` |
 | `nim_review` / `nim_security_review` | `(cwd, diff=None, model=None)` | Diff review (defaults to `git diff HEAD`) |
 | `nim_explain_error` | `(error, files=None, model=None)` | Root causes; source passed via `files` |
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |

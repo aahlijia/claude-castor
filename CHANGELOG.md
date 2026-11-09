@@ -73,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking: the tools every backend shares are now `castor_*`.**
+  `gemini_poll`, `gemini_jobs`, `gemini_reset`, `gemini_sessions`,
+  `gemini_session_show`, `gemini_session_delete` and `gemini_cache_clear` became
+  `castor_poll`, `castor_jobs`, `castor_reset`, `castor_sessions`,
+  `castor_session_show`, `castor_session_delete` and `castor_cache_clear`. None
+  of them ever needed agy. Anything that calls the old names has to change, and
+  installed slash commands and `GEMINI.md` need copying over again.
+- **agy and NIM no longer depend on each other.** Either one loads without the
+  other, and the run tier loads without either. agy background jobs used to get
+  their worker count from NIM's settings. They now have their own pool of 8.
 - New runtime dependency: `httpx` (already a transitive dependency of
   `fastmcp`).
 - `_compact_session` / `_append_turn` accept a pluggable summarizer and

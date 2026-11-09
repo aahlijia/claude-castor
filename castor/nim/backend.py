@@ -63,7 +63,7 @@ from castor.jobs import (
 # its own; NIM is a plain OpenAI-compatible chat-completions endpoint with no
 # filesystem access, so Castor inlines whatever the model needs (files, a
 # directory, a diff) and sends it as a single request. Caching, sessions and
-# the background-job pool are shared with the agy path.
+# the job table are shared with the agy path; the worker pool is NIM's own.
 #
 # Configuration is environment-only (set at registration with
 # `claude mcp add -e NVIDIA_API_KEY=...`). The API key is read from the
@@ -1310,7 +1310,7 @@ def nim_start(
 ) -> str:
     """Start a NVIDIA NIM prompt in the background and return a job id.
 
-    The NIM counterpart of gemini_start: same job table, same worker pool,
+    The NIM counterpart of gemini_start: same job table, NIM's own workers,
     and the same castor_poll / castor_jobs to collect results. Use it for
     long prompts or to fan the same question out to NIM and agy at once
     (start both, then compare). Background jobs are session-free. The

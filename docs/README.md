@@ -2,7 +2,7 @@
 
 | Doc | Read it for |
 |---|---|
-| [agy.md](agy.md) | The `gemini_*` tools (Antigravity): prompts, agent mode, sessions, workflow tools, background jobs, caching |
+| [agy.md](agy.md) | The `gemini_*` tools (Antigravity) and the shared `castor_*` job, session and cache tools: prompts, agent mode, sessions, workflow tools, background jobs, caching |
 | [nim.md](nim.md) | The optional NVIDIA NIM backend: setup, tools, configuration, resilience, agent internals |
 | [run-tier.md](run-tier.md) | Background suite runs, run compare, and `.castor/run.json` (including `log_format`) |
 | [troubleshooting.md](troubleshooting.md) | Common failures and fixes |
