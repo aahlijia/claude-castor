@@ -1,3 +1,4 @@
+import threading
 import fnmatch
 import contextvars
 import json
@@ -32,25 +33,18 @@ from castor.jobs import (
     _run_job,
 )
 from castor.nim.backend import (
+    _job_pool,
+    _nim_extract_text,
+    _nim_thinking_cap,
+)
+from castor.nim.config import (
     NIM_DEFAULT_MAX_INPUT_CHARS,
     NIM_DEFAULT_MAX_TOKENS,
     NIM_DEFAULT_TEMPERATURE,
     NIM_TRACES_DIR,
-    _agent_index_cache,
-    _agent_index_lock,
-    _dekko_map_cache,
-    _dekko_map_lock,
-    _dekko_version_cache,
-    _job_pool,
     _nim_api_keys,
     _nim_env,
-    _nim_extract_text,
     _nim_missing_key_error,
-    _nim_prune_records,
-    _nim_records_on,
-    _nim_request,
-    _nim_stream_fields,
-    _nim_thinking_cap,
 )
 from castor.nim.edit_tools import (
     NIM_AGENT_EDIT_NOTE,
@@ -63,10 +57,49 @@ from castor.nim.edit_tools import (
     _edit_recorded,
     _edit_run_tool,
 )
+from castor.nim.limits import (
+    _reset_limits,
+)
 from castor.nim.paths import (
     _agent_denied,
     _agent_resolve,
 )
+from castor.nim.records import (
+    _nim_prune_records,
+    _nim_records_on,
+)
+from castor.nim.transport import (
+    _nim_request,
+    _nim_stream_fields,
+    _reset_client,
+)
+
+
+_agent_index_lock = threading.Lock()
+
+
+_agent_index_cache: dict[Path, tuple[float, list[str] | None]] = {}
+
+
+_dekko_version_cache: dict[str, tuple[int, ...] | None] = {}
+
+
+_dekko_map_lock = threading.Lock()
+
+
+# root -> (when the build ended, ok, failure reason or "")
+_dekko_map_cache: dict[Path, tuple[float, bool, str]] = {}
+
+
+def _nim_reset_state() -> None:
+    """Drop limiters, cooldowns, counters, caches and the HTTP client."""
+    _reset_client()
+    _reset_limits()
+    with _agent_index_lock:
+        _agent_index_cache.clear()
+    with _dekko_map_lock:
+        _dekko_map_cache.clear()
+    _dekko_version_cache.clear()
 
 
 # ---------------------------------------------------------------------------

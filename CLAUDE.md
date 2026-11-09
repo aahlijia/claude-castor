@@ -63,7 +63,11 @@ every `@mcp.tool()` on the shared `mcp` object, then runs it. The code:
 | `castor/agy/prompts.py` | Antigravity constants: install and auth text, timeouts, prompts, JSON schemas |
 | `castor/agy/cli.py` | The `agy` runner, stream-json parsing, cache keys, `_dispatch` |
 | `castor/agy/tools.py` | Every `gemini_*` tool and agy's job pool |
-| `castor/nim/backend.py` | NIM chat: keys, limiter, retries, streaming, `nim_*` chat tools, usage, NIM's job pool |
+| `castor/nim/config.py` | NIM constants, environment lookups, API keys |
+| `castor/nim/limits.py` | Concurrency gate, rate limits, key rotation and cooldowns |
+| `castor/nim/records.py` | Local usage records |
+| `castor/nim/transport.py` | HTTP client, retries, streaming, failure classes, `_nim_request` |
+| `castor/nim/backend.py` | NIM chat dispatch, `nim_*` chat tools, NIM's job pool |
 | `castor/nim/paths.py` | Agent path confinement |
 | `castor/nim/edit_tools.py` | The edit store and `propose_edit` / `drop_edit` tools the agent loop offers |
 | `castor/nim/agent.py` | The read-only tool loop, dekko tools, citation checks, `nim_agent` |

@@ -25,6 +25,10 @@ NEUTRAL = (
 )
 AGY = ("castor.agy.cli", "castor.agy.prompts", "castor.agy.tools")
 NIM = (
+    "castor.nim.config",
+    "castor.nim.limits",
+    "castor.nim.records",
+    "castor.nim.transport",
     "castor.nim.backend",
     "castor.nim.paths",
     "castor.nim.edit_tools",
@@ -120,6 +124,24 @@ def test_nim_never_names_agy_or_the_run_tier():
             assert not module.startswith(("castor.agy", "castor.run")), (
                 f"{path.name}:{line} imports {module}"
             )
+
+
+@pytest.mark.parametrize(
+    ("module", "allowed"),
+    [
+        ("config", set()),
+        ("limits", {"castor.nim.config"}),
+        ("records", {"castor.nim.config"}),
+        (
+            "transport",
+            {"castor.nim.config", "castor.nim.limits", "castor.nim.records"},
+        ),
+    ],
+)
+def test_nim_infrastructure_imports_one_way(module, allowed):
+    path = PACKAGE / "nim" / f"{module}.py"
+    named = {m for m, _ in _castor_imports(path) if m.startswith("castor.nim")}
+    assert named <= allowed
 
 
 @pytest.mark.parametrize(
