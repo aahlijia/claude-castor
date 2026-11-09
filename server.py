@@ -5,7 +5,7 @@ The tools live in the `castor` package. Importing each module registers its
 """
 
 from castor.app import _register_gated, mcp
-from castor import agy, jobs  # noqa: F401  (registers the gemini_* tools)
+from castor import agy, tools  # noqa: F401  (registers their tools)
 from castor.nim import backend, agent, roles, explain, edit  # noqa: F401
 from castor.run import tier, compare  # noqa: F401
 

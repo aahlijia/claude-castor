@@ -21,6 +21,7 @@ MODULES = (
     "castor.common",
     "castor.logs",
     "castor.jobs",
+    "castor.tools",
     "castor.agy",
     "castor.nim.backend",
     "castor.nim.edit_tools",

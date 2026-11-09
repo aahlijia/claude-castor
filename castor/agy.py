@@ -7,6 +7,7 @@ from typing import Any
 
 
 from castor.app import (
+    _status_lines,
     logger,
     mcp,
 )
@@ -30,21 +31,17 @@ from castor.common import (
     _INDEX_KEYS,
     _append_turn,
     _assemble_prompt,
-    _cache_dir,
     _cache_put,
     _cache_size_mb,
-    _delete_session,
     _extract_json_blob,
     _fallback_text,
     _get_git_sha,
     _git_diff,
     _load_project_state,
-    _load_session,
     _ndjson_result_event,
     _parse_ndjson_result,
     _parse_summary,
     _save_project_state,
-    _session_dir,
     _session_prefix,
     _try_cache,
 )
@@ -55,13 +52,6 @@ from castor.jobs import (
     _jobs,
     _jobs_lock,
     _run_job,
-)
-from castor.nim.backend import (
-    _nim_api_keys,
-    _nim_default_model,
-)
-from castor.run.tier import (
-    _run_poll,
 )
 
 
@@ -1117,177 +1107,6 @@ def gemini_start(
 
 
 @mcp.tool()
-def gemini_poll(job_id: str) -> str:
-    """Check a background job (gemini_start, nim_*_start) or a run.
-
-    Args:
-        job_id: The id returned by gemini_start or a *_start tool, or a
-            run id (`run-...`) from castor_run_start. A run returns JSON:
-            progress while it runs, then its result.
-
-    Returns:
-        While running, a bracketed status with elapsed seconds. When done,
-        agy's response. On error, a bracketed message. For an unknown id,
-        a bracketed not-found note.
-    """
-    if job_id.startswith("run-"):
-        return _run_poll(job_id)
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if job is None:
-            return (
-                f"[Unknown job {job_id} — it may have been evicted or "
-                "never existed. Run gemini_jobs to list current jobs.]"
-            )
-        status, response = job.status, job.response
-        started, finished = job.started_at, job.finished_at
-
-    if status == "running":
-        elapsed = int(time.time() - started)
-        return (
-            f"[Job {job_id} still running — {elapsed}s elapsed. "
-            "Poll again shortly.]"
-        )
-
-    took = int((finished or time.time()) - started)
-    if status == "error":
-        return f"[Job {job_id} failed after {took}s]\n{response}"
-    return response or "[No response from Antigravity]"
-
-
-@mcp.tool()
-def gemini_jobs() -> str:
-    """List background jobs and their status (runs: castor_runs).
-
-    Returns:
-        One line per job (id, status, age/duration), newest last, or a
-        note when there are none.
-    """
-    with _jobs_lock:
-        if not _jobs:
-            return "No background jobs."
-        now = time.time()
-        lines = []
-        for jid, job in sorted(_jobs.items(), key=lambda kv: kv[1].started_at):
-            secs = int((job.finished_at or now) - job.started_at)
-            lines.append(f"{jid}  {job.status:<8} {secs}s")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def gemini_reset(cwd: str | None = None) -> str:
-    """Clear a project's default session so the next call starts fresh.
-
-    Deletes the reserved "__default__" session (the one continue_session
-    resumes) for cwd. Named sessions are untouched — manage those with
-    gemini_sessions and gemini_session_delete. Sessions are project-
-    scoped, so cwd is required to know which project's default to clear.
-
-    Args:
-        cwd: Absolute project root whose default session to reset.
-    """
-    if not cwd:
-        return (
-            "[Error: cwd is required — sessions are project-scoped. Pass "
-            "the absolute project root whose default session to reset.]"
-        )
-    if _delete_session(cwd, DEFAULT_SESSION):
-        return (
-            "Default session cleared — the next continue_session call "
-            "starts fresh."
-        )
-    return "No default session to clear — the next call already starts fresh."
-
-
-@mcp.tool()
-def gemini_sessions(cwd: str) -> str:
-    """List the client-side sessions stored for a project.
-
-    Evicts any sessions past the TTL, then lists the rest with turn count
-    and last-updated time.
-
-    Args:
-        cwd: Absolute path to the project root.
-
-    Returns:
-        One line per session, or a note when there are none.
-    """
-    sessions_dir = _session_dir(cwd)
-    if not sessions_dir.exists():
-        return "[No sessions for this project.]"
-    lines = []
-    for path in sorted(sessions_dir.glob("*.json")):
-        session = _load_session(cwd, path.stem)
-        if not session:
-            continue
-        turns = len(session.get("turns") or [])
-        compacted = " +summary" if session.get("summary") else ""
-        updated = session.get("updated_at", 0.0)
-        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(updated))
-        lines.append(f"{path.stem}  turns={turns}{compacted}  updated={when}")
-    if not lines:
-        return "[No sessions for this project.]"
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def gemini_session_show(cwd: str, session: str) -> str:
-    """Return a session's stored transcript as JSON.
-
-    Args:
-        cwd: Absolute path to the project root.
-        session: The session name to inspect.
-
-    Returns:
-        The session JSON (summary + turns), or a bracketed not-found note.
-    """
-    data = _load_session(cwd, session)
-    if not data:
-        return f"[No such session '{session}' for this project.]"
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool()
-def gemini_session_delete(cwd: str, session: str) -> str:
-    """Delete a stored session.
-
-    Args:
-        cwd: Absolute path to the project root.
-        session: The session name to delete.
-
-    Returns:
-        A confirmation, or a bracketed not-found note.
-    """
-    if _delete_session(cwd, session):
-        return f"Deleted session '{session}'."
-    return f"[No such session '{session}' for this project.]"
-
-
-@mcp.tool()
-def gemini_cache_clear() -> str:
-    """Delete all cached Antigravity responses.
-
-    gemini_prompt reuses a stored response when the same prompt is
-    re-sent against an unchanged repo (matched by git HEAD + working-tree
-    state). Clear the cache to force fresh runs — e.g. after changing
-    agy's config or its default model, or to reclaim disk.
-    """
-    cache_dir = _cache_dir()
-    if not cache_dir.exists():
-        return "Cache is already empty — nothing to clear."
-
-    removed = 0
-    for entry in cache_dir.glob("*.json"):
-        try:
-            entry.unlink()
-            removed += 1
-        except OSError:
-            pass
-
-    return f"Cleared {removed} cached response(s) from {cache_dir}."
-
-
-@mcp.tool()
 def gemini_models() -> str:
     """List the models available to Antigravity (agy).
 
@@ -1490,18 +1309,6 @@ def _format_last_index(state: dict) -> str:
     return f"\nlast_index: {ts_str}{sha_str}"
 
 
-def _nim_status_line() -> str:
-    """One-line NVIDIA NIM summary for gemini_status (no network call)."""
-    count = len(_nim_api_keys())
-    if not count:
-        return "\nnvidia_nim: not configured (optional; see nim_status)"
-    noun = "key set" if count == 1 else f"{count} keys set"
-    return (
-        f"\nnvidia_nim: {noun}, default model {_nim_default_model()} "
-        "(run nim_status to verify)"
-    )
-
-
 @mcp.tool()
 def gemini_status(cwd: str | None = None) -> str:
     """Check that the agy CLI is installed and signed in.
@@ -1565,7 +1372,8 @@ def gemini_status(cwd: str | None = None) -> str:
 
     suffix = _status_extras()
     suffix += f"\ncache_size_mb: {_cache_size_mb():.1f}"
-    suffix += _nim_status_line()
+    for line in _status_lines:
+        suffix += line()
     if cwd is not None:
         suffix += _format_last_index(_load_project_state(cwd))
     return f"READY — agy {version}{suffix}"

@@ -24,6 +24,7 @@ from castor.common import (
     _worktree_roots,
 )
 from castor.jobs import (
+    _register_poller,
     _worker_patience,
 )
 from castor.logs import (
@@ -484,6 +485,9 @@ def _run_poll(run_id: str) -> str:
     if rec["status"] != "running":
         return json.dumps(rec["result"], ensure_ascii=False)
     return json.dumps(_run_progress(rec), ensure_ascii=False)
+
+
+_register_poller("run-", _run_poll)
 
 
 def _run_progress(rec: dict) -> dict:
