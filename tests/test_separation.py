@@ -254,3 +254,12 @@ def test_module_docstring_is_not_stranded_below_the_imports(path):
         and isinstance(node.value.value, str)
     ]
     assert not stranded, f"{path.name}: bare string at {stranded}"
+
+
+def test_nim_status_registration_keeps_the_dekko_extra():
+    text = (ROOT / "commands" / "castor" / "nim-status.md").read_text()
+    assert "uv run --extra dekko --directory" in text
+
+
+def test_requirements_leave_dekko_optional():
+    assert "dekko" not in (ROOT / "requirements.txt").read_text()
