@@ -1983,6 +1983,33 @@ def test_dekko_off_without_binary(monkeypatch):
     assert server._dekko_enabled() is False
 
 
+def test_missing_dekko_says_how_to_install_it(monkeypatch):
+    monkeypatch.delenv("CASTOR_NIM_DEKKO", raising=False)
+    monkeypatch.setattr(server, "_dekko_bin", lambda: None)
+    assert "--extra dekko" in server._dekko_off_reason()
+
+
+def test_installer_registers_the_dekko_extra_by_default():
+    import install
+
+    args = install.server_args(Path("/repo"), with_dekko=True)
+    assert args == [
+        "run",
+        "--extra",
+        "dekko",
+        "--directory",
+        "/repo",
+        "server.py",
+    ]
+
+
+def test_installer_can_leave_dekko_out():
+    import install
+
+    args = install.server_args(Path("/repo"), with_dekko=False)
+    assert args == ["run", "--directory", "/repo", "server.py"]
+
+
 def test_dekko_off_below_min_version(monkeypatch, fake_dekko):
     monkeypatch.setattr(server, "_dekko_version", lambda: (1, 9, 0))
     assert server._dekko_enabled() is False
@@ -3924,7 +3951,8 @@ def test_nim_edit_start_says_dekko_is_missing(stub, repo, monkeypatch):
     out = _tool(server.nim_edit_start)("rename", str(repo), must_cover=["x"])
     assert out == (
         "[Error: must_cover needs the dekko map: dekko is not installed "
-        "beside the server's Python]"
+        "beside the server's Python (add --extra dekko to the uv run "
+        "registration)]"
     )
 
 

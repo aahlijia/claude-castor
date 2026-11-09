@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Register the claude-castor MCP server and install slash commands."""
 
+import argparse
 import shutil
 import subprocess
 import sys
@@ -42,7 +43,13 @@ def find_claude() -> str:
     return claude
 
 
-def register_mcp(claude: str, uv: Path) -> None:
+def server_args(repo: Path, with_dekko: bool) -> list[str]:
+    """The `uv` arguments that start the server from `repo`."""
+    extra = ["--extra", "dekko"] if with_dekko else []
+    return ["run", *extra, "--directory", str(repo), "server.py"]
+
+
+def register_mcp(claude: str, uv: Path, with_dekko: bool) -> None:
     print("Registering MCP server...")
     result = subprocess.run(
         [
@@ -54,10 +61,7 @@ def register_mcp(claude: str, uv: Path) -> None:
             "claude-castor",
             str(uv),
             "--",
-            "run",
-            "--directory",
-            str(REPO_DIR),
-            "server.py",
+            *server_args(REPO_DIR, with_dekko),
         ],
         capture_output=True,
         text=True,
@@ -91,12 +95,20 @@ def install_commands() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--no-dekko",
+        action="store_true",
+        help="leave out dekko, the code map behind NIM's call-graph tools",
+    )
+    args = parser.parse_args()
+
     print(f"Installing claude-castor from {REPO_DIR}\n")
 
     claude = find_claude()
     uv = find_uv()
 
-    register_mcp(claude, uv)
+    register_mcp(claude, uv, with_dekko=not args.no_dekko)
     install_commands()
 
     print(

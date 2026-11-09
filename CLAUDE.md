@@ -34,8 +34,10 @@ claude mcp add -s user claude-castor /absolute/path/to/uv -- run --directory /ab
 
 `python install.py` does the same and installs the slash commands. Restart
 Claude Code and run `gemini_status`; it should return `READY`. dekko (the code
-map behind the NIM agent's call-graph tools and `nim_edit`'s `must_cover`)
-installs with the server's dependencies. Full steps are in `README.md`.
+map behind the NIM agent's call-graph tools and `nim_edit`'s `must_cover`) is
+the optional `dekko` extra: `install.py` includes it unless given `--no-dekko`,
+and the manual command above needs `--extra dekko` after `run`. Full steps are
+in `README.md`.
 
 ## How it works
 

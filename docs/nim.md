@@ -25,12 +25,16 @@ third party.
 
    ```bash
    claude mcp add -s user claude-castor -e NVIDIA_API_KEY=nvapi-... \
-     -- /absolute/path/to/uv run --directory /absolute/path/to/claude-castor server.py
+     -- /absolute/path/to/uv run --extra dekko --directory /absolute/path/to/claude-castor server.py
    ```
 
    (If already registered, `claude mcp remove claude-castor -s user` first.
    `install.py` does not forward your key, so re-run this command to add it.
    Claude Code stores the value in `~/.claude.json`.)
+
+   `--extra dekko` installs the code map behind the agent's call-graph tools
+   and `nim_edit`'s `must_cover`. Without it NIM still works, those tools are
+   not offered, and `must_cover` refuses.
 3. Restart Claude Code and run `/castor:nim-status` (or the `nim_status`
    tool). It sends one tiny completion to prove the key and model work.
 
