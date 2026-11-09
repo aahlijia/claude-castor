@@ -6,3 +6,4 @@ uv.lock
 .dev/
 .serena/
 .docs/
+.DS_Store
