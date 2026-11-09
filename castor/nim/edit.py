@@ -15,7 +15,6 @@ from castor.app import (
 )
 from castor.common import (
     _cache_dir,
-    _edit_one_line,
     _repo_fingerprint,
 )
 from castor.jobs import (
@@ -49,6 +48,7 @@ from castor.nim.edit_tools import (
     _EditStore,
     _edit_in_scope,
     _edit_locate,
+    _edit_one_line,
     _edit_read,
     _edit_resolve,
     _edit_span,

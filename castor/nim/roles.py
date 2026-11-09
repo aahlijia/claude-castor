@@ -8,8 +8,6 @@ from castor.app import (
     mcp,
 )
 from castor.common import (
-    _agent_denied,
-    _agent_resolve,
     _git_diff,
     _is_binary_bytes,
     _read_bytes,
@@ -32,6 +30,10 @@ from castor.nim.agent import (
     _dispatch_nim_agent,
     _run_nim_agent,
     _start_agent_job,
+)
+from castor.nim.paths import (
+    _agent_denied,
+    _agent_resolve,
 )
 
 

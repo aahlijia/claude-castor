@@ -20,10 +20,7 @@ from castor.app import (
 from castor.common import (
     SKIP_DIRS,
     SKIP_EXTENSIONS,
-    _agent_denied,
-    _agent_resolve,
     _cache_dir,
-    _edit_one_line,
     _is_binary_bytes,
     _read_bytes,
 )
@@ -62,8 +59,13 @@ from castor.nim.edit_tools import (
     NIM_EDIT_TOOLS,
     NIM_EDIT_TOOL_NAMES,
     _EditStore,
+    _edit_one_line,
     _edit_recorded,
     _edit_run_tool,
+)
+from castor.nim.paths import (
+    _agent_denied,
+    _agent_resolve,
 )
 
 
