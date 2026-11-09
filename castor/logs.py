@@ -5,10 +5,17 @@ from pathlib import Path
 from typing import Any
 
 
-from castor.common import (
-    RUN_CONFIG_FILE,
-    _run_regex,
-)
+RUN_CONFIG_FILE = ".castor/run.json"
+
+
+def _run_regex(value: Any, key: str) -> re.Pattern:
+    """A compiled pattern, or ValueError naming `key`."""
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a regex string.")
+    try:
+        return re.compile(value)
+    except re.error as exc:
+        raise ValueError(f"{key} is not a valid regex: {exc}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -539,3 +546,17 @@ def _log_format(root: Path) -> tuple[LogFormat, str | None]:
         return _log_format_from(data.get("log_format")), None
     except ValueError as exc:
         return DEFAULT_LOG_FORMAT, f"{RUN_CONFIG_FILE}: {exc}"
+
+
+def _rows_json(rows: list[VerdictRow]) -> list[dict]:
+    """The FAIL and NOT ASSESSED rows as JSON objects."""
+    return [
+        {
+            "row": r.name,
+            "verdict": r.status,
+            "detail": r.detail,
+            "log_line": r.line,
+        }
+        for r in rows
+        if r.status != "PASS"
+    ]

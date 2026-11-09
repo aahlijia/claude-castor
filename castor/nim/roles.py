@@ -21,6 +21,7 @@ from castor.logs import (
     _is_case_stamp,
     _log_format,
     _row_for_line,
+    _rows_json,
     _verdict_rows,
     _verdict_totals,
 )
@@ -900,20 +901,6 @@ def _triage_json(
         "markers": markers,
         "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
     }
-
-
-def _rows_json(rows: list[VerdictRow]) -> list[dict]:
-    """The FAIL and NOT ASSESSED rows as JSON objects."""
-    return [
-        {
-            "row": r.name,
-            "verdict": r.status,
-            "detail": r.detail,
-            "log_line": r.line,
-        }
-        for r in rows
-        if r.status != "PASS"
-    ]
 
 
 def _dispatch_triage_json(
