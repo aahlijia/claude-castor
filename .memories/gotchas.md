@@ -155,3 +155,8 @@
 - **`ast` name collection counts `sys.argv = x` as defining `sys`.** The split
   script took it for a top-level def and added `from castor.app import sys`;
   drop such imports (ruff F811 flags them).
+- **Splitting a diff with `git apply --cached --unidiff-zero` can misplace hunks.**
+  Applying only some `-U0` hunks put an insertion on the wrong line and the
+  commit had a syntax error, with no apply error. To split a file across
+  commits, build each version from the base blob (`git hash-object -w`,
+  `git update-index --cacheinfo`), then test each commit from `git archive`.
