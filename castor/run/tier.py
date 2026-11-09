@@ -53,6 +53,7 @@ RUN_CONFIG_KEYS = frozenset(
         "max_running",
         "flags",
         "log_format",
+        "env_allow",
     }
 )
 
@@ -87,6 +88,7 @@ class RunConfig:
     max_running: int
     flags: tuple[RunFlag, ...]
     log_format: LogFormat = DEFAULT_LOG_FORMAT
+    env_allow: tuple[str, ...] = ()
 
 
 def _run_enabled_for(root: Path) -> str | None:
@@ -181,7 +183,23 @@ def _run_config_from(data: dict) -> RunConfig:
         ),
         flags=tuple(_run_flags(data.get("flags", []))),
         log_format=_log_format_from(data.get("log_format")),
+        env_allow=_run_env_allow(data.get("env_allow", [])),
     )
+
+
+def _run_env_allow(value: Any) -> tuple[str, ...]:
+    """The variable names a caller may set; ValueError names a bad one."""
+    names = _run_str_list(value, "env_allow")
+    for name in names:
+        if not RUN_ENV_NAME_RE.match(name):
+            raise ValueError(
+                f"env_allow name {name!r} is not a variable name."
+            )
+        if name in RUN_ENV_FORBIDDEN or name.startswith(
+            RUN_ENV_FORBIDDEN_PREFIXES
+        ):
+            raise ValueError(f"env_allow may not name {name!r}.")
+    return tuple(names)
 
 
 def _run_str_list(value: Any, key: str) -> list[str]:
@@ -472,7 +490,13 @@ def _run_progress(rec: dict) -> dict:
         "pid": rec["pid"],
         "flags": rec.get("flags", []),
         "overdue": rec.get("overdue"),
+        **_run_env_field(rec),
     }
+
+
+def _run_env_field(rec: dict) -> dict:
+    """{"env": ...} when the run was given variables, else nothing."""
+    return {"env": rec["env"]} if rec.get("env") else {}
 
 
 def _run_attach(
@@ -630,6 +654,7 @@ def _run_result(
         "flags": flags,
         "overdue": overdue,
         "triage": None,
+        **_run_env_field(rec),
     }
     if status in ("stopped", "gave_up"):
         result["pid"] = rec["pid"]
@@ -676,6 +701,43 @@ RUN_BASH = '[ -n "$1" ] && . "$1"; shift; exec "$@"'
 
 RUN_SCRUBBED_PREFIXES = ("NVIDIA_", "CASTOR_")
 
+# Variables a caller may set per run are named by the project's env_allow.
+# These can change what the shell or loader runs, or leak Castor's keys, so
+# no project can allow them.
+RUN_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+RUN_ENV_FORBIDDEN = frozenset(
+    {
+        "BASHOPTS",
+        "BASH_ENV",
+        "CDPATH",
+        "ENV",
+        "GLOBIGNORE",
+        "HOME",
+        "IFS",
+        "PATH",
+        "PROMPT_COMMAND",
+        "PS4",
+        "SHELL",
+        "SHELLOPTS",
+    }
+)
+
+RUN_ENV_FORBIDDEN_PREFIXES = (
+    "BASH_FUNC_",
+    "DYLD_",
+    "LD_",
+    *RUN_SCRUBBED_PREFIXES,
+)
+
+RUN_ENV_MAX_VARS = 20
+
+RUN_ENV_VALUE_CHARS = 500
+
+# Printable ASCII without `$` and backtick, so a script that expands or
+# evals a value cannot be handed a command substitution.
+RUN_ENV_VALUE_RE = re.compile(r"^[ -#%-_a-~]*$")
+
 RUN_MAX_FLAGS = 50  # flag matches kept per run
 
 RUN_FLAG_LINE_CHARS = 300
@@ -685,13 +747,44 @@ RUN_OVERDUE_WAIT_S = 60.0  # the overdue command is left alone after this
 RUN_OVERDUE_OUTPUT_CHARS = 4000
 
 
-def _run_child_env() -> dict[str, str]:
-    """The server's environment minus every NVIDIA_* and CASTOR_* name."""
-    return {
+def _run_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The server's environment minus every NVIDIA_* and CASTOR_* name.
+
+    `extra` (already checked by _run_env_error) is added last, so it wins
+    over a server variable of the same name.
+    """
+    env = {
         k: v
         for k, v in os.environ.items()
         if not k.startswith(RUN_SCRUBBED_PREFIXES)
     }
+    env.update(extra or {})
+    return env
+
+
+def _run_env_error(cfg: RunConfig, env: Any) -> str | None:
+    """Why `env` may not reach a run, or None when it may."""
+    if env is None:
+        return None
+    if not isinstance(env, dict):
+        return "env must be an object of variable names and strings."
+    if env and not cfg.env_allow:
+        return "env needs env_allow in .castor/run.json, and it has none."
+    if len(env) > RUN_ENV_MAX_VARS:
+        return f"env may set at most {RUN_ENV_MAX_VARS} variables."
+    for name, value in env.items():
+        if name not in cfg.env_allow:
+            return f"env {name!r} is not in env_allow {list(cfg.env_allow)}."
+        if not isinstance(value, str):
+            return f"env {name} must be a string."
+        if len(value) > RUN_ENV_VALUE_CHARS:
+            return f"env {name} is over {RUN_ENV_VALUE_CHARS} characters."
+        if not RUN_ENV_VALUE_RE.match(value):
+            return (
+                f"env {name} has characters outside printable ASCII, "
+                "or a $ or backtick."
+            )
+    return None
 
 
 def _run_env_file(root: Path, cfg: RunConfig) -> tuple[str | None, str | None]:
@@ -712,7 +805,11 @@ def _run_env_file(root: Path, cfg: RunConfig) -> tuple[str | None, str | None]:
 
 
 def _run_launch(
-    root: Path, argv: list[str], capture: Path, env_file: str | None
+    root: Path,
+    argv: list[str],
+    capture: Path,
+    env_file: str | None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """Start the command in its own session, output to the capture file."""
     capture.parent.mkdir(parents=True, exist_ok=True)
@@ -724,7 +821,7 @@ def _run_launch(
             stdout=out,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env=_run_child_env(),
+            env=_run_child_env(env),
         )
 
 
@@ -736,6 +833,7 @@ def _run_begin(
     label: str,
     expect_minutes: int,
     triage: bool,
+    env: dict[str, str] | None = None,
 ) -> tuple[dict | None, str | None]:
     """Start a checked command, record it and attach its monitor.
 
@@ -748,6 +846,8 @@ def _run_begin(
         expect_minutes: When the run should be over; overdue after this
             plus the config's grace minutes.
         triage: Triage the log when a row fails or is not assessed.
+        env: Variables for this run, checked by _run_env_error; kept in
+            the record.
 
     Returns:
         (record, None), or (None, the reason it did not start).
@@ -756,8 +856,9 @@ def _run_begin(
     if error:
         return None, error
     rec = _run_new_record(root, cfg, command, label, expect_minutes, triage)
+    rec["env"] = dict(env or {})
     try:
-        proc = _run_launch(root, argv, Path(rec["capture"]), env_file)
+        proc = _run_launch(root, argv, Path(rec["capture"]), env_file, env)
     except OSError as exc:
         return None, f"could not start the command: {exc}"
     rec["pid"] = proc.pid
@@ -948,6 +1049,7 @@ def castor_run_start(
     expect_minutes: int,
     triage: bool = True,
     label: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Run an allowlisted suite command in the background and report it.
 
@@ -967,6 +1069,10 @@ def castor_run_start(
         triage: Triage the log with a NIM agent when a row fails or is not
             assessed (default true).
         label: A short name for castor_runs (default: the command).
+        env: Variables to set for this run, such as {"ROWS": "f11"}. Only
+            names the project lists in `env_allow` of `.castor/run.json`;
+            values are printable ASCII without `$` or backtick, at most
+            500 characters, 20 variables. They are kept in the run record.
 
     Returns:
         "Run <id> started: <label>; collect it with gemini_poll(...)", or a
@@ -982,14 +1088,14 @@ def castor_run_start(
     argv, error = _run_resolve_command(root, cfg, command)
     if argv is None:
         return f"[Error: {error}]"
-    error = _run_capacity_error(root, cfg)
+    error = _run_env_error(cfg, env) or _run_capacity_error(root, cfg)
     if error:
         return f"[Error: {error}]"
     name = (label or " ".join([Path(command[0]).name, *command[1:]]))[
         :RUN_LABEL_CHARS
     ]
     rec, error = _run_begin(
-        root, cfg, argv, command, name, expect_minutes, triage
+        root, cfg, argv, command, name, expect_minutes, triage, env
     )
     if rec is None:
         return f"[Error: {error}]"
@@ -1063,4 +1169,7 @@ def _run_line(rec: dict) -> str:
     else:
         secs = result.get("wall_s", 0)
     verdict = result.get("verdict") or "-"
-    return f"{rec['run']} {rec['status']} {rec['label']} {secs}s {verdict}"
+    line = f"{rec['run']} {rec['status']} {rec['label']} {secs}s {verdict}"
+    if rec.get("env"):
+        line += f" env={','.join(rec['env'])}"
+    return line

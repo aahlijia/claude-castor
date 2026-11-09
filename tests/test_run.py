@@ -435,13 +435,14 @@ def _start(
     command: list[str],
     expect: int = 5,
     triage: bool = False,
+    env: dict | None = None,
 ) -> dict:
     cfg, error = server._run_config(project)
     assert error is None, error
     argv, error = server._run_resolve_command(project, cfg, command)
     assert error is None, error
     rec, error = server._run_begin(
-        project, cfg, argv, command, "t", expect, triage
+        project, cfg, argv, command, "t", expect, triage, env
     )
     assert error is None, error
     started.append(rec)
@@ -1348,3 +1349,264 @@ def test_compare_runs_reports_a_bad_log_format(tmp_path):
     one.write_text("x\n")
     out = server.castor_compare_runs(str(tmp_path), [str(one), str(one)])
     assert out.startswith("[Error:") and "log_format" in out
+
+
+# --- compare: noise, shared lines, new rows ---------------------------------
+
+
+def _two_runs(first: list[str], later: list[str]) -> list[tuple]:
+    """One row `x`: PASS with `first` trial lines, then FAIL with `later`."""
+    return [
+        ("run1", _log(("PASS", "x", "1", first))),
+        ("run2", _log(("FAIL", "x", "1", later))),
+    ]
+
+
+def test_log_format_noise_reads_regexes(tmp_path):
+    _write_config(tmp_path, {"log_format": {"noise": [r"group=\d+"]}})
+    fmt, error = server._log_format(tmp_path)
+    assert error is None
+    assert [p.pattern for p in fmt.noise] == [r"group=\d+"]
+    assert server.DEFAULT_LOG_FORMAT.noise == ()
+
+
+@pytest.mark.parametrize(
+    "noise, needle",
+    [
+        ("group=1", "noise"),
+        ([""], "noise"),
+        ([3], "noise"),
+        (["("], "valid regex"),
+        (["x*"], "empty"),
+    ],
+)
+def test_log_format_rejects_bad_noise(tmp_path, noise, needle):
+    _write_config(tmp_path, {"log_format": {"noise": noise}})
+    fmt, error = server._log_format(tmp_path)
+    assert fmt is server.DEFAULT_LOG_FORMAT
+    assert needle in error and "run.json" in error
+
+
+def test_compare_noise_is_masked_in_the_trial_diff():
+    runs = _two_runs(
+        ["  trial: group=3 on top", "  trial: kept"],
+        ["  trial: group=7 on top", "  trial: changed"],
+    )
+    rows = server._compare_rows(runs)
+    plain = server._compare_text(rows)
+    assert "group=7" in plain
+    noise = (re.compile(r"group=\d+"),)
+    text = server._compare_text(rows, noise=noise)
+    assert "group=7" not in text and "trial: changed" in text
+
+
+def test_compare_noise_alone_makes_the_trial_lines_match():
+    runs = _two_runs(["  group=3 on top"], ["  group=7 on top"])
+    text = server._compare_text(
+        server._compare_rows(runs), noise=(re.compile(r"group=\d+"),)
+    )
+    assert "run2 trial lines match run1 apart from timings" in text
+
+
+def _shared_runs() -> list[tuple]:
+    def trials(tag: str, bags: int) -> list[str]:
+        return [f"  t {tag}", f"  haul: {bags} bags"]
+
+    return [
+        (
+            "run1",
+            _log(
+                ("PASS", "a", "1", trials("a", 3)),
+                ("PASS", "b", "1", trials("b", 3)),
+            ),
+        ),
+        (
+            "run2",
+            _log(
+                ("FAIL", "a", "1", trials("a2", 4)),
+                ("FAIL", "b", "1", trials("b", 4)),
+            ),
+        ),
+    ]
+
+
+def test_compare_lines_under_several_rows_show_once():
+    text = server._compare_text(server._compare_rows(_shared_runs()))
+    assert text.count("haul: 4 bags") == 1
+    assert text.count("t a2") == 1
+    assert "lines shared by several rows:" in text
+    assert "run2 trial lines differ only in the shared lines" in text
+    assert text.index("lines shared") > text.index("b [regressed]")
+    assert text.splitlines()[-1] == "rows: 2 regressed"
+
+
+def test_compare_one_changed_row_keeps_its_lines():
+    runs = _two_runs(["  haul: 3 bags"], ["  haul: 4 bags"])
+    text = server._compare_text(server._compare_rows(runs))
+    assert "      haul: 4 bags" in text.splitlines()
+    assert "shared" not in text
+
+
+def test_compare_short_run_notes_stay_with_their_row():
+    runs = _two_runs(["  one", "  two"], ["  one"])
+    text = server._compare_text(server._compare_rows(runs))
+    assert "(no line 2; run1: two)" in text
+
+
+def _classes_of(*presence: bool) -> str:
+    runs = [
+        (f"run{i + 1}", _log(("PASS", "k", "1")) if here else [])
+        for i, here in enumerate(presence)
+    ]
+    rows = server._compare_rows(runs)
+    return next(r.klass for r in rows if r.name == "k")
+
+
+def test_compare_row_first_seen_later_is_new():
+    assert _classes_of(False, True) == "new"
+    assert _classes_of(False, False, True) == "new"
+    assert _classes_of(False, True, True) == "new"
+
+
+def test_compare_row_that_goes_or_gaps_stays_missing():
+    assert _classes_of(True, False) == "missing"
+    assert _classes_of(True, False, True) == "missing"
+    assert _classes_of(False, True, False) == "missing"
+
+
+def test_compare_new_row_that_fails_is_failing_not_new():
+    runs = [
+        ("run1", _log(("PASS", "a", "1"))),
+        ("run2", _log(("FAIL", "b", "1"))),
+    ]
+    klass = {r.name: r.klass for r in server._compare_rows(runs)}
+    assert klass["b"] == "failing"
+
+
+def test_compare_tool_passes_noise_from_run_json(tmp_path):
+    _write_config(tmp_path, {"log_format": {"noise": [r"group=\d+"]}})
+    a = _write_log(tmp_path / "a.log", ("PASS", "x", "1", ["  group=1 up"]))
+    b = _write_log(tmp_path / "b.log", ("FAIL", "x", "1", ["  group=9 up"]))
+    out = server.castor_compare_runs(str(tmp_path), [a, b])
+    assert "group=9" not in out and "x [regressed]" in out
+
+
+# --- run env: per-run variables the project names in env_allow ---------------
+
+
+def _allow_env(project: Path, *names: str) -> None:
+    _write_config(project, {"allow": ["t/*.sh"], "env_allow": list(names)})
+
+
+def test_run_config_reads_env_allow(project):
+    _allow_env(project, "ROWS", "TROWS")
+    cfg, error = server._run_config(project)
+    assert error is None and cfg.env_allow == ("ROWS", "TROWS")
+    _write_config(project, {"allow": ["t/*.sh"]})
+    cfg, _ = server._run_config(project)
+    assert cfg.env_allow == ()
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        "ROWS",
+        [""],
+        [3],
+        ["bad name"],
+        ["1ROWS"],
+        ["NVIDIA_API_KEY"],
+        ["CASTOR_RUN_ROOTS"],
+        ["PATH"],
+        ["BASH_ENV"],
+        ["LD_PRELOAD"],
+        ["DYLD_INSERT_LIBRARIES"],
+    ],
+)
+def test_run_config_rejects_bad_env_allow(project, names):
+    _write_config(project, {"allow": ["t/*.sh"], "env_allow": names})
+    cfg, error = server._run_config(project)
+    assert cfg is None and "env_allow" in error
+
+
+def test_run_env_reaches_the_script(project, fast, started):
+    _allow_env(project, "ROWS", "N")
+    _script(project / "t" / "env.sh", 'echo "[$ROWS] [$N]"\n')
+    rec = _start(
+        project, started, ["t/env.sh"], env={"ROWS": "a, it's (b)", "N": "3"}
+    )
+    out = _poll_json(rec["run"])
+    assert Path(rec["capture"]).read_text() == "[a, it's (b)] [3]\n"
+    assert out["env"] == {"ROWS": "a, it's (b)", "N": "3"}
+    assert server._run_record_read(rec["run"])["env"] == out["env"]
+
+
+def test_run_env_unset_leaves_the_environment_alone(
+    project, fast, started, monkeypatch
+):
+    _allow_env(project, "ROWS")
+    monkeypatch.setenv("ROWS", "from the server")
+    _script(project / "t" / "env.sh", 'echo "[${ROWS:-none}]"\n')
+    rec = _start(project, started, ["t/env.sh"])
+    out = _poll_json(rec["run"])
+    assert "env" not in out
+    assert Path(rec["capture"]).read_text() == "[from the server]\n"
+
+
+def test_run_env_beats_the_servers_value(project, fast, started, monkeypatch):
+    _allow_env(project, "ROWS")
+    monkeypatch.setenv("ROWS", "from the server")
+    _script(project / "t" / "env.sh", 'echo "[$ROWS]"\n')
+    rec = _start(project, started, ["t/env.sh"], env={"ROWS": "mine"})
+    _poll_json(rec["run"])
+    assert Path(rec["capture"]).read_text() == "[mine]\n"
+
+
+@pytest.mark.parametrize(
+    "env, needle",
+    [
+        ({"OTHER": "1"}, "not in env_allow"),
+        ({"ROWS": 5}, "string"),
+        ({"ROWS": "$(id)"}, "characters"),
+        ({"ROWS": "`id`"}, "characters"),
+        ({"ROWS": "a\nb"}, "characters"),
+        ({"ROWS": "x" * 501}, "500"),
+        ("ROWS=1", "object"),
+    ],
+)
+def test_run_start_refuses_bad_env(project, env, needle):
+    _allow_env(project, "ROWS")
+    out = server.castor_run_start(str(project), ["t/ok.sh"], 5, env=env)
+    assert out.startswith("[Error:") and needle in out
+    assert server._run_records(project) == []
+
+
+def test_run_start_refuses_env_without_env_allow(project):
+    out = server.castor_run_start(
+        str(project), ["t/ok.sh"], 5, env={"ROWS": "1"}
+    )
+    assert out.startswith("[Error:") and "env_allow" in out
+    assert server._run_records(project) == []
+
+
+def test_run_start_refuses_too_many_env_vars(project):
+    names = [f"V{i}" for i in range(21)]
+    _allow_env(project, *names)
+    out = server.castor_run_start(
+        str(project), ["t/ok.sh"], 5, env={n: "1" for n in names}
+    )
+    assert out.startswith("[Error:") and "20" in out
+
+
+def test_run_start_with_env_end_to_end(project, fast, started):
+    _allow_env(project, "ROWS")
+    _script(project / "t" / "env.sh", 'echo "rows=$ROWS"\n')
+    out = server.castor_run_start(
+        str(project), ["t/env.sh"], 5, env={"ROWS": "f11"}
+    )
+    match = _STARTED_RE.match(out)
+    assert match, out
+    started.append(server._run_record_read(match.group(1)))
+    final = _poll_json(match.group(1))
+    assert final["status"] == "done" and final["env"] == {"ROWS": "f11"}
+    assert "env=ROWS" in server.castor_runs(str(project))

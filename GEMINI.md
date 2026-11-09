@@ -421,6 +421,9 @@ without both it refuses, and the refusal says which key is missing.
 - Set `expect_minutes` honestly: past it plus the config's grace, the
   config's overdue command runs once (a dialog check, say) and the run
   keeps going.
+- Pass `env={"ROWS": "f11"}` to set variables for one run (a row filter,
+  say). Only names the project lists in `env_allow` are accepted; a
+  refusal names the allowed ones.
 - Castor never kills a run. `stopped` (a stop flag) and `gave_up`
   (`max_hours`) mean Castor stopped watching; the result gives the `pid`
   and the decision is yours.
@@ -428,7 +431,8 @@ without both it refuses, and the refusal says which key is missing.
 
 `castor_compare_runs` puts two or more suite logs side by side (`/castor:compare`):
 it says which rows regressed, which are flaky, which keep failing, and shows
-the trial lines that changed. Pass `same_code=True` when no fix landed
+the trial lines that changed. A row first seen in a later run is `new`, not
+`missing`. Pass `same_code=True` when no fix landed
 between the runs, so a row that both passed and failed counts as flaky.
 No model reads the table: whether a flaky row is the harness or the game is
 your call, from the trial lines and the code.

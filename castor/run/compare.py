@@ -1,6 +1,7 @@
 import re
 from collections import Counter
 from dataclasses import dataclass
+from typing import NamedTuple
 from itertools import pairwise
 from pathlib import Path
 
@@ -38,6 +39,7 @@ COMPARE_CLASS_ORDER = (
     "not_assessed",
     "numbers_changed",
     "missing",
+    "new",
     "fixed",
     "same",
 )
@@ -74,8 +76,13 @@ class RowCompare:
     runs: tuple[RowRun, ...]
 
 
-def _mask_timings(text: str) -> str:
-    """Clock stamps and decimal numbers become `#`: they move every run."""
+def _mask_timings(text: str, noise: tuple[re.Pattern, ...] = ()) -> str:
+    """Clock stamps, decimal numbers and `noise` matches become `#`.
+
+    They move every run, so a line that differs only in them is the same.
+    """
+    for pattern in noise:
+        text = pattern.sub("#", text)
     return _DECIMAL_RE.sub("#", _CLOCK_RE.sub("#", text))
 
 
@@ -138,8 +145,15 @@ def _compare_class(runs: tuple[RowRun, ...], same_code: bool) -> str:
     if len(numbers) > 1:
         return "numbers_changed"
     if len(present) < len(runs):
-        return "missing"
+        return _absent_class(runs)
     return "same"
+
+
+def _absent_class(runs: tuple[RowRun, ...]) -> str:
+    """`new` when the row appears in a later run and stays; else `missing`."""
+    here = [r.row is not None for r in runs]
+    first = here.index(True)
+    return "new" if first > 0 and all(here[first:]) else "missing"
 
 
 def _switch_class(verdicts: list[str], same_code: bool) -> str | None:
@@ -155,12 +169,24 @@ def _switch_class(verdicts: list[str], same_code: bool) -> str | None:
 
 
 def _compare_text(
-    rows: list[RowCompare], max_trial_lines: int = COMPARE_MAX_TRIAL_LINES
+    rows: list[RowCompare],
+    max_trial_lines: int = COMPARE_MAX_TRIAL_LINES,
+    noise: tuple[re.Pattern, ...] = (),
 ) -> str:
-    """The listed rows' blocks, then the counts per class."""
+    """The listed rows' blocks, shared lines, then the counts per class.
+
+    A trial line that differs under two or more rows of one run is shown
+    once, after the blocks, not under each row.
+    """
+    listed = [r for r in rows if r.klass != "same"]
+    diffs = [_row_diffs(r, noise) for r in listed]
+    shared = _shared_lines(diffs, noise)
     blocks = [
-        _compare_block(r, max_trial_lines) for r in rows if r.klass != "same"
+        _compare_block(r, d, shared, max_trial_lines, noise)
+        for r, d in zip(listed, diffs)
     ]
+    if shared:
+        blocks.append(_shared_block(shared, max_trial_lines))
     counts = Counter(r.klass for r in rows)
     summary = ", ".join(
         f"{counts[k]} {k}" for k in COMPARE_CLASS_ORDER if counts[k]
@@ -169,7 +195,23 @@ def _compare_text(
     return "\n\n".join([*blocks, tail])
 
 
-def _compare_block(row: RowCompare, max_trial_lines: int) -> str:
+class _TrialLine(NamedTuple):
+    """A trial line that differs from the first run's, or a note on one."""
+
+    text: str
+    shareable: bool
+
+
+_RowDiffs = dict[str, list[_TrialLine]]
+
+
+def _compare_block(
+    row: RowCompare,
+    diffs: _RowDiffs,
+    shared: dict[str, list[str]],
+    max_trial_lines: int,
+    noise: tuple[re.Pattern, ...],
+) -> str:
     """One row: its class, a line per run, then the trial differences."""
     head = (
         row.name
@@ -184,34 +226,98 @@ def _compare_block(row: RowCompare, max_trial_lines: int) -> str:
             lines.append(
                 f"  {run.label} {run.row.status} {run.row.detail}".rstrip()
             )
-    present = [r for r in row.runs if r.row is not None]
-    for run in present[1:]:
-        lines += _trial_diff(present[0], run, max_trial_lines)
+    first = next(r for r in row.runs if r.row is not None)
+    for label, found in diffs.items():
+        skip = {_mask_timings(t, noise) for t in shared.get(label, [])}
+        keep = [
+            t.text
+            for t in found
+            if not (t.shareable and _mask_timings(t.text, noise) in skip)
+        ]
+        lines += _trial_text(first.label, label, found, keep, max_trial_lines)
     return "\n".join(line[:COMPARE_LINE_CHARS] for line in lines)
 
 
-def _trial_diff(ref: RowRun, run: RowRun, limit: int) -> list[str]:
+def _row_diffs(row: RowCompare, noise: tuple[re.Pattern, ...]) -> _RowDiffs:
+    """Per later run, its trial lines that differ from the first run's."""
+    present = [r for r in row.runs if r.row is not None]
+    return {
+        run.label: _trial_diff(present[0], run, noise) for run in present[1:]
+    }
+
+
+def _trial_diff(
+    ref: RowRun, run: RowRun, noise: tuple[re.Pattern, ...]
+) -> list[_TrialLine]:
     """A later run's trial lines that differ from the first run's."""
     differ = []
     for i in range(max(len(ref.trials), len(run.trials))):
         a = ref.trials[i] if i < len(ref.trials) else None
         b = run.trials[i] if i < len(run.trials) else None
         if a is not None and b is not None:
-            if _mask_timings(a) != _mask_timings(b):
-                differ.append(b)
+            if _mask_timings(a, noise) != _mask_timings(b, noise):
+                differ.append(_TrialLine(b, True))
         elif b is not None:
-            differ.append(b)
+            differ.append(_TrialLine(b, True))
         else:
-            differ.append(f"(no line {i + 1}; {ref.label}: {a.strip()})")
-    if not differ:
-        return [
-            f"  {run.label} trial lines match {ref.label} apart from timings"
-        ]
-    out = [f"  {run.label} trial lines that differ from {ref.label}:"]
-    out += [f"    {line}" for line in differ[:limit]]
-    if len(differ) > limit:
-        out.append(f"    [{len(differ) - limit} more]")
+            note = f"(no line {i + 1}; {ref.label}: {a.strip()})"
+            differ.append(_TrialLine(note, False))
+    return differ
+
+
+def _trial_text(
+    ref_label: str,
+    label: str,
+    found: list[_TrialLine],
+    keep: list[str],
+    limit: int,
+) -> list[str]:
+    """One later run's trial difference as text lines."""
+    if not found:
+        return [f"  {label} trial lines match {ref_label} apart from timings"]
+    if not keep:
+        return [f"  {label} trial lines differ only in the shared lines below"]
+    out = [f"  {label} trial lines that differ from {ref_label}:"]
+    out += [f"    {line}" for line in keep[:limit]]
+    if len(keep) > limit:
+        out.append(f"    [{len(keep) - limit} more]")
     return out
+
+
+def _shared_lines(
+    all_diffs: list[_RowDiffs], noise: tuple[re.Pattern, ...]
+) -> dict[str, list[str]]:
+    """Per run, the differing lines found under two or more rows.
+
+    Lines that differ only in timings count as one line.
+    """
+    seen: dict[str, dict[str, list]] = {}
+    for diffs in all_diffs:
+        for label, found in diffs.items():
+            keys = {
+                _mask_timings(t.text, noise): t.text
+                for t in found
+                if t.shareable
+            }
+            for key, text in keys.items():
+                entry = seen.setdefault(label, {}).setdefault(key, [text, 0])
+                entry[1] += 1
+    return {
+        label: [text for text, n in entries.values() if n >= 2]
+        for label, entries in seen.items()
+        if any(n >= 2 for _, n in entries.values())
+    }
+
+
+def _shared_block(shared: dict[str, list[str]], limit: int) -> str:
+    """The lines several rows shared, once per run."""
+    lines = ["lines shared by several rows:"]
+    for label, texts in shared.items():
+        lines.append(f"  {label}:")
+        lines += [f"    {t}" for t in texts[:limit]]
+        if len(texts) > limit:
+            lines.append(f"    [{len(texts) - limit} more]")
+    return "\n".join(line[:COMPARE_LINE_CHARS] for line in lines)
 
 
 COMPARE_MAX_LOGS = 12
@@ -245,7 +351,7 @@ def castor_compare_runs(
 
     Returns:
         One block per row that changed (regressed, flaky, failing,
-        not_assessed, numbers_changed, missing, fixed): a line per run,
+        not_assessed, numbers_changed, missing, new, fixed): a line per run,
         then the trial lines that differ from the first run's (timings
         masked). The last line counts rows per class. Or a bracketed error.
     """
@@ -263,7 +369,7 @@ def castor_compare_runs(
     found = _compare_rows(runs, same_code, fmt)
     if rows:
         found = [r for r in found if any(w in r.name for w in rows)]
-    return _compare_text(found)
+    return _compare_text(found, noise=fmt.noise)
 
 
 def _compare_read_logs(

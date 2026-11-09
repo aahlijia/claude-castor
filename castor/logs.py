@@ -48,6 +48,8 @@ class LogFormat:
         name_start: Column where an unstamped line's name starts.
         name_end: Column of the space after the name field.
         reprint: The line that starts the summary reprint, or None.
+        noise: Patterns whose matches `castor_compare_runs` ignores when it
+            diffs trial lines (counters that move every run).
     """
 
     case_re: re.Pattern | None
@@ -56,6 +58,7 @@ class LogFormat:
     name_start: int
     name_end: int
     reprint: str | None
+    noise: tuple[re.Pattern, ...] = ()
 
 
 DEFAULT_LOG_FORMAT = LogFormat(
@@ -416,7 +419,7 @@ VERDICT_ROW_CANDIDATES = 10  # row names listed in a row lookup error
 
 
 LOG_FORMAT_KEYS = frozenset(
-    {"profile", "case", "totals", "name_start", "name_end", "reprint"}
+    {"profile", "case", "totals", "name_start", "name_end", "reprint", "noise"}
 )
 
 
@@ -427,7 +430,7 @@ def _log_format_from(value: Any) -> LogFormat:
     optional `profile` (the base, default "default") and overrides: `case`
     and `totals` (regex strings, or null for none; `case` needs two groups
     and `totals` three), `name_start` and `name_end` (columns) and
-    `reprint` (a line, or null).
+    `reprint` (a line, or null) and `noise` (a list of regexes).
     """
     if value is None:
         return DEFAULT_LOG_FORMAT
@@ -450,6 +453,7 @@ def _log_format_from(value: Any) -> LogFormat:
         name_start=_log_format_column(value, "name_start", base.name_start),
         name_end=_log_format_column(value, "name_end", base.name_end),
         reprint=_log_format_reprint(value, base.reprint),
+        noise=_log_format_noise(value, base.noise),
     )
 
 
@@ -481,6 +485,25 @@ def _log_format_reprint(value: dict, default: str | None) -> str | None:
     if raw is not None and (not isinstance(raw, str) or not raw):
         raise ValueError("log_format.reprint must be a string or null.")
     return raw
+
+
+def _log_format_noise(
+    value: dict, default: tuple[re.Pattern, ...]
+) -> tuple[re.Pattern, ...]:
+    """The log_format noise patterns: regexes that never match empty."""
+    if "noise" not in value:
+        return default
+    raw = value["noise"]
+    if not isinstance(raw, list) or not all(
+        isinstance(p, str) and p for p in raw
+    ):
+        raise ValueError(
+            "log_format.noise must be a list of non-empty regex strings."
+        )
+    patterns = tuple(_run_regex(p, "log_format.noise") for p in raw)
+    if any(p.match("") for p in patterns):
+        raise ValueError("log_format.noise patterns must not match empty.")
+    return patterns
 
 
 def _log_format(root: Path) -> tuple[LogFormat, str | None]:
