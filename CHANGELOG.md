@@ -83,8 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agy and NIM no longer depend on each other.** Either one loads without the
   other, and the run tier loads without either. agy background jobs used to get
   their worker count from NIM's settings. They now have their own pool of 8.
-- New runtime dependency: `httpx` (already a transitive dependency of
-  `fastmcp`).
+- **dekko is now optional.** The `dekko` extra installs it, and
+  `python install.py` includes that extra unless you pass `--no-dekko`. Without
+  dekko the NIM agent runs without its call-graph tools and `nim_edit`'s
+  `must_cover` refuses. A manual registration needs `--extra dekko` to keep it.
+- New runtime dependency: `httpx`.
 - `_compact_session` / `_append_turn` accept a pluggable summarizer and
   `_run_job` a pluggable runner; agy behavior is unchanged.
 - Agent roles default to `nvidia/nemotron-3.5-super-vl-120b-a12b`. On the

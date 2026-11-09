@@ -625,7 +625,10 @@ def _dekko_off_reason() -> str | None:
         return "dekko is switched off"
 
     if _dekko_bin() is None:
-        return "dekko is not installed beside the server's Python"
+        return (
+            "dekko is not installed beside the server's Python "
+            "(add --extra dekko to the uv run registration)"
+        )
 
     version = _dekko_version()
     if version is None:

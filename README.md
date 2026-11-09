@@ -95,6 +95,9 @@ python install.py
 This registers the MCP server with Claude Code and installs the slash commands
 globally. Works on macOS, Linux, and Windows.
 
+It also pulls in dekko, the code map behind the NIM agent's call-graph tools. Only
+using Antigravity? Run `python install.py --no-dekko` and skip that download.
+
 ### 5. Restart Claude Code
 
 Then run `/castor:status` to confirm everything is wired up.
@@ -123,7 +126,8 @@ entry under `mcpServers`:
 }
 ```
 
-Get your `uv` path with `which uv`. Restart the desktop app after saving.
+Get your `uv` path with `which uv`. Restart the desktop app after saving. To give
+the NIM agent its call-graph tools, add `"--extra", "dekko",` right after `"run",`.
 
 If you already signed in to Antigravity for Claude Code, authentication carries
 over via the system keyring, so no extra steps are needed.
