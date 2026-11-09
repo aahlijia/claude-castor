@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 
 from castor.app import (
+    _register_status_line,
     logger,
     mcp,
 )
@@ -1904,3 +1905,18 @@ _dekko_map_lock = threading.Lock()
 
 # root -> (when the build ended, ok, failure reason or "")
 _dekko_map_cache: dict[Path, tuple[float, bool, str]] = {}
+
+
+def _nim_status_line() -> str:
+    """One-line NVIDIA NIM summary for gemini_status (no network call)."""
+    count = len(_nim_api_keys())
+    if not count:
+        return "\nnvidia_nim: not configured (optional; see nim_status)"
+    noun = "key set" if count == 1 else f"{count} keys set"
+    return (
+        f"\nnvidia_nim: {noun}, default model {_nim_default_model()} "
+        "(run nim_status to verify)"
+    )
+
+
+_register_status_line(_nim_status_line)

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import logging
 import os
 import sys
@@ -74,3 +75,13 @@ def _register_gated(fns: tuple[Any, ...], env: str) -> None:
     if os.environ.get(env) == "1":
         for fn in fns:
             mcp.tool()(fn)
+
+
+# Backends add a line to gemini_status here, so agy's status tool does not
+# have to know which other backends are installed.
+_status_lines: list[Callable[[], str]] = []
+
+
+def _register_status_line(line: Callable[[], str]) -> None:
+    """Add a one-line status callback to gemini_status's READY report."""
+    _status_lines.append(line)
