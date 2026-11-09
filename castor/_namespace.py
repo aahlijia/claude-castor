@@ -30,6 +30,7 @@ MODULES = (
     "castor.nim.records",
     "castor.nim.transport",
     "castor.nim.backend",
+    "castor.nim.summarize",
     "castor.nim.paths",
     "castor.nim.edit_tools",
     "castor.nim.agent",

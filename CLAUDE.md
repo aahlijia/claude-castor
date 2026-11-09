@@ -68,6 +68,7 @@ every `@mcp.tool()` on the shared `mcp` object, then runs it. The code:
 | `castor/nim/records.py` | Local usage records |
 | `castor/nim/transport.py` | HTTP client, retries, streaming, failure classes, `_nim_request` |
 | `castor/nim/backend.py` | NIM chat dispatch, `nim_*` chat tools, NIM's job pool |
+| `castor/nim/summarize.py` | `nim_summarize`: splitting, per-part summaries, merging |
 | `castor/nim/paths.py` | Agent path confinement |
 | `castor/nim/edit_tools.py` | The edit store and `propose_edit` / `drop_edit` tools the agent loop offers |
 | `castor/nim/agent.py` | The read-only tool loop, dekko tools, citation checks, `nim_agent` |
