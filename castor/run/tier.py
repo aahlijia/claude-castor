@@ -17,11 +17,8 @@ from castor.app import (
     mcp,
 )
 from castor.common import (
-    RUN_CONFIG_FILE,
     _cache_dir,
     _read_bytes,
-    _run_regex,
-    _worktree_roots,
 )
 from castor.jobs import (
     _register_poller,
@@ -30,19 +27,45 @@ from castor.jobs import (
 from castor.logs import (
     DEFAULT_LOG_FORMAT,
     LogFormat,
+    RUN_CONFIG_FILE,
     _clean_lines,
     _is_totals_line,
     _log_format_from,
+    _rows_json,
+    _run_regex,
     _verdict_rows,
     _verdict_totals,
 )
-from castor.nim.roles import (
-    NIM_TRIAGE_STEPS,
-    _dispatch_triage_json,
-    _role_bad_input,
-    _rows_json,
-    _triage_task,
-)
+
+
+# Castor's one path that runs project commands: an allowlisted suite command
+# started in its own session, watched by a monitor thread, reported when it
+# ends. Two keys open it: the project commits .castor/run.json, and the MCP
+# registration lists the root in CASTOR_RUN_ROOTS (a cloned repo cannot
+# authorize itself). Castor never kills, signals or restarts a process.
+
+
+def _worktree_roots(root: Path) -> list[Path]:
+    """`root` plus every worktree of its git repo, resolved."""
+    roots = [root.resolve()]
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return roots
+    if out.returncode != 0:
+        return roots
+    roots.extend(
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in out.stdout.splitlines()
+        if line.startswith("worktree ")
+    )
+    return roots
 
 
 RUN_CONFIG_KEYS = frozenset(
@@ -1034,12 +1057,22 @@ def _run_overdue(rec: dict, cfg: RunConfig) -> dict:
 
 
 def _run_triage(root: Path, log: str) -> dict:
-    """Triage JSON for the run's log (phase 1's role), or an error object."""
-    task, cwd, error, path = _triage_task(str(root), log, None)
-    if error or task is None or path is None:
-        return json.loads(_role_bad_input(error, "json"))
-    label = str(path.relative_to(cwd))
+    """Triage JSON for the run's log, or an error object.
+
+    NIM is imported here, not at the top, so runs work without it.
+    """
     try:
+        from castor.nim.roles import (
+            NIM_TRIAGE_STEPS,
+            _dispatch_triage_json,
+            _role_bad_input,
+            _triage_task,
+        )
+
+        task, cwd, error, path = _triage_task(str(root), log, None)
+        if error or task is None or path is None:
+            return json.loads(_role_bad_input(error, "json"))
+        label = str(path.relative_to(cwd))
         text = _dispatch_triage_json(
             task, cwd, None, NIM_TRIAGE_STEPS, label, path
         )

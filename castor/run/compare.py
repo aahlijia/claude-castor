@@ -11,7 +11,6 @@ from castor.app import (
 )
 from castor.common import (
     _read_bytes,
-    _worktree_roots,
 )
 from castor.logs import (
     DEFAULT_LOG_FORMAT,
@@ -20,6 +19,9 @@ from castor.logs import (
     _clean_lines,
     _log_format,
     _verdict_rows,
+)
+from castor.run.tier import (
+    _worktree_roots,
 )
 
 
