@@ -1,5 +1,9 @@
+"""MCP tools that serve every backend: background jobs, sessions, cache."""
+
 import json
 import time
+
+
 from castor.app import (
     mcp,
 )
@@ -15,9 +19,6 @@ from castor.jobs import (
     _jobs,
     _jobs_lock,
 )
-
-
-"""MCP tools that serve every backend: background jobs, sessions, cache."""
 
 
 @mcp.tool()
