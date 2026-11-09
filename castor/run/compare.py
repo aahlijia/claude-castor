@@ -269,10 +269,10 @@ def _missing_note(ref: RowRun, start: int) -> str:
     """One note for the first run's lines from index `start` on."""
     first = ref.trials[start].strip()
     if start + 1 == len(ref.trials):
-        return f"(no line {start + 1}; {ref.label}: {first})"
+        return f"(no trial line {start + 1}; {ref.label}: {first})"
     return (
-        f"(no lines {start + 1} to {len(ref.trials)}; "
-        f"{ref.label} line {start + 1}: {first})"
+        f"(no trial lines {start + 1} to {len(ref.trials)}; "
+        f"{ref.label} trial line {start + 1}: {first})"
     )
 
 

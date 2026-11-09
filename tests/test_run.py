@@ -1450,7 +1450,7 @@ def test_compare_one_changed_row_keeps_its_lines():
 def test_compare_short_run_notes_stay_with_their_row():
     runs = _two_runs(["  one", "  two"], ["  one"])
     text = server._compare_text(server._compare_rows(runs))
-    assert "(no line 2; run1: two)" in text
+    assert "(no trial line 2; run1: two)" in text
 
 
 def _classes_of(*presence: bool) -> str:
@@ -1631,8 +1631,8 @@ def test_compare_missing_lines_collapse_into_one_note():
     first = [f"  trial {i}" for i in range(1, 7)]
     runs = _two_runs(first, first[:2])
     text = server._compare_text(server._compare_rows(runs))
-    notes = [ln for ln in text.splitlines() if "(no line" in ln]
-    assert notes == ["    (no lines 3 to 6; run1 line 3: trial 3)"]
+    notes = [ln for ln in text.splitlines() if "(no trial line" in ln]
+    assert notes == ["    (no trial lines 3 to 6; run1 trial line 3: trial 3)"]
 
 
 def test_compare_missing_lines_note_stays_with_each_row():
@@ -1644,8 +1644,8 @@ def test_compare_missing_lines_note_stays_with_each_row():
 
     runs = [("run1", run(4, "PASS")), ("run2", run(1, "FAIL"))]
     text = server._compare_text(server._compare_rows(runs))
-    assert "(no lines 2 to 4; run1 line 2: a1)" in text
-    assert "(no lines 2 to 4; run1 line 2: b1)" in text
+    assert "(no trial lines 2 to 4; run1 trial line 2: a1)" in text
+    assert "(no trial lines 2 to 4; run1 trial line 2: b1)" in text
     assert "shared" not in text
 
 
@@ -1654,4 +1654,4 @@ def test_compare_longer_run_still_lists_its_extra_lines():
     text = server._compare_text(server._compare_rows(runs))
     assert "      two" in text.splitlines()
     assert "      three" in text.splitlines()
-    assert "(no line" not in text
+    assert "(no trial line" not in text
