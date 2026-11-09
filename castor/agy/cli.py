@@ -1,8 +1,12 @@
-from typing import Any
+"""Run the agy CLI: build the command, read its output, cache the result."""
+
 import hashlib
 import json
 import subprocess
 import time
+from typing import Any
+
+
 from castor.agy.prompts import (
     AUTH_HINT,
     INSTALL_CMD,
@@ -24,9 +28,6 @@ from castor.common import (
     _repo_fingerprint,
     _session_prefix,
 )
-
-
-"""Run the agy CLI: build the command, read its output, cache the result."""
 
 
 def _is_side_effect_free(trust: bool, session: str | None) -> bool:

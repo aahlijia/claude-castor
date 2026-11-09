@@ -200,3 +200,18 @@ def test_no_tool_keeps_an_old_neutral_name():
     old = {name.replace("castor_", "gemini_", 1) for name in NEUTRAL_TOOLS}
     for path in _sources(PACKAGE):
         assert not (_tool_names(path) & old), path.name
+
+
+@pytest.mark.parametrize(
+    "path", _sources(PACKAGE), ids=lambda p: str(p.relative_to(PACKAGE))
+)
+def test_module_docstring_is_not_stranded_below_the_imports(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    stranded = [
+        node.lineno
+        for node in tree.body[1:]
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    ]
+    assert not stranded, f"{path.name}: bare string at {stranded}"
