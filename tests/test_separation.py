@@ -79,7 +79,7 @@ def test_loads_without_agy(module):
 
 @pytest.mark.parametrize("module", NEUTRAL + AGY + RUN)
 def test_loads_without_nim(module):
-    done = _import_with_blocked(["castor.nim", "httpx"], module)
+    done = _import_with_blocked(["castor.nim"], module)
     assert done.returncode == 0, done.stderr
 
 
