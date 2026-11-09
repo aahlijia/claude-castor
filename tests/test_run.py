@@ -1625,3 +1625,33 @@ def test_run_record_keeps_log_format_for_the_monitor(project):
     cfg, _ = server._run_config(project)
     back = server._run_config_from(server._run_config_dict(cfg))
     assert back.log_format is server.DEFAULT_LOG_FORMAT
+
+
+def test_compare_missing_lines_collapse_into_one_note():
+    first = [f"  trial {i}" for i in range(1, 7)]
+    runs = _two_runs(first, first[:2])
+    text = server._compare_text(server._compare_rows(runs))
+    notes = [ln for ln in text.splitlines() if "(no line" in ln]
+    assert notes == ["    (no lines 3 to 6; run1 line 3: trial 3)"]
+
+
+def test_compare_missing_lines_note_stays_with_each_row():
+    def run(n: int, status: str) -> list[str]:
+        return _log(
+            (status, "a", "1", [f"  a{i}" for i in range(n)]),
+            (status, "b", "1", [f"  b{i}" for i in range(n)]),
+        )
+
+    runs = [("run1", run(4, "PASS")), ("run2", run(1, "FAIL"))]
+    text = server._compare_text(server._compare_rows(runs))
+    assert "(no lines 2 to 4; run1 line 2: a1)" in text
+    assert "(no lines 2 to 4; run1 line 2: b1)" in text
+    assert "shared" not in text
+
+
+def test_compare_longer_run_still_lists_its_extra_lines():
+    runs = _two_runs(["  one"], ["  one", "  two", "  three"])
+    text = server._compare_text(server._compare_rows(runs))
+    assert "      two" in text.splitlines()
+    assert "      three" in text.splitlines()
+    assert "(no line" not in text

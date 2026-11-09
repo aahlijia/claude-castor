@@ -249,20 +249,31 @@ def _row_diffs(row: RowCompare, noise: tuple[re.Pattern, ...]) -> _RowDiffs:
 def _trial_diff(
     ref: RowRun, run: RowRun, noise: tuple[re.Pattern, ...]
 ) -> list[_TrialLine]:
-    """A later run's trial lines that differ from the first run's."""
-    differ = []
-    for i in range(max(len(ref.trials), len(run.trials))):
-        a = ref.trials[i] if i < len(ref.trials) else None
-        b = run.trials[i] if i < len(run.trials) else None
-        if a is not None and b is not None:
-            if _mask_timings(a, noise) != _mask_timings(b, noise):
-                differ.append(_TrialLine(b, True))
-        elif b is not None:
-            differ.append(_TrialLine(b, True))
-        else:
-            note = f"(no line {i + 1}; {ref.label}: {a.strip()})"
-            differ.append(_TrialLine(note, False))
+    """A later run's trial lines that differ from the first run's.
+
+    Lines the later run lacks become one note, not one per line.
+    """
+    common = min(len(ref.trials), len(run.trials))
+    differ = [
+        _TrialLine(b, True)
+        for a, b in zip(ref.trials, run.trials)
+        if _mask_timings(a, noise) != _mask_timings(b, noise)
+    ]
+    differ += [_TrialLine(b, True) for b in run.trials[common:]]
+    if len(ref.trials) > common:
+        differ.append(_TrialLine(_missing_note(ref, common), False))
     return differ
+
+
+def _missing_note(ref: RowRun, start: int) -> str:
+    """One note for the first run's lines from index `start` on."""
+    first = ref.trials[start].strip()
+    if start + 1 == len(ref.trials):
+        return f"(no line {start + 1}; {ref.label}: {first})"
+    return (
+        f"(no lines {start + 1} to {len(ref.trials)}; "
+        f"{ref.label} line {start + 1}: {first})"
+    )
 
 
 def _trial_text(
