@@ -57,6 +57,8 @@ class LogFormat:
         reprint: The line that starts the summary reprint, or None.
         noise: Patterns whose matches `castor_compare_runs` ignores when it
             diffs trial lines (counters that move every run).
+        detail_suffix: Matches the generic tail of a row's detail (where it
+            ran, not why it missed), or None when details have none.
     """
 
     case_re: re.Pattern | None
@@ -66,6 +68,7 @@ class LogFormat:
     name_end: int
     reprint: str | None
     noise: tuple[re.Pattern, ...] = ()
+    detail_suffix: re.Pattern | None = None
 
 
 DEFAULT_LOG_FORMAT = LogFormat(
@@ -75,6 +78,7 @@ DEFAULT_LOG_FORMAT = LogFormat(
     name_start=14,
     name_end=48,
     reprint="--- verdicts ---",
+    detail_suffix=re.compile(r"\s*\| at: .*$"),
 )
 
 PYTEST_LOG_FORMAT = LogFormat(
@@ -404,6 +408,42 @@ def _verdict_totals(
     return _last_suite_totals(cleaned, fmt) or _last_pytest_totals(cleaned)
 
 
+def _reprint_copies(
+    lines: list[str], fmt: LogFormat = DEFAULT_LOG_FORMAT
+) -> dict[int, int]:
+    """Maps each summary-reprint line to the inline line it repeats.
+
+    A reprinted line with no identical line before it is left out, so a row
+    that only the reprint shows still counts.
+
+    Args:
+        lines: The log, one string per line.
+        fmt: The project's log format.
+
+    Returns:
+        {reprint line: inline line}, both 1-based.
+    """
+    copies: dict[int, int] = {}
+    inline: dict[str, int] = {}
+    in_reprint = False
+    for number, text in enumerate(_clean_lines(lines), 1):
+        status = _unstamped_status(text, fmt)
+        if in_reprint and (status or not text.strip()):
+            if status and text in inline:
+                copies[number] = inline[text]
+            continue
+        in_reprint = fmt.reprint is not None and text.rstrip() == fmt.reprint
+        inline[text] = number
+    return copies
+
+
+def _row_reason(row: VerdictRow, fmt: LogFormat = DEFAULT_LOG_FORMAT) -> str:
+    """The part of a row's detail that can say why: no generic suffix."""
+    if fmt.detail_suffix is None:
+        return row.detail
+    return fmt.detail_suffix.sub("", row.detail)
+
+
 def _row_for_line(rows: list[VerdictRow], n: int) -> VerdictRow | None:
     """Finds the row whose block or verdict line holds line `n`.
 
@@ -461,6 +501,7 @@ def _log_format_from(value: Any) -> LogFormat:
         name_end=_log_format_column(value, "name_end", base.name_end),
         reprint=_log_format_reprint(value, base.reprint),
         noise=_log_format_noise(value, base.noise),
+        detail_suffix=base.detail_suffix,
     )
 
 
