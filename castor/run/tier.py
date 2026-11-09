@@ -89,6 +89,7 @@ class RunConfig:
     flags: tuple[RunFlag, ...]
     log_format: LogFormat = DEFAULT_LOG_FORMAT
     env_allow: tuple[str, ...] = ()
+    log_format_raw: Any = None
 
 
 def _run_enabled_for(root: Path) -> str | None:
@@ -184,6 +185,7 @@ def _run_config_from(data: dict) -> RunConfig:
         flags=tuple(_run_flags(data.get("flags", []))),
         log_format=_log_format_from(data.get("log_format")),
         env_allow=_run_env_allow(data.get("env_allow", [])),
+        log_format_raw=data.get("log_format"),
     )
 
 
@@ -344,6 +346,7 @@ def _run_config_dict(cfg: RunConfig) -> dict:
             {"name": f.name, "pattern": f.pattern.pattern, "stop": f.stop}
             for f in cfg.flags
         ],
+        "log_format": cfg.log_format_raw,
     }
 
 

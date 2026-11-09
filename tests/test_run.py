@@ -1610,3 +1610,18 @@ def test_run_start_with_env_end_to_end(project, fast, started):
     final = _poll_json(match.group(1))
     assert final["status"] == "done" and final["env"] == {"ROWS": "f11"}
     assert "env=ROWS" in server.castor_runs(str(project))
+
+
+def test_run_record_keeps_log_format_for_the_monitor(project):
+    """The monitor rebuilds its config from the record, not run.json."""
+    for value in ("pytest", _CUSTOM_FORMAT, {"noise": [r"n=\d+"]}):
+        _write_config(project, {"allow": ["t/*.sh"], "log_format": value})
+        cfg, error = server._run_config(project)
+        assert error is None, error
+        rec = server._run_new_record(project, cfg, ["t/ok.sh"], "t", 5, False)
+        back = server._run_config_from(json.loads(json.dumps(rec["config"])))
+        assert back.log_format == cfg.log_format
+    _write_config(project, {"allow": ["t/*.sh"]})
+    cfg, _ = server._run_config(project)
+    back = server._run_config_from(server._run_config_dict(cfg))
+    assert back.log_format is server.DEFAULT_LOG_FORMAT
