@@ -1,7 +1,7 @@
 [project]
 name = "claude-castor"
 version = "0.7.1"
-description = "An Antigravity MCP for Claude Code — offloads large-context work to Google's free agy CLI."
+description = "MCP server for Claude Code that offloads large-context work to free backends: Google's Antigravity CLI and NVIDIA NIM."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -28,7 +28,7 @@ dev = [
 
 [tool.ruff]
 line-length = 79
-target-version = "py38"
+target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
