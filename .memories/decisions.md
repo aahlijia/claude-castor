@@ -217,6 +217,7 @@ and `gemini_index` needs ~2 min; 45 s rejected).
   sanity` (whole-tree grep ignoring .gitignore and the deny list) and
   `dekko diff` (needs a rev; eval snapshots have no commits).
 - **Rejected:** existing maps only; waiting for an out-of-tree map option.
+- **Superseded 2026-11-09:** dekko is now an optional `dekko` extra, not a required dependency. Castor still runs its own copy beside the server.
 
 ### 2026-11-03: must_cover rules for nim_edit
 - **Why:** call sites and the definition must be edited everywhere;
@@ -504,3 +505,11 @@ and `gemini_index` needs ~2 min; 45 s rejected).
 ### 2026-11-09: missing trial lines collapse into one note, worded "trial line"
 - **Why:** NQC's `twists` compare had 16 of 45 diff lines as `(no line N; ...)`, one per line a later run lacked. Now one note per row and run (`(no trial lines 7 to 20; run1 trial line 7: ...)`); 45 lines became 33 with nothing real lost. The numbers count a row's trial lines, so the wording says so: NQC read "line 7" as a log line (it was line 25).
 - **Rejected:** absolute log line numbers (the row block offsets pass through `_clean_lines`, so they could be wrong); masking more of the diff (NQC: the remaining `haul:` coordinates are real differences).
+
+### 2026-11-09: dekko becomes an optional extra; httpx stays required (user)
+- **Why:** dekko adds 14 packages and 22 MB, and until 1.9.35 is on PyPI a failed GitHub fetch stops the whole server from starting. The code already works without it. `install.py` keeps the extra on by default (`--no-dekko` skips it). `httpx` costs 2 packages and 2.7 MB.
+- **Rejected:** optional `httpx`, since every `nim_*` tool would vanish on a default install and `server.py` would need guarded NIM imports. On `refactor/backend-separation` until merged.
+
+### 2026-11-09: nim/backend.py split by job, imports one way; NIM reset is one per module
+- **Why:** 1921 lines mixed settings, limits, records, HTTP and tools. `config` imports no NIM module, `limits` and `records` import `config`, `transport` imports those, `backend` sits above, `summarize` above it. `_nim_reset_state` lives in `agent.py` and calls `_reset_limits` and `_reset_client`, because a `global` rebind only reaches its own module. `_NIM_CONTEXT_MARKERS` and `_nim_retire_key` sit in `transport` to keep imports one way.
+- **Rejected:** a holder object for rebound state (more change for no gain); splitting agent, roles or edit (out of scope). On `refactor/backend-separation` until merged.
