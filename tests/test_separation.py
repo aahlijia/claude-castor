@@ -30,6 +30,7 @@ NIM = (
     "castor.nim.records",
     "castor.nim.transport",
     "castor.nim.backend",
+    "castor.nim.summarize",
     "castor.nim.paths",
     "castor.nim.edit_tools",
     "castor.nim.agent",
@@ -222,6 +223,22 @@ def test_no_tool_keeps_an_old_neutral_name():
     old = {name.replace("castor_", "gemini_", 1) for name in NEUTRAL_TOOLS}
     for path in _sources(PACKAGE):
         assert not (_tool_names(path) & old), path.name
+
+
+def test_server_registers_nim_summarize():
+    code = (
+        "import asyncio, server\n"
+        "names = {t.name for t in asyncio.run(server.mcp.list_tools())}\n"
+        "assert 'nim_summarize' in names\n"
+        "assert len(names) == 44\n"
+    )
+    done = _python(code, env={"CASTOR_NIM_EDIT": ""})
+    assert done.returncode == 0, done.stderr
+
+
+def test_backend_does_not_import_summarize():
+    named = {m for m, _ in _castor_imports(PACKAGE / "nim" / "backend.py")}
+    assert "castor.nim.summarize" not in named
 
 
 @pytest.mark.parametrize(
