@@ -56,12 +56,12 @@ from castor.nim.backend import (
     _nim_thinking_cap,
 )
 from castor.nim.edit_tools import (
-    _EditStore,
     NIM_AGENT_EDIT_NOTE,
     NIM_EDIT_CALLS_PER_STEP,
     NIM_EDIT_CUT_NUDGE,
     NIM_EDIT_TOOLS,
     NIM_EDIT_TOOL_NAMES,
+    _EditStore,
     _edit_recorded,
     _edit_run_tool,
 )

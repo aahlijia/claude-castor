@@ -625,11 +625,11 @@ def test_job_max_wait_env(monkeypatch, raw, want):
 
 def test_job_worker_uses_env_wait(monkeypatch):
     monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", "900")
-    server._nim_patience.on = True
+    server._worker_patience.on = True
     try:
         assert server._nim_max_wait() == 900.0
     finally:
-        server._nim_patience.on = False
+        server._worker_patience.on = False
 
 
 def test_nim_status_reports_job_wait(stub, monkeypatch):

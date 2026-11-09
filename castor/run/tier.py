@@ -19,10 +19,12 @@ from castor.app import (
 from castor.common import (
     RUN_CONFIG_FILE,
     _cache_dir,
-    _nim_patience,
     _read_bytes,
     _run_regex,
     _worktree_roots,
+)
+from castor.jobs import (
+    _worker_patience,
 )
 from castor.logs import (
     DEFAULT_LOG_FORMAT,
@@ -917,7 +919,7 @@ def _run_monitor(run_id: str, proc: subprocess.Popen | None) -> None:
     rec = _run_record_read(run_id)
     if rec is None or rec["status"] != "running":
         return  # a poll raced the previous monitor's last write
-    _nim_patience.on = True  # triage at the end may wait for NIM
+    _worker_patience.on = True  # triage at the end may wait for NIM
     cfg = _run_config_from(rec["config"])
     try:
         exit_code, status = _run_watch(rec, cfg, proc)

@@ -1,20 +1,15 @@
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 
-from castor.common import (
-    _nim_patience,
-)
-
-
-# Background-job subsystem. agy print mode blocks for up to PRINT_TIMEOUT;
-# these let a long prompt run off-thread so Claude can keep working and
-# collect the result later via gemini_poll. Jobs are in-memory only — a
-# server restart drops them. Concurrency is capped by the pool so a
-# fan-out cannot spawn unbounded agy processes. The pool is sized to the
-# NIM gate (see _job_pool_size, built after the NIM helpers).
+# Background-job subsystem, shared by every backend. A long prompt runs
+# off-thread so Claude can keep working and collect the result later via
+# gemini_poll. Jobs are in-memory only: a server restart drops them. Each
+# backend owns its worker pool and sizes it to its own limits; none may
+# exceed JOB_POOL_MAX workers.
 JOB_POOL_MAX = 8
 
 MAX_JOBS = 50
@@ -22,7 +17,7 @@ MAX_JOBS = 50
 
 @dataclass
 class _Job:
-    """State of one background agy job.
+    """State of one background job.
 
     Attributes:
         status: "running", "done", or "error".
@@ -42,8 +37,25 @@ _jobs: dict[str, _Job] = {}
 
 _jobs_lock = threading.Lock()
 
-# Bracketed responses that are successes, not errors (nim_edit's patch).
-_JOB_OK_PREFIXES = ("[nim_edit: OK",)
+# `.on` is True on a background thread: nothing blocks on it, so a backend
+# may wait longer for a slot than it would for a foreground call.
+_worker_patience = threading.local()
+
+# Bracketed responses that are successes, not errors.
+_JOB_OK_PREFIXES: set[str] = set()
+
+# Id prefix -> the poll function for ids that are not in the job table.
+_POLLERS: dict[str, Callable[[str], str]] = {}
+
+
+def _register_job_ok_prefix(prefix: str) -> None:
+    """Record a bracketed response prefix that means the job succeeded."""
+    _JOB_OK_PREFIXES.add(prefix)
+
+
+def _register_poller(prefix: str, poll: Callable[[str], str]) -> None:
+    """Send poll requests for ids starting with `prefix` to `poll`."""
+    _POLLERS[prefix] = poll
 
 
 def _evict_jobs() -> None:
@@ -68,23 +80,22 @@ def _evict_jobs() -> None:
         del _jobs[jid]
 
 
-def _run_job(job_id: str, kwargs: dict[str, Any], runner: Any = None) -> None:
+def _run_job(
+    job_id: str,
+    kwargs: dict[str, Any],
+    runner: Callable[..., str],
+) -> None:
     """Worker body: run the prompt, then record the outcome on the job.
 
-    `runner` is the dispatch function to call (default _dispatch for agy;
-    nim_start passes _dispatch_nim), so every backend shares one job
-    table, one pool, and one gemini_poll.
+    Every backend shares this one job table and one gemini_poll; `runner`
+    is the backend's dispatch function.
 
-    Background jobs are session-free by construction (gemini_start takes no
-    session param), so concurrent workers never race on a transcript file.
-    A bracketed response (agy error/status) is recorded as an "error",
-    unless it starts with one of _JOB_OK_PREFIXES.
+    Background jobs are session-free by construction, so concurrent workers
+    never race on a transcript file. A bracketed response is recorded as an
+    "error", unless it starts with a registered ok prefix.
     """
-    _nim_patience.on = True  # a job may wait for NIM; Claude is not blocked
+    _worker_patience.on = True
     try:
-        if runner is None:
-            # agy imports this module, so it is imported here, not at the top.
-            from castor.agy import _dispatch as runner
         response = runner(**kwargs)
     except Exception as exc:  # worker must never crash silently
         response = f"[Job crashed: {exc}]"
@@ -94,7 +105,7 @@ def _run_job(job_id: str, kwargs: dict[str, Any], runner: Any = None) -> None:
         if job is None:
             return
         failed = response.startswith("[") and not response.startswith(
-            _JOB_OK_PREFIXES
+            tuple(_JOB_OK_PREFIXES)
         )
         job.status = "error" if failed else "done"
         job.response = response
