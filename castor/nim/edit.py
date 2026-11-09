@@ -35,7 +35,7 @@ from castor.nim.agent import (
     _nim_agent_step_model,
     _start_agent_job,
 )
-from castor.nim.backend import (
+from castor.nim.config import (
     NIM_DEFAULT_MAX_TOKENS,
     NIM_EDIT_PATCH_DAYS,
     NIM_EDIT_PATCH_DIR,

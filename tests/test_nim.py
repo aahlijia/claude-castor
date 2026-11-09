@@ -632,6 +632,15 @@ def test_job_worker_uses_env_wait(monkeypatch):
         server._worker_patience.on = False
 
 
+def test_reset_replaces_the_client_gate_and_rotation():
+    client, gate = server._nim_client(), server._nim_gate()
+    server._nim_rotation = 3
+    server._nim_reset_state()
+    assert server._nim_rotation == 0
+    assert server._nim_client() is not client
+    assert server._nim_gate() is not gate
+
+
 def test_nim_status_reports_job_wait(stub, monkeypatch):
     monkeypatch.setenv("CASTOR_NIM_JOB_MAX_WAIT", "1200")
     assert "job wait 1200 s" in _tool(server.nim_status)(verify=False)
