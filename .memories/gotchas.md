@@ -50,7 +50,9 @@
   reads `~/.claude/commands/castor/` and `~/.claude/GEMINI.md`; after changing
   `commands/castor/*.md` or `GEMINI.md`, `diff` then `cp` them over. Do not rerun
   `install.py` for that: it re-registers the server and can disturb the env
-  block. The installed `GEMINI.md` had drifted by whole sections before 2026-11-09.
+  block. `python3 -c "import install; install.install_commands()"` copies both
+  without touching the registration. The installed `GEMINI.md` had drifted by
+  whole sections before 2026-11-09.
 - **Probing NIM by hand: keys and the catalog.** Probe scripts read keys from
   `~/.claude.json` (`mcpServers.claude-castor.env`); never print them, since keys
   pasted into a chat stay in that transcript. `nim_models` lists models the
