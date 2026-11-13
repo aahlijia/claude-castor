@@ -4942,6 +4942,108 @@ def test_triage_text_says_cause_not_shown_for_a_cut_off_reason(stub, repo):
     assert "AssertionEr" not in out
 
 
+def _pytest_log() -> list[str]:
+    return [
+        "tests/t.py::test_a FAILED                         [ 50%]",  # 1
+        "tests/t.py::TestK::test_b FAILED                  [100%]",  # 2
+        "",  # 3
+        "=========== FAILURES ===========",  # 4
+        "____________ test_a ____________",  # 5
+        "    def test_a():",  # 6
+        ">       assert port == 80",  # 7
+        "E       assert 8080 == 80",  # 8
+        "",  # 9
+        "tests/t.py:7: AssertionError",  # 10
+        "_________ TestK.test_b _________",  # 11
+        ">       json.loads(text)",  # 12
+        "E       json.decoder.JSONDecodeError: Expecting value",  # 13
+        "",  # 14
+        "tests/t.py:19: JSONDecodeError",  # 15
+        "====== short test summary info ======",  # 16
+        "FAILED tests/t.py::test_a - assert 8080 == 80",  # 17
+        "FAILED tests/t.py::TestK::test_b - json.decoder.JSONDe...",  # 18
+        "====== 2 failed, 3 passed in 0.10s ======",  # 19
+    ]
+
+
+def test_triage_rows_give_a_pytest_row_its_failure_section():
+    rows = server._triage_rows(_pytest_log(), server.DEFAULT_LOG_FORMAT)
+    assert [(r.line, r.block) for r in rows] == [(17, (5, 10)), (18, (11, 15))]
+
+
+def test_triage_rows_leave_a_pytest_row_without_a_section_alone():
+    lines = ["FAILED tests/t.py::test_a - boom", "1 failed in 0.1s"]
+    rows = server._triage_rows(lines, server.DEFAULT_LOG_FORMAT)
+    assert [r.block for r in rows] == [None]
+
+
+def test_verdict_rows_keep_pytest_rows_without_a_block():
+    rows = server._verdict_rows(_pytest_log())
+    assert [r.block for r in rows] == [None, None]
+
+
+def test_triage_pytest_progress_line_is_no_hit():
+    hits, counts = server._triage_hits(_pytest_log())
+    assert hits == [17, 18] and counts["FAILED"] == 2
+
+
+def test_triage_context_shows_a_pytest_rows_failure_section(repo):
+    (repo / "run.log").write_text("\n".join(_pytest_log()) + "\n")
+    ctx = server._triage_context(repo / "run.log", "run.log")
+    matching = ctx.split("== matching lines")[1].split("\n== ")[0]
+    assert "run.log:1 - " not in matching
+    test_a = matching[matching.index("run.log:17 - ") :]
+    test_a = test_a[: test_a.index("run.log:18 - ")]
+    assert "lines before this row:" in test_a
+    assert "8: E       assert 8080 == 80" in test_a
+    assert "JSONDecodeError" not in test_a
+
+
+def test_triage_json_folds_a_pytest_progress_line_into_its_row(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n"
+        "- run.log:1 - test_a failed - line 8: E       assert 8080 == 80\n"
+        "- run.log:18 - test_b failed - line 13: "
+        "E       json.decoder.JSONDecodeError: Expecting value",
+        log=_pytest_log(),
+    )
+    first, second = out["failures"]
+    assert (first["log_line"], first["row"]) == (17, "tests/t.py::test_a")
+    assert (first["cause_source"], first["cause_line"]) == ("log", 8)
+    assert (second["cause_source"], second["cause_line"]) == ("log", 13)
+    assert out["markers"]["FAILED"] == 2
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        # The progress line is the same failure as the summary row.
+        "- run.log:18 - test_b - line 2: tests/t.py::TestK::test_b FAILED",
+        "- run.log:2 - test_b - line 18: FAILED tests/t.py::TestK::test_b",
+        "- run.log:17 - test_a - line 1: tests/t.py::test_a FAILED",
+    ],
+)
+def test_triage_json_pytest_progress_line_is_no_evidence(stub, repo, item):
+    out = _triage_json(stub, repo, f"failed\n{item}", log=_pytest_log())
+    assert out["failures"][0]["cause_shown"] is False
+
+
+def test_triage_json_keeps_the_item_with_a_cause_for_one_line(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:1 - test_a failed - cause not shown\n"
+        "- run.log:17 - test_a again - line 8: E       assert 8080 == 80\n"
+        "- run.log:17 - test_a a third time - cause not shown",
+        log=_pytest_log(),
+    )
+    (failure,) = out["failures"]
+    assert failure["cause_shown"] is True and failure["cause_line"] == 8
+    assert failure["what"] == "test_a again"
+
+
 _PYTEST_TOTALS = "===== 2 failed, 3 passed in 0.10s ====="
 
 

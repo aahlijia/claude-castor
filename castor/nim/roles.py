@@ -19,6 +19,8 @@ from castor.logs import (
     VerdictRow,
     _is_case_stamp,
     _log_format,
+    _pytest_blocks,
+    _pytest_progress_copies,
     _reprint_copies,
     _row_for_line,
     _row_reason,
@@ -905,8 +907,8 @@ class _TriageLog:
     @classmethod
     def read(cls, lines: list[str], fmt: LogFormat) -> "_TriageLog":
         """Parse `lines` once for every check of one answer."""
-        rows = _verdict_rows(lines, fmt)
-        return cls(lines, rows, _reprint_copies(lines, fmt), fmt)
+        rows = _triage_rows(lines, fmt)
+        return cls(lines, rows, _triage_copies(lines, fmt, rows), fmt)
 
     def holds(self, number: int) -> bool:
         """True when 1-based `number` is a line of the log."""
@@ -1055,30 +1057,41 @@ def _triage_failure(item: dict, number: int, log: _TriageLog) -> dict:
     }
 
 
+def _stands_for_line(failure: dict, kept: dict | None) -> bool:
+    """True when `failure` should be its line's item in place of `kept`."""
+    if kept is None:
+        return True
+
+    return failure["cause_shown"] and not kept["cause_shown"]
+
+
 def _triage_failures(
     lines: list[str], label: str, log: _TriageLog
 ) -> list[dict]:
     """The answer's items, each tied to the verdict row that holds its line.
 
     An item citing an `@case` stamp is dropped: the stamp's verdict line is
-    the same failure. So is a second item for one line, which is how a row
-    and its summary copy would otherwise both be listed, and an item
-    citing the totals line, which counts the failures and is not one.
+    the same failure. So is an item citing the totals line, which counts
+    the failures and is not one. A row and its copy would both be listed,
+    so one line keeps one item: the first with a cause the log backs, else
+    the first.
     """
-    failures = []
-    seen: set[int] = set()
+    failures: dict[int, dict] = {}
     for line in lines:
         item = _triage_item(line, label)
         if item is None:
             continue
         number = log.inline(item["log_line"])
-        if number in seen or _cites_case_stamp(number, log.lines, log.fmt):
+        if _cites_case_stamp(number, log.lines, log.fmt):
             continue
         if _cites_totals(number, log):
             continue
-        seen.add(number)
-        failures.append(_triage_failure(item, number, log))
-    return failures
+
+        failure = _triage_failure(item, number, log)
+        if _stands_for_line(failure, failures.get(number)):
+            failures[number] = failure
+
+    return list(failures.values())
 
 
 def _triage_json(
@@ -1200,7 +1213,7 @@ def _triage_context(
     count_rows = "\n".join(f"{name}: {counts[name]}" for name in counts)
     ends = _triage_ends(lines, label)
     room = NIM_TRIAGE_CONTEXT_CHARS - len(count_rows) - len(ends) - 200
-    rows = _verdict_rows(lines, fmt)
+    rows = _triage_rows(lines, fmt)
     shown = _triage_hit_block(lines, hits, label, room, rows)
     return (
         f"[CONTEXT]\n== marker counts in {label} ({len(lines)} lines)\n"
@@ -1208,15 +1221,36 @@ def _triage_context(
     )
 
 
+def _triage_rows(lines: list[str], fmt: LogFormat) -> list[VerdictRow]:
+    """Verdict rows as triage reads them.
+
+    A pytest row gets the part of the FAILURES output that says why it
+    failed as its block, so the context shows it under the row the way a
+    suite row's trial lines are shown.
+    """
+    return _pytest_blocks(lines, _verdict_rows(lines, fmt))
+
+
+def _triage_copies(
+    lines: list[str], fmt: LogFormat, rows: list[VerdictRow]
+) -> dict[int, int]:
+    """{line: the row line it repeats} for every second mention of a row."""
+    return {
+        **_reprint_copies(lines, fmt),
+        **_pytest_progress_copies(lines, rows),
+    }
+
+
 def _triage_hits(
     lines: list[str], fmt: LogFormat = DEFAULT_LOG_FORMAT
 ) -> tuple[list[int], dict[str, int]]:
     """Line numbers matching any marker, and each marker's line count.
 
-    A stamp line repeats the verdict line above it and a summary reprint
-    repeats the row it lists, so neither is a hit.
+    A stamp line repeats the verdict line above it, a summary reprint
+    repeats the row it lists and a pytest progress line is its summary
+    row's failure, so none of them is a hit.
     """
-    copies = _reprint_copies(lines, fmt)
+    copies = _triage_copies(lines, fmt, _verdict_rows(lines, fmt))
     counts = dict.fromkeys((name for name, _ in NIM_TRIAGE_MARKERS), 0)
     hits: list[int] = []
     for number, line in enumerate(lines, 1):
