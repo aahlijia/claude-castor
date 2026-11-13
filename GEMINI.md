@@ -374,7 +374,11 @@ is always the log's own words, never the model's. A "row" cause only repeats
 the row's detail; a "log" cause proves where the text is, not that it
 explains the failure, so read that line before acting on it. `line_exists`
 only says the cited line number is in the log. The verdict table reprinted at
-the end of a log is not a repeat and not a marker hit.
+the end of a log is not a repeat and not a marker hit. A pytest log is read
+the same way: a failure is one row, at its `FAILED path::test` summary line,
+the agent is shown that test's part of the FAILURES output under it, and the
+`-v` progress line (`path::test FAILED [ 50%]`) folds into the row and is not
+a marker hit. When two items name one row, the one with a backed cause stays.
 
 `nim_explain_row` (and its `_start`) is a locator: it finds the code that
 decides a row, and you decide whether the harness or the game is wrong.

@@ -1,6 +1,6 @@
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,15 @@ _PYTEST_ROW_RE = re.compile(r"^(FAILED|ERROR) (\S+)(?: - (.*))?$")
 _PYTEST_TOTALS_RE = re.compile(r"\d+ (?:failed|passed|errors?)\b.* in [\d.]+s")
 
 _PYTEST_COUNT_RE = re.compile(r"(\d+) (failed|passed|errors?)\b")
+
+# `pytest -v` prints "tests/t.py::test_a FAILED   [ 50%]" as the test ends.
+_PYTEST_PROGRESS_RE = re.compile(r"^(\S+) (?:FAILED|ERROR)\s+\[\s*\d+%\]\s*$")
+
+# "_____ TestK.test_b _____" opens a test's part of the FAILURES section.
+_PYTEST_SECTION_RE = re.compile(r"^_{3,} (.+?) _{3,}$")
+
+# "===== short test summary info =====" ends it.
+_PYTEST_BANNER_RE = re.compile(r"^={3,} .+ ={3,}$")
 
 _VERDICT_STATUSES = ("PASS", "FAIL", "NOT ASSESSED")
 
@@ -190,6 +199,99 @@ def _pytest_rows(lines: list[str]) -> list[VerdictRow]:
         detail = (match.group(3) or "").strip()
         rows.append(VerdictRow(name, "FAIL", detail, i + 1, None, occurrence))
     return rows
+
+
+def _is_pytest_row(row: VerdictRow, lines: list[str]) -> bool:
+    """True when `row` was read from a pytest summary line."""
+    return bool(_PYTEST_ROW_RE.match(lines[row.line - 1]))
+
+
+def _pytest_sections(lines: list[str]) -> list[tuple[str, int, int]]:
+    """Each test's part of pytest's FAILURES output.
+
+    Returns:
+        (title, first line, last line) per part, 1-based and inclusive,
+        from its "____ title ____" line to its last line with text.
+    """
+    sections: list[tuple[str, int, int]] = []
+    title, first, last = None, 0, 0
+    for number, text in enumerate(lines, 1):
+        opened = _PYTEST_SECTION_RE.match(text)
+        if opened or _PYTEST_BANNER_RE.match(text):
+            if title is not None:
+                sections.append((title, first, last))
+
+            title = opened.group(1) if opened else None
+            first = last = number
+        elif text.strip():
+            last = number
+
+    if title is not None:
+        sections.append((title, first, last))
+
+    return sections
+
+
+def _pytest_section_title(name: str) -> str:
+    """The FAILURES title of a node id: `t.py::K::test` is `K.test`."""
+    _, _, inside = name.partition("::")
+    return inside.replace("::", ".") if inside else name
+
+
+def _pytest_blocks(
+    lines: list[str], rows: list[VerdictRow]
+) -> list[VerdictRow]:
+    """Rows with each pytest row's FAILURES part as its block.
+
+    pytest prints why a test failed far above its summary line. Rows of
+    another format, and pytest rows with no such part, come back as given.
+    """
+    cleaned = _clean_lines(lines)
+    sections = _pytest_sections(cleaned)
+    if not sections:
+        return rows
+
+    return [_with_pytest_block(row, cleaned, sections) for row in rows]
+
+
+def _with_pytest_block(
+    row: VerdictRow, lines: list[str], sections: list[tuple[str, int, int]]
+) -> VerdictRow:
+    """`row` with its FAILURES part as the block, when it has one."""
+    if row.block is not None or not _is_pytest_row(row, lines):
+        return row
+
+    wanted = _pytest_section_title(row.name)
+    for title, first, last in sections:
+        # "ERROR at setup of test_a" ends with the test's title.
+        if title == wanted or title.endswith(" " + wanted):
+            return replace(row, block=(first, last))
+
+    return row
+
+
+def _pytest_progress_copies(
+    lines: list[str], rows: list[VerdictRow]
+) -> dict[int, int]:
+    """Maps each `pytest -v` progress line of a failed test to its row.
+
+    "t.py::test_a FAILED [ 50%]" and the summary's "FAILED t.py::test_a"
+    are one failure, and the summary line is the row.
+
+    Returns:
+        {progress line: row line}, both 1-based.
+    """
+    cleaned = _clean_lines(lines)
+    by_name = {
+        row.name: row.line for row in rows if _is_pytest_row(row, cleaned)
+    }
+    copies: dict[int, int] = {}
+    for number, text in enumerate(cleaned, 1):
+        found = _PYTEST_PROGRESS_RE.match(text)
+        if found and found.group(1) in by_name:
+            copies[number] = by_name[found.group(1)]
+
+    return copies
 
 
 def _verdict_rows(
