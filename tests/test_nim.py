@@ -4623,6 +4623,48 @@ def test_triage_json_without_rows(stub, repo):
     assert out["markers"]["ERROR"] == 1
 
 
+@pytest.mark.parametrize(
+    ("answer", "verdict"),
+    [
+        ("inconclusive\n- run.log:3 - x - cause not shown", "inconclusive"),
+        ("Verdict: failed\n- run.log:3 - x", "failed"),
+        ("**Verdict:** inconclusive", "inconclusive"),
+        ("## Verdict\n\nfailed (2 of 116)", "failed"),
+        # A sentence that names another verdict comes before the verdict.
+        (
+            "I have what I need. No row failed, 9 were not assessed.\n"
+            "inconclusive — the totals show 9 not assessed",
+            "inconclusive",
+        ),
+        # A labelled verdict wins wherever it is.
+        (
+            "passed: 114, failed: 2 (run.log:181)\n- run.log:3 - x\n\n"
+            "Verdict: failed",
+            "failed",
+        ),
+        (
+            "The log has its own verdict table, and no row failed.\n"
+            "Verdict (from the totals): inconclusive",
+            "inconclusive",
+        ),
+        # The verdict stated inside a sentence.
+        (
+            "Fail is 0 but 9 are not assessed, so the verdict is "
+            "**inconclusive**.\n- run.log:3 - x",
+            "inconclusive",
+        ),
+        # Only one verdict is named in the opening sentence.
+        ("The run failed: 2 of 116 tests.\n- run.log:3 - x", "failed"),
+        # Counts are not a verdict, and two named verdicts are no answer.
+        ("Passed: 114\nFailed: 2\n- run.log:3 - x", None),
+        ("No row failed but none passed either.\n- run.log:3 - x", None),
+        ("I looked.\n- run.log:3 - FAILED tests/x.py::test_a", None),
+    ],
+)
+def test_triage_verdict_is_the_one_the_answer_states(answer, verdict):
+    assert server._triage_verdict(answer.splitlines()) == verdict
+
+
 def test_triage_json_tolerates_loose_answers(stub, repo):
     out = _triage_json(
         stub,

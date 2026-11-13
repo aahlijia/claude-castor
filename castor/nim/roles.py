@@ -791,6 +791,25 @@ _TRIAGE_VERDICT_RE = re.compile(
     r"\b(passed|failed|inconclusive)\b", re.IGNORECASE
 )
 
+# "Verdict: failed", "**Verdict:** failed", "the verdict is **failed**".
+_TRIAGE_VERDICT_LABEL_RE = re.compile(
+    r"\bverdict\b\W*(?:is\W*)?(passed|failed|inconclusive)\b", re.IGNORECASE
+)
+
+# A line that is the verdict: the word, then nothing or punctuation. A count
+# ("Passed: 114") and a quoted log line ("FAILED tests/x.py") are not one.
+_TRIAGE_VERDICT_LINE_RE = re.compile(
+    r"^([Pp]assed|[Ff]ailed|[Ii]nconclusive)\b"
+    r"(?!\s*[:=]?\s*\d)(?=\s*(?:$|[^\w\s]))"
+)
+
+# "Passed: 114" opens with a count of tests, not with the verdict.
+_TRIAGE_COUNT_RE = re.compile(
+    r"(?:passed|failed|inconclusive)\s*[:=]?\s*\d", re.IGNORECASE
+)
+
+_TRIAGE_MARKUP_RE = re.compile(r"^[\s>#*_`-]+")
+
 _NIM_RATE_LIMIT_RE = re.compile(r"rate-limited: try again in ~(\d+)s")
 
 
@@ -827,16 +846,51 @@ def _answer_lines(answer: str) -> list[str]:
 
 
 def _triage_verdict(lines: list[str]) -> str | None:
-    """passed / failed / inconclusive from a `Verdict` or the first line."""
-    first = next((ln for ln in lines if ln.strip()), "")
-    candidates = [
-        ln for ln in lines if ln.lstrip().lower().startswith("verdict")
-    ]
-    for line in [*candidates, first]:
-        found = _TRIAGE_VERDICT_RE.search(line)
-        if found:
-            return found.group(1).lower()
+    """The verdict an answer states: passed, failed, inconclusive or None.
+
+    A labelled verdict ("Verdict: failed", "the verdict is failed") wins
+    wherever it is, then a line that is only a verdict. Failing both, the
+    opening sentence counts when it names one verdict. Agents often open
+    with a sentence about the totals ("no row failed, 9 not assessed")
+    before the verdict, so a sentence naming two is no answer, and neither
+    is one that opens with a count ("Passed: 114").
+    """
+    clean = [_TRIAGE_MARKUP_RE.sub("", ln).strip() for ln in lines]
+    for read in (_labelled_verdict, _verdict_line):
+        for line in clean:
+            found = read(line)
+            if found:
+                return found
+
+    opening = next((ln for ln in clean if ln), "")
+    if _TRIAGE_COUNT_RE.match(opening):
+        return None
+
+    return _only_verdict(opening)
+
+
+def _labelled_verdict(line: str) -> str | None:
+    """The verdict a line gives right after the word "verdict"."""
+    found = _TRIAGE_VERDICT_LABEL_RE.search(line)
+    if found:
+        return found.group(1).lower()
+
+    if re.match(r"verdict\b", line, re.IGNORECASE):
+        return _only_verdict(line)
+
     return None
+
+
+def _verdict_line(line: str) -> str | None:
+    """The verdict when the line opens with it and is not a count."""
+    found = _TRIAGE_VERDICT_LINE_RE.match(line)
+    return found.group(1).lower() if found else None
+
+
+def _only_verdict(line: str) -> str | None:
+    """The one verdict a line names; None for none or for several."""
+    named = {word.lower() for word in _TRIAGE_VERDICT_RE.findall(line)}
+    return named.pop() if len(named) == 1 else None
 
 
 @dataclass(frozen=True)

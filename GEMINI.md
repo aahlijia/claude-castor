@@ -354,7 +354,10 @@ NOT ASSESSED rows, read by Castor from the log, not the model), `failures`
 (each with its `row`, `log_line`, `line_exists`, `what` and a checked cause:
 `cause_hint`, `cause_shown`, `cause_source`, `cause_line`), `markers` and
 `agent` stats. Errors are objects with `error` set to `rate_limited` (with
-`retry_after_s`), `failed` or `bad_input`. There is no confidence or owner
+`retry_after_s`), `failed` or `bad_input`. `verdict` is the one the answer
+states (a labelled "Verdict: ..." first, then a line that is only a verdict)
+and null when it states none clearly; `totals` is counted from the log, so
+it wins when the two disagree. There is no confidence or owner
 field: a self-rated number is not calibrated, and triage reads no code, so it
 cannot say whose bug it is.
 
