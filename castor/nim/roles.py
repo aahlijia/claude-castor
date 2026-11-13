@@ -38,6 +38,11 @@ from castor.nim.agent import (
     _run_nim_agent,
     _start_agent_job,
 )
+from castor.nim.pack import (
+    NIM_SCOUT_TEXT_ERROR,
+    NIM_SCOUT_TEXT_MODES,
+    _scout_text,
+)
 from castor.nim.paths import (
     _agent_denied,
     _agent_resolve,
@@ -324,13 +329,17 @@ def nim_scout(
     cwd: str,
     model: str | None = None,
     max_steps: int | None = None,
+    text: str = "none",
+    text_tokens: int | None = None,
 ) -> str:
     """Find the exact lines a task needs, using a free NIM agent.
 
     Use it before briefing another agent or starting a change: instead of
     Claude grepping and reading files, the scout returns a short list of
     path:start-end ranges with a one-line reason each, citations checked.
-    Read-only; see nim_agent for the tool loop and its limits.
+    With `text`, Castor also copies the text of those ranges from disk, so
+    nobody spends a turn opening each one. Read-only apart from a pack
+    file; see nim_agent for the tool loop and its limits.
 
     Args:
         question: What the work is and what to locate (names, paths, the
@@ -339,12 +348,29 @@ def nim_scout(
         model: NIM model id (CASTOR_NIM_AGENT_MODEL, then Nemotron 3.5
             Super).
         max_steps: Request budget (default 10).
+        text: Where the text of the ranges goes. "none" (default): only
+            the bullets. "inline": the text follows the bullets, for when
+            you will use it yourself. "file": the text goes to a pack
+            under `cwd`/.castor/packs/ and the answer names it, for a
+            brief another agent reads; it never enters your context.
+        text_tokens: Budget for that text (default 6000, 1000 to 20000).
+            Ranges are taken in the scout's order; one that does not fit
+            stays a pointer.
 
     Returns:
         Up to 15 bullets of "path:start-end - why", or a bracketed error.
+        With `text`, then a "[text: ...]" line and the numbered lines, or
+        a "[pack: <path> | ...]" line. Only ranges that passed the
+        citation and quote checks are copied; the line counts what was
+        left out.
     """
+    if text not in NIM_SCOUT_TEXT_MODES:
+        return NIM_SCOUT_TEXT_ERROR
     task = _scout_task(question)
-    return _dispatch_nim_agent(task, cwd, model, max_steps or NIM_SCOUT_STEPS)
+    steps = max_steps or NIM_SCOUT_STEPS
+    return _dispatch_scout(
+        task, cwd, model, steps, question, text, text_tokens
+    )
 
 
 @mcp.tool()
@@ -353,6 +379,8 @@ def nim_scout_start(
     cwd: str,
     model: str | None = None,
     max_steps: int | None = None,
+    text: str = "none",
+    text_tokens: int | None = None,
 ) -> str:
     """Start nim_scout in the background; collect it with castor_poll.
 
@@ -361,17 +389,40 @@ def nim_scout_start(
         cwd: See nim_scout.
         model: See nim_scout.
         max_steps: See nim_scout.
+        text: See nim_scout. With "file" the pack is written by the job,
+            and the polled answer names it.
+        text_tokens: See nim_scout.
 
     Returns:
-        A message with the job id to pass to castor_poll.
+        A message with the job id to pass to castor_poll, or a bracketed
+        error.
     """
+    if text not in NIM_SCOUT_TEXT_MODES:
+        return NIM_SCOUT_TEXT_ERROR
     kwargs = {
         "task": _scout_task(question),
         "cwd": cwd,
         "model": model,
         "max_steps": max_steps or NIM_SCOUT_STEPS,
+        "question": question,
+        "text": text,
+        "text_tokens": text_tokens,
     }
-    return _start_agent_job("NIM scout", kwargs)
+    return _start_agent_job("NIM scout", kwargs, _dispatch_scout)
+
+
+def _dispatch_scout(
+    task: str,
+    cwd: str,
+    model: str | None,
+    max_steps: int | None,
+    question: str,
+    text: str = "none",
+    text_tokens: int | None = None,
+) -> str:
+    """Run the scout and add the text of its ranges, as `text` asks."""
+    answer = _dispatch_nim_agent(task, cwd, model, max_steps)
+    return _scout_text(answer, cwd, question, text, text_tokens)
 
 
 def _scout_task(question: str) -> str:

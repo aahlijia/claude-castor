@@ -34,6 +34,7 @@ MODULES = (
     "castor.nim.paths",
     "castor.nim.edit_tools",
     "castor.nim.agent",
+    "castor.nim.pack",
     "castor.nim.roles",
     "castor.nim.explain",
     "castor.nim.edit",

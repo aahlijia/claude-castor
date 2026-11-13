@@ -347,6 +347,23 @@ quote that isn't at the cited line `[quote is at line N]` or
 `[quote not in file]`, so treat those leads as wrong or mislocated. A
 matched quote proves the location, not the claim.
 
+**Scout can hand back the text.** `nim_scout` (and its `_start`) takes
+`text`. Use `text="inline"` when you will use the ranges yourself: the
+numbered lines follow the bullets, so you don't spend a turn opening each
+range. Use `text="file"` when you are writing a brief for another agent: the
+text goes to a pack under `.castor/packs/` and never enters your context. Put
+the pack's path in the brief and tell the agent to Read it whole in its first
+turn, in the same message as any other range the brief cites. Castor copies
+the text from disk after the checks, so it is exact: edit from it, and
+re-read a range only if an Edit fails to match. It is what a scout judged
+relevant, not everything the task touches. A range that failed a check or did
+not fit `text_tokens` (default 6000) stays a pointer, and the `[text: ...]`
+or `[pack: ...]` line counts those. A heading that says "quote found at line
+N instead" marks a range whose quote the check found elsewhere: look at line
+N if the range seems off. The reason for all this: on 2026-11-13, subagents
+that edit took a median of 32 turns to reach their first edit (17 reads and
+12 searches), and each of those turns re-reads about 123k tokens.
+
 `nim_triage_log` (and its `_start`) takes `format="json"` for a program that
 consumes the result. Castor parses the model's usual answer, so the model is
 never asked for JSON. You get `verdict`, `totals`, `rows` (the log's FAIL and

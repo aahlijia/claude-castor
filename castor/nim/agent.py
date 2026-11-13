@@ -194,7 +194,8 @@ NIM_AGENT_SKIP_EXTENSIONS = SKIP_EXTENSIONS | {
 
 # Build trees the agent's walk and list_dir leave out when the git index
 # can't decide (no repo). Agent-only, so the agy inline path is unchanged.
-NIM_AGENT_SKIP_DIRS = SKIP_DIRS | {"Library", "Temp", "obj"}
+# .castor holds brief packs: copies of code a scout must not cite.
+NIM_AGENT_SKIP_DIRS = SKIP_DIRS | {"Library", "Temp", "obj", ".castor"}
 
 # One git index read serves every grep in an agent run or review context.
 NIM_AGENT_INDEX_TTL = 60.0

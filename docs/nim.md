@@ -49,7 +49,7 @@ third party.
 | `nim_summarize` | `(cwd, target, model=None)` | `{summary, key_points}` of an inlined file/dir under `cwd` |
 | `nim_agent` | `(task, cwd, model=None, max_steps=None, max_tokens=None)` | Read-only tool loop: NIM explores `cwd` with grep/read_range/list_dir, plus dekko's callers/symbol/outline/context/search/trace when dekko is on, run by Castor; cited `path:line` are verified |
 | `nim_agent_start` | same | Background `nim_agent`; poll with `castor_poll` |
-| `nim_scout` | `(question, cwd, model=None, max_steps=None)` | Role: the exact `path:start-end` ranges a task needs |
+| `nim_scout` | `(question, cwd, model=None, max_steps=None, text="none", text_tokens=None)` | Role: the exact `path:start-end` ranges a task needs. `text="inline"` adds the text of those ranges after the bullets; `text="file"` writes it to a brief pack under `cwd`/`.castor/packs/` and names it, for a brief another agent reads. Castor copies the text from disk after the citation and quote checks, in the scout's order, 6,000 tokens by default (`text_tokens`, 1,000 to 20,000) |
 | `nim_first_pass_review` | `(cwd, diff_file=None, rev_range=None, focus=None, model=None, max_steps=None)` | Role: ranked diff review; the diff is read server-side (file, range or `git diff HEAD`), refused over ~1,500 lines |
 | `nim_triage_log` | `(cwd, log_path, question=None, model=None, max_steps=None, format="text", deep=False)` | Role: verdict plus `log:LINE` failures for a log inside `cwd`; `format="json"` returns Castor's parse (verdict, totals, FAIL rows, failures, markers, agent stats). Each cause must be text copied from a cited log line; Castor drops any it cannot find there (see `GEMINI.md`). When every failing row states a whole reason and nothing else in the log is a marker hit, Castor answers from the rows with no NIM request (`agent.steps` 0, JSON `verdict` null, the text ends with a `[castor: ...]` line); `deep=True`, a `question` or `CASTOR_NIM_TRIAGE_DEEP=1` asks the agent |
 | `nim_scout_start` / `nim_first_pass_review_start` / `nim_triage_log_start` | same as the role | Background role; input is checked at start; poll with `castor_poll`; the triage one takes `format` and `deep` too |
@@ -145,6 +145,16 @@ that name), and `_agent_check_quotes` checks each cited line's backticked
 quote, tagging `[quote is at line N]` or `[quote not in file]`.
 `nim_first_pass_review` gets `_review_context`: numbered new-file lines
 around each hunk plus grep hits for the functions the diff touches.
+`nim_scout`'s `text` is `castor/nim/pack.py`. It reads the ranges of the
+checked answer (`_answer_leads`): one tagged `[unverified]` or `[quote not
+in file]`, or marked "(not read)", is left out; one tagged `[quote is at
+line N]` is kept and its heading says so. Each range is padded by 2
+lines, ranges of one file within 6 lines are shown as one, a range keeps
+at most its first 120 lines, and the budget is filled first fit in the
+answer's order (`_fit`). Lines print in `Read`'s layout. A pack file lives
+in `.castor/packs/` under `cwd`; the folder ignores itself with its own
+`.gitignore`, packs older than 7 days or past 100 are deleted at the next
+write, and `.castor` is hidden from the agent's `list_dir`.
 `_run_nim_agent` returns stats and writes a trace to
 `~/.cache/claude-castor/nim-traces/`; `_nim_request` logs every chat request
 to `nim-usage/` (no prompt text) for `nim_usage`; `CASTOR_NIM_TRACES=0` turns

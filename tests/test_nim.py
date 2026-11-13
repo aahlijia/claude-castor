@@ -5395,6 +5395,303 @@ def test_triage_start_deep_asks_the_agent(captured, repo):
     assert _poll_until_done(_job_id(started)) == "ok" and len(captured) == 1
 
 
+# --- brief pack --------------------------------------------------------------
+
+_SCOUT_FOOTER = "\n\n[nim_agent: 3 steps, 4 tool calls, model m]"
+
+
+def _numbered_file(repo, name="src/big.py", count=200, width=0):
+    """A file of `count` lines "line N", each padded to `width` chars."""
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(f"{f'line {n}':<{width}}\n" for n in range(1, count + 1))
+    )
+
+
+def _scout_text(repo, bullets, mode="file", tokens=None):
+    answer = "\n".join(bullets) + _SCOUT_FOOTER
+    out = server._scout_text(answer, str(repo), "where is X?", mode, tokens)
+    assert out.startswith(answer)
+    return out[len(answer) :]
+
+
+def _pack_text(repo, added):
+    name = re.search(r"\[pack: (\S+) \|", added).group(1)
+    return (repo / name).read_text()
+
+
+def _packs(repo):
+    return sorted((repo / ".castor" / "packs").glob("*.md"))
+
+
+def test_scout_text_none_leaves_the_answer_alone(repo):
+    _numbered_file(repo)
+    added = _scout_text(repo, ["- src/big.py:10-12 - `line 11` - x"], "none")
+    assert added == "" and not (repo / ".castor").exists()
+
+
+def test_scout_text_passes_an_error_through(repo):
+    out = server._scout_text("[Error: no key.]", str(repo), "q", "file", None)
+    assert out == "[Error: no key.]" and not (repo / ".castor").exists()
+
+
+def test_pack_file_holds_the_cited_lines(repo):
+    _numbered_file(repo)
+    added = _scout_text(
+        repo, ["- src/big.py:10-12 - `line 11` - the middle of it"]
+    )
+    assert re.fullmatch(
+        r"\n\[pack: \.castor/packs/\d{8}-\d{6}-[0-9a-f]{6}\.md \| "
+        r"1 of 1 ranges, 7 lines, about \d+ tokens\]",
+        added,
+    )
+    text = _pack_text(repo, added)
+    assert text.startswith("# Castor brief pack\ntask: where is X?\nbuilt: ")
+    assert "holds: 1 of 1 scout ranges, 1 file, 7 lines, about " in text
+    assert "not held" not in text
+    assert (
+        "## src/big.py:8-14 (of 200 lines)\n"
+        "why: the middle of it\n"
+        "     8\tline 8\n"
+    ) in text
+    assert text.endswith("    14\tline 14\n")
+
+
+def test_pack_merges_ranges_that_sit_close(repo):
+    _numbered_file(repo)
+    added = _scout_text(
+        repo,
+        [
+            "- src/big.py:40-42 - `line 41` - third",
+            "- src/big.py:10-12 - `line 11` - first",
+            "- src/big.py:18-20 - `line 19` - second",
+        ],
+    )
+    text = _pack_text(repo, added)
+    heads = [line for line in text.splitlines() if line.startswith("## ")]
+    assert heads == [
+        "## src/big.py:8-22 (of 200 lines)",
+        "## src/big.py:38-44 (of 200 lines)",
+    ]
+    assert "why: first; second" in text and "3 of 3 ranges, 22 lines" in added
+
+
+def test_pack_puts_the_best_ranked_file_first(repo):
+    _numbered_file(repo, "src/b.py")
+    _numbered_file(repo, "src/a.py")
+    added = _scout_text(
+        repo,
+        [
+            "- src/b.py:90-91 - `line 90` - x",
+            "- src/a.py:5-6 - `line 5` - y",
+            "- src/b.py:10-11 - `line 10` - z",
+        ],
+    )
+    heads = re.findall(r"^## (\S+)", _pack_text(repo, added), re.MULTILINE)
+    assert heads == ["src/b.py:8-13", "src/b.py:88-93", "src/a.py:3-8"]
+
+
+def test_pack_leaves_out_leads_that_failed_a_check(repo):
+    _numbered_file(repo)
+    added = _scout_text(
+        repo,
+        [
+            "- src/big.py:300-302 [unverified] - `line 301` - a",
+            "- src/big.py:20-22 - `nope` [quote not in file] - b",
+            "- src/big.py:30-32 - c (not read)",
+            "- src/big.py:10-12 - `line 11` - d",
+        ],
+    )
+    assert "1 of 4 ranges" in added
+    assert added.endswith(
+        "| left out: 1 not read, 1 quote not in file, 1 unverified]"
+    )
+    text = _pack_text(repo, added)
+    assert "line 21" not in text and "line 31" not in text
+    assert (
+        "not held (see the scout answer): src/big.py:300-302 (unverified); "
+        "src/big.py:20-22 (quote not in file); src/big.py:30-32 (not read)"
+    ) in text
+
+
+def test_pack_keeps_a_range_whose_quote_is_elsewhere(repo):
+    # A short quote ("deep=True") is first found far from the lines the
+    # scout read, so the range stays where it was cited and says so.
+    _numbered_file(repo)
+    added = _scout_text(
+        repo, ["- src/big.py:10-12 - `line 101` [quote is at line 101] - x."]
+    )
+    text = _pack_text(repo, added)
+    assert (
+        "## src/big.py:8-14 (of 200 lines), quote found at line 101 instead\n"
+        "why: x\n"
+    ) in text
+    assert "    11\tline 11\n" in text and "   101\tline 101" not in text
+
+
+def test_pack_fits_the_budget_in_scout_order(repo):
+    _numbered_file(repo, "src/wide.py", count=120, width=60)
+    _numbered_file(repo)
+    added = _scout_text(
+        repo,
+        [
+            "- src/wide.py:1-100 - `line 50` - too big",
+            "- src/big.py:10-12 - `line 11` - fits",
+        ],
+        tokens=1000,
+    )
+    assert "1 of 2 ranges, 7 lines" in added
+    assert added.endswith("| left out: 1 over budget]")
+    text = _pack_text(repo, added)
+    assert "src/wide.py:1-100 (over budget)" in text
+    assert "## src/big.py:8-14" in text and "## src/wide.py" not in text
+
+
+def test_pack_keeps_the_first_120_lines_of_a_long_range(repo):
+    _numbered_file(repo)
+    added = _scout_text(repo, ["- src/big.py:1-200 - `line 5` - all of it"])
+    assert "1 of 1 ranges, 122 lines" in added
+    assert added.endswith("| left out: 1 past 120 lines]")
+    text = _pack_text(repo, added)
+    assert "## src/big.py:1-122 (of 200 lines)" in text
+    assert "src/big.py:121-200 (past 120 lines)" in text
+
+
+def test_pack_never_holds_what_the_agent_cannot_read(repo):
+    (repo / "keys").mkdir()
+    (repo / "keys" / "id.pem").write_text("PRIVATE\n")
+    added = _scout_text(
+        repo,
+        [
+            "- keys/id.pem:1 - `PRIVATE` - the key",
+            "- src/blob.bin:1 - `TARGET` - a blob",
+        ],
+    )
+    assert added == (
+        "\n[pack not written: no range could be held (2 not readable)]"
+    )
+    assert not (repo / ".castor").exists()
+
+
+def test_pack_says_when_the_answer_cites_nothing(repo):
+    added = _scout_text(repo, ["Nothing in this project sets X."])
+    assert added == "\n[pack not written: the answer cites no range]"
+
+
+def test_pack_cuts_a_very_long_line(repo):
+    (repo / "src" / "long.py").write_text("short\n" + "x" * 1000 + "\nend\n")
+    added = _scout_text(repo, ["- src/long.py:2 - `xxxx` - the long one"])
+    text = _pack_text(repo, added)
+    assert "## src/long.py:1-3 (of 3 lines), long lines cut" in text
+    assert f"     2\t{'x' * 400} [+600 chars cut]\n" in text
+
+
+def test_pack_reads_a_bare_file_name(repo, monkeypatch):
+    _numbered_file(repo)
+    monkeypatch.setattr(
+        server, "_agent_tracked_files", lambda root: ["src/big.py"]
+    )
+    added = _scout_text(repo, ["- big.py:10-12 - `line 11` - x"])
+    assert "## src/big.py:8-14 (of 200 lines)" in _pack_text(repo, added)
+
+
+def test_pack_folder_ignores_itself(repo):
+    _numbered_file(repo)
+    _scout_text(repo, ["- src/big.py:10-12 - `line 11` - x"])
+    assert (repo / ".castor" / "packs" / ".gitignore").read_text() == "*\n"
+
+
+def test_pack_evicts_old_packs(repo, monkeypatch):
+    _numbered_file(repo)
+    folder = repo / ".castor" / "packs"
+    folder.mkdir(parents=True)
+    for name, days in (("20261101-000000-aaaaaa.md", 8), ("recent.md", 1)):
+        (folder / name).write_text("old")
+        aged = time.time() - days * 86400
+        os.utime(folder / name, (aged, aged))
+    _scout_text(repo, ["- src/big.py:10-12 - `line 11` - x"])
+    names = [path.name for path in _packs(repo)]
+    assert len(names) == 2 and "recent.md" in names
+    assert "20261101-000000-aaaaaa.md" not in names
+    monkeypatch.setattr(server, "NIM_PACK_KEEP", 2)
+    _scout_text(repo, ["- src/big.py:10-12 - `line 11` - x"])
+    assert len(_packs(repo)) == 2 and "recent.md" not in [
+        path.name for path in _packs(repo)
+    ]
+
+
+def test_inline_text_follows_the_answer(repo):
+    _numbered_file(repo)
+    added = _scout_text(
+        repo, ["- src/big.py:10-12 - `line 11` - the middle"], "inline"
+    )
+    assert (
+        added.startswith("\n\n[text: 1 of 1 ranges, 7 lines, about ")
+        and "as Read prints it" in added
+    )
+    assert added.endswith("    14\tline 14")
+    assert "## src/big.py:8-14 (of 200 lines)\nwhy: the middle\n" in added
+    assert not (repo / ".castor").exists()
+
+
+def test_inline_text_says_when_nothing_could_be_added(repo):
+    added = _scout_text(repo, ["- src/blob.bin:1 - `T` - a blob"], "inline")
+    assert added == (
+        "\n[text not added: no range could be held (1 not readable)]"
+    )
+
+
+def test_agent_does_not_list_the_castor_folder(repo):
+    _numbered_file(repo)
+    _scout_text(repo, ["- src/big.py:10-12 - `line 11` - x"])
+    listed = server._agent_run_tool(repo, "list_dir", {"path": "."})
+    assert "src" in listed and ".castor" not in listed
+
+
+def _scout_reply(monkeypatch, answer):
+    def fake(task, cwd, model=None, max_steps=None, max_tokens=None):
+        return answer
+
+    monkeypatch.setattr(server, "_dispatch_nim_agent", fake)
+
+
+def test_scout_writes_a_pack_when_asked(repo, monkeypatch):
+    _numbered_file(repo)
+    _scout_reply(monkeypatch, "- src/big.py:10-12 - `line 11` - x")
+    plain = _tool(server.nim_scout)("where?", str(repo))
+    assert plain == "- src/big.py:10-12 - `line 11` - x"
+    out = _tool(server.nim_scout)("where?", str(repo), text="file")
+    assert "[pack: .castor/packs/" in out and len(_packs(repo)) == 1
+    assert "task: where?\n" in _packs(repo)[0].read_text()
+
+
+def test_scout_text_budget_reaches_the_builder(repo, monkeypatch):
+    _numbered_file(repo, "src/wide.py", count=120, width=60)
+    _scout_reply(monkeypatch, "- src/wide.py:1-100 - `line 50` - big")
+    scout = _tool(server.nim_scout)
+    small = scout("q", str(repo), text="inline", text_tokens=1000)
+    assert "[text not added: no range could be held (1 over budget)]" in small
+    assert "100 of" not in small
+    roomy = scout("q", str(repo), text="inline", text_tokens=4000)
+    assert "[text: 1 of 1 ranges, 102 lines" in roomy
+
+
+def test_scout_rejects_an_unknown_text_mode(repo, captured):
+    out = _tool(server.nim_scout)("q", str(repo), text="pasted")
+    assert out.startswith("[Error: text must be") and captured == []
+    started = _tool(server.nim_scout_start)("q", str(repo), text="pasted")
+    assert started.startswith("[Error: text must be") and captured == []
+
+
+def test_scout_start_adds_the_text_in_the_job(repo, monkeypatch):
+    _numbered_file(repo)
+    _scout_reply(monkeypatch, "- src/big.py:10-12 - `line 11` - x")
+    started = _tool(server.nim_scout_start)("q", str(repo), text="inline")
+    out = _poll_until_done(_job_id(started))
+    assert out.startswith("- src/big.py:10-12") and "    11\tline 11" in out
+
+
 # --- explain row -------------------------------------------------------------
 
 

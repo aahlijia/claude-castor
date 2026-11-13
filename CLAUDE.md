@@ -74,6 +74,7 @@ every `@mcp.tool()` on the shared `mcp` object, then runs it. The code:
 | `castor/nim/paths.py` | Agent path confinement |
 | `castor/nim/edit_tools.py` | The edit store and `propose_edit` / `drop_edit` tools the agent loop offers |
 | `castor/nim/agent.py` | The read-only tool loop, dekko tools, citation checks, `nim_agent` |
+| `castor/nim/pack.py` | Brief packs: the text of the ranges a scout answer cites, inline or as a pack file |
 | `castor/nim/roles.py` | Scout, first-pass review, log triage |
 | `castor/nim/explain.py` | `nim_explain_row` |
 | `castor/nim/edit.py` | `nim_edit` (gated by `CASTOR_NIM_EDIT=1`) |
