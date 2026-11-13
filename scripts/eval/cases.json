@@ -152,6 +152,15 @@
     "id": "model-assert",
     "must": true,
     "window": 2,
+    "keywords": [
+     "test_default_model_is_old"
+    ],
+    "cause_lines": [
+     [
+      128,
+      135
+     ]
+    ],
     "locations": [
      {
       "file": "pytest.log",
@@ -173,6 +182,15 @@
     "id": "json-decode",
     "must": true,
     "window": 2,
+    "keywords": [
+     "test_parse_config"
+    ],
+    "cause_lines": [
+     [
+      138,
+      168
+     ]
+    ],
     "locations": [
      {
       "file": "pytest.log",
@@ -200,6 +218,10 @@
    {
     "id": "warning",
     "window": 2,
+    "keywords": [
+     "CallSpec",
+     "warning"
+    ],
     "locations": [
      {
       "file": "pytest.log",
@@ -213,6 +235,9 @@
    {
     "id": "summary-counts",
     "window": 1,
+    "keywords": [
+     "114"
+    ],
     "locations": [
      {
       "file": "pytest.log",
