@@ -23,6 +23,7 @@ from castor.logs import (
     _row_for_line,
     _row_reason,
     _rows_json,
+    _states_totals,
     _verdict_rows,
     _verdict_totals,
 )
@@ -219,7 +220,8 @@ log, one line at most, nothing added. Castor checks it and drops any that is
 not on line N. Evidence is either:
 - the words of a verdict row after its name that say why it missed, with N
   that row's own line. Its name and a trailing "| at:" location are not
-  evidence; or
+  evidence, nor is a reason the log cut off with "...": for that one, cite
+  the line that shows the whole error; or
 - a different line that shows what went wrong, with N that line's number.
 If no line shows why, write "cause not shown" in place of "line N: EVIDENCE".
 An empty cause beats a plausible one: never name a mechanism the log does not
@@ -944,15 +946,24 @@ def _cause_evidence(
     return None
 
 
+# How a log marks a reason it cut short.
+_CUT_OFF_MARKS = ("...", "…")
+
+
 def _row_reason_part(quote: str, row: VerdictRow, log: _TriageLog) -> str:
     """The part of a quote of a row's line that is the row's reason.
 
     Models quote the whole verdict line, status and name included; only
     the words of its stated reason count. "" when the quote is not on the
-    line or misses the reason.
+    line or misses the reason, and when the log cut the reason off (pytest
+    clips its summary to "AssertionEr..."): a fragment states no reason,
+    and the full error is on another line.
     """
     line = _squeeze(log.lines[row.line - 1])
     reason = _squeeze(_row_reason(row, log.fmt))
+    if reason.endswith(_CUT_OFF_MARKS):
+        return ""
+
     if quote in reason:
         return quote
     start, at = line.rfind(reason), line.find(quote)
@@ -965,6 +976,13 @@ def _row_reason_part(quote: str, row: VerdictRow, log: _TriageLog) -> str:
 def _cites_case_stamp(log_line: int, log: list[str], fmt: LogFormat) -> bool:
     """True when a cited 1-based line of the log is a stamp line."""
     return 0 < log_line <= len(log) and _is_case_stamp(log[log_line - 1], fmt)
+
+
+def _cites_totals(log_line: int, log: _TriageLog) -> bool:
+    """True when a cited 1-based line of the log is its totals line."""
+    return log.holds(log_line) and _states_totals(
+        log.lines[log_line - 1], log.fmt
+    )
 
 
 def _triage_failure(item: dict, number: int, log: _TriageLog) -> dict:
@@ -990,7 +1008,8 @@ def _triage_failures(
 
     An item citing an `@case` stamp is dropped: the stamp's verdict line is
     the same failure. So is a second item for one line, which is how a row
-    and its summary copy would otherwise both be listed.
+    and its summary copy would otherwise both be listed, and an item
+    citing the totals line, which counts the failures and is not one.
     """
     failures = []
     seen: set[int] = set()
@@ -1000,6 +1019,8 @@ def _triage_failures(
             continue
         number = log.inline(item["log_line"])
         if number in seen or _cites_case_stamp(number, log.lines, log.fmt):
+            continue
+        if _cites_totals(number, log):
             continue
         seen.add(number)
         failures.append(_triage_failure(item, number, log))
@@ -1041,11 +1062,18 @@ def _triage_json(
 
 
 def _triage_text_line(text: str, label: str, log: _TriageLog) -> str:
-    """One answer line, its cause replaced when the log does not back it."""
+    """One answer line, its cause replaced when the log does not back it.
+
+    A line about the log's totals is not a failure with a cause, so it is
+    left as written.
+    """
     item = _triage_item(text, label)
     if item is None:
         return text
     number = log.inline(item["log_line"])
+    if _cites_totals(number, log):
+        return text
+
     row = _row_for_line(log.rows, number)
     if _cause_evidence(item, number, row, log) is not None:
         return text

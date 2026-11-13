@@ -4844,6 +4844,94 @@ def test_triage_json_hit_cannot_be_its_own_evidence(stub, repo):
     assert out["failures"][0]["cause_shown"] is False
 
 
+def _pytest_summary(clipped: str) -> list[str]:
+    return [
+        "E   AssertionError: assert 'a' == 'b'",  # 1
+        f"FAILED tests/test_x.py::test_a - AssertionEr{clipped}",  # 2
+        "FAILED tests/test_x.py::test_b - ValueError: bad port",  # 3
+    ]
+
+
+@pytest.mark.parametrize("clipped", ["...", "…"])
+def test_triage_json_drops_a_row_reason_the_log_cut_off(stub, repo, clipped):
+    log = _pytest_summary(clipped)
+    out = _triage_json(
+        stub,
+        repo,
+        f"failed\n- run.log:2 - test_a failed - line 2: {log[1]}",
+        log=log,
+    )
+    f = out["failures"][0]
+    assert f["cause_hint"] == "" and f["cause_shown"] is False
+    assert f["cause_source"] is None and f["cause_line"] is None
+
+
+def test_triage_json_keeps_a_whole_pytest_row_reason(stub, repo):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:3 - test_b failed - line 3: ValueError: bad port",
+        log=_pytest_summary("..."),
+    )
+    f = out["failures"][0]
+    assert f["cause_hint"] == "ValueError: bad port"
+    assert f["cause_source"] == "row" and f["cause_line"] == 3
+
+
+def test_triage_json_takes_the_full_error_for_a_cut_off_row(stub, repo):
+    log = _pytest_summary("...")
+    out = _triage_json(
+        stub,
+        repo,
+        f"failed\n- run.log:2 - test_a failed - line 1: {log[0]}",
+        log=log,
+    )
+    f = out["failures"][0]
+    assert f["cause_source"] == "log" and f["cause_line"] == 1
+
+
+def test_triage_text_says_cause_not_shown_for_a_cut_off_reason(stub, repo):
+    log = _pytest_summary("...")
+    (repo / "run.log").write_text("\n".join(log) + "\n")
+    answer = f"failed\n- run.log:2 - test_a failed - line 2: {log[1]}"
+    stub.queue.append((200, {}, _completion(answer)))
+    out = _tool(server.nim_triage_log)(str(repo), "run.log")
+    assert "run.log:2 - test_a failed - cause not shown" in out
+    assert "AssertionEr" not in out
+
+
+_PYTEST_TOTALS = "===== 2 failed, 3 passed in 0.10s ====="
+
+
+@pytest.mark.parametrize(
+    ("log", "totals"),
+    [
+        ([*_pytest_summary("..."), _PYTEST_TOTALS], 4),
+        (_guns_log(), 16),
+    ],
+)
+def test_triage_json_drops_an_item_citing_the_totals_line(
+    stub, repo, log, totals
+):
+    out = _triage_json(
+        stub,
+        repo,
+        "failed\n- run.log:2 - a row - cause not shown\n"
+        f"- run.log:{totals} - totals - line {totals}: {log[totals - 1]}",
+        log=log,
+    )
+    assert [f["log_line"] for f in out["failures"]] == [2]
+
+
+def test_triage_text_leaves_a_totals_line_as_written(stub, repo):
+    log = [*_pytest_summary("..."), _PYTEST_TOTALS]
+    (repo / "run.log").write_text("\n".join(log) + "\n")
+    totals = f"- run.log:4 - totals - line 4: {_PYTEST_TOTALS}"
+    stub.queue.append((200, {}, _completion(f"failed\n{totals}")))
+    out = _tool(server.nim_triage_log)(str(repo), "run.log")
+    assert totals in out and "cause not shown" not in out
+
+
 def test_triage_json_says_what_the_line_check_means(stub, repo):
     out = _triage_json(
         stub,
@@ -4917,6 +5005,13 @@ def test_triage_prompt_binds_causes_to_evidence(repo):
     assert error is None
     assert "line N:" in task and "copied exactly" in task
     assert "likely cause" not in task
+
+
+def test_triage_prompt_sends_a_cut_off_reason_to_the_full_error(repo):
+    (repo / "run.log").write_text("\n".join(_pytest_summary("...")) + "\n")
+    task, _, error, _ = server._triage_task(str(repo), "run.log", None)
+    assert error is None
+    assert 'cut off with "..."' in task and "whole error" in task
 
 
 def test_triage_json_rate_limit_error(stub, repo, monkeypatch):

@@ -363,7 +363,10 @@ copied from line N>`, and Castor keeps the cause only when that text is on
 line N and is either the row's stated reason (the words after its name, not
 its name or the `| at:` location: `cause_source` "row") or a different line
 (`cause_source` "log"). Anything else becomes `cause_hint` "" with
-`cause_shown` false, and text mode prints "cause not shown". So `cause_hint`
+`cause_shown` false, and text mode prints "cause not shown". A reason the log
+cut off with "..." (pytest clips its summary to `AssertionEr...`) is not a
+stated reason, so the cause must be the line that shows the whole error. An
+item that cites the totals line is left out of `failures`. So `cause_hint`
 is always the log's own words, never the model's. A "row" cause only repeats
 the row's detail; a "log" cause proves where the text is, not that it
 explains the failure, so read that line before acting on it. `line_exists`
