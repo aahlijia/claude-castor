@@ -4536,7 +4536,10 @@ def _triage_json(stub, repo, answer, name="run.log", log=None):
     if log is not None:
         (repo / name).write_text("\n".join(log) + "\n")
     stub.queue.append((200, {}, _completion(answer)))
-    out = _tool(server.nim_triage_log)(str(repo), name, format="json")
+    # deep: these tests read an agent's answer, whatever the rows state.
+    out = _tool(server.nim_triage_log)(
+        str(repo), name, format="json", deep=True
+    )
     return json.loads(out)
 
 
@@ -5136,7 +5139,7 @@ def test_triage_text_replaces_an_unbacked_cause(stub, repo):
             ),
         )
     )
-    out = _tool(server.nim_triage_log)(str(repo), "run.log")
+    out = _tool(server.nim_triage_log)(str(repo), "run.log", deep=True)
     assert "registration" not in out
     assert "run.log:2 - T2 - cause not shown" in out
     assert "run.log:7 - T5 - line 5: fallen=1 fellany=1" in out
@@ -5215,6 +5218,181 @@ def test_triage_text_default_unchanged(captured, repo):
     (repo / "run.log").write_text("FAIL x\n")
     assert _tool(server.nim_triage_log)(str(repo), "run.log") == "ok"
     assert len(captured) == 1
+
+
+# --- triage from the log's own rows ------------------------------------------
+
+_BILLED = "billed twice, want once"
+_NO_ID = "no id read before the feed"
+
+
+def _stated_log(extra=()):
+    """A suite log whose two failing rows each state a whole reason."""
+    return _verdict_log(
+        [
+            ("PASS", "test standard", "50 ms each way"),
+            ("FAIL", "tops: x", _BILLED),
+            ("NOT ASSESSED", "tops: y", _NO_ID),
+            *extra,
+            ("total 3, fail 1, not assessed 1", None),
+        ]
+    )
+
+
+def _answering_rows(lines):
+    log = server._TriageLog.read(lines, server.DEFAULT_LOG_FORMAT)
+    return server._rows_that_answer(log)
+
+
+def test_rows_answer_when_every_failing_row_states_its_reason():
+    rows = _answering_rows(_stated_log())
+    assert [(r.status, r.name) for r in rows] == [
+        ("FAIL", "tops: x"),
+        ("NOT ASSESSED", "tops: y"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [("FAIL", "tops: z", "")],
+        [("FAIL", "tops: z", "AssertionEr...")],
+        [("FAIL", "tops: z", "short")],
+        [("Traceback (most recent call last):", None)],
+        [("ERROR: socket closed by the host", None)],
+        [("PASS", "tops: z", "no ERROR line seen")],
+    ],
+    ids=[
+        "no reason",
+        "cut-off reason",
+        "reason too short",
+        "traceback",
+        "error line",
+        "marker on a passing row",
+    ],
+)
+def test_rows_do_not_answer_when_the_log_holds_more(extra):
+    assert _answering_rows(_stated_log(extra)) is None
+
+
+def test_rows_do_not_answer_when_a_trial_line_is_a_marker_hit():
+    lines = _verdict_log(
+        [
+            ("  trial 1: ERROR no hit registered", None),
+            ("FAIL", "tops: x", _BILLED),
+        ]
+    )
+    assert _answering_rows(lines) is None
+
+
+def test_rows_do_not_answer_a_log_with_no_failing_row():
+    lines = _verdict_log([("PASS", "test standard", "50 ms each way")])
+    assert _answering_rows(lines) is None
+
+
+def _write_stated_log(repo, lines=None):
+    (repo / "run.log").write_text("\n".join(lines or _stated_log()) + "\n")
+
+
+def _row_failure(name, status, line, reason):
+    return {
+        "row": name,
+        "log_line": line,
+        "line_exists": True,
+        "what": f"{status} {name}",
+        "cause_hint": reason,
+        "cause_shown": True,
+        "cause_source": "row",
+        "cause_line": line,
+    }
+
+
+_STATED_FAILURES = [
+    _row_failure("tops: x", "FAIL", 3, _BILLED),
+    _row_failure("tops: y", "NOT ASSESSED", 5, _NO_ID),
+]
+
+_ROWS_FOOTER = (
+    "[castor: read from the log's own rows, no NIM request; "
+    "deep=True asks the agent]"
+)
+
+
+def test_triage_json_reads_stated_rows_without_a_request(stub, repo):
+    _write_stated_log(repo)
+    out = json.loads(
+        _tool(server.nim_triage_log)(str(repo), "run.log", format="json")
+    )
+    assert stub.posts() == []
+    assert out["log"] == "run.log" and out["verdict"] is None
+    assert out["totals"] == {"total": 3, "fail": 1, "not_assessed": 1}
+    assert [r["row"] for r in out["rows"]] == ["tops: x", "tops: y"]
+    assert out["failures"] == _STATED_FAILURES
+    assert out["markers"]["FAIL"] == 1 and out["markers"]["NOT ASSESSED"] == 1
+    assert out["agent"] == {"model": None, "steps": 0, "seconds": 0}
+
+
+def test_triage_text_reads_stated_rows_without_a_request(stub, repo):
+    _write_stated_log(repo)
+    out = _tool(server.nim_triage_log)(str(repo), "run.log")
+    assert stub.posts() == []
+    assert out.splitlines() == [
+        "Verdict: failed (the log's totals: total 3, fail 1, not assessed 1)",
+        f"run.log:3 - FAIL tops: x - line 3: {_BILLED}",
+        f"run.log:5 - NOT ASSESSED tops: y - line 5: {_NO_ID}",
+        _ROWS_FOOTER,
+    ]
+
+
+def test_triage_text_counts_the_rows_of_a_log_without_totals(stub, repo):
+    _write_stated_log(
+        repo, _verdict_log([("NOT ASSESSED", "tops: y", _NO_ID)])
+    )
+    first = _tool(server.nim_triage_log)(str(repo), "run.log").splitlines()[0]
+    assert first == (
+        "Verdict: inconclusive (counted from the log's rows: "
+        "fail 0, not assessed 1)"
+    )
+
+
+def test_rows_text_reads_back_as_the_same_failures(stub, repo):
+    _write_stated_log(repo)
+    text = _tool(server.nim_triage_log)(str(repo), "run.log")
+    back = server._triage_json(text, {}, "run.log", _stated_log())
+    assert back["failures"] == _STATED_FAILURES and back["verdict"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"deep": True}, {"question": "did the soak finish?"}]
+)
+def test_triage_asks_the_agent_when_told_to(captured, repo, kwargs):
+    _write_stated_log(repo)
+    out = _tool(server.nim_triage_log)(str(repo), "run.log", **kwargs)
+    assert out == "ok" and len(captured) == 1
+
+
+def test_triage_deep_env_always_asks_the_agent(captured, repo, monkeypatch):
+    monkeypatch.setenv("CASTOR_NIM_TRIAGE_DEEP", "1")
+    _write_stated_log(repo)
+    assert _tool(server.nim_triage_log)(str(repo), "run.log") == "ok"
+    assert len(captured) == 1
+
+
+def test_triage_start_reads_stated_rows_without_a_request(stub, repo):
+    _write_stated_log(repo)
+    started = _tool(server.nim_triage_log_start)(
+        str(repo), "run.log", format="json"
+    )
+    out = json.loads(_poll_until_done(_job_id(started)))
+    assert stub.posts() == [] and out["failures"] == _STATED_FAILURES
+
+
+def test_triage_start_deep_asks_the_agent(captured, repo):
+    _write_stated_log(repo)
+    started = _tool(server.nim_triage_log_start)(
+        str(repo), "run.log", deep=True
+    )
+    assert _poll_until_done(_job_id(started)) == "ok" and len(captured) == 1
 
 
 # --- explain row -------------------------------------------------------------

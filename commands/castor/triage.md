@@ -8,5 +8,8 @@ Call `nim_triage_log` with:
 - `cwd`: the absolute path of the current working directory
 - `log_path`: the log file ($ARGUMENTS), which must be inside `cwd`
 - `question`: optional, one extra thing to determine (for example whether a run finished)
+- `deep`: optional, `true` to ask the agent even when the log's own rows answer
 
 It returns a verdict line and `log:LINE - what failed - line N: evidence` items, so you never read the log. The evidence is text Castor found on line N of the log; when the agent gave none it could back, the item says "cause not shown". Finding the text proves where it is, not that it explains the failure, so read line N before acting on a cause.
+
+When every failing row states its own reason and nothing else in the log is a failure marker, Castor answers from those rows at once, with no NIM request, and the answer ends with a `[castor: ...]` line. Pass `deep: true` when a row's reason is a dump of state and its trial lines may say more.

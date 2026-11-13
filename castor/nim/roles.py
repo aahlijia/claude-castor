@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -640,13 +641,17 @@ def nim_triage_log(
     model: str | None = None,
     max_steps: int | None = None,
     format: str = "text",  # noqa: A002 (the tool arg is named format)
+    deep: bool = False,
 ) -> str:
-    """Boil a long log down to its failures with a free NIM agent.
+    """Boil a long log down to its failures, asking a NIM agent if needed.
 
-    Castor counts the failure markers, collapses repeated hits and hands
-    them to the agent with the log's head and tail; the agent greps only
-    for causes the context lacks, so Claude never reads the log itself.
-    The log must be inside `cwd` and at most 20 MB.
+    When every failing row of the log states its own reason and nothing
+    else in it is a failure marker, Castor answers from those rows at
+    once, with no NIM request. Otherwise Castor counts the failure
+    markers, collapses repeated hits and hands them to a free NIM agent
+    with the log's head and tail; the agent greps only for causes the
+    context lacks, so Claude never reads the log itself. The log must be
+    inside `cwd` and at most 20 MB.
 
     Args:
         cwd: Absolute project root.
@@ -659,6 +664,9 @@ def nim_triage_log(
         format: "text" (default) or "json". JSON is Castor's parse of the
             answer: verdict, the log's FAIL and NOT ASSESSED rows, failures
             with their row and check flags, marker counts and agent stats.
+        deep: Ask the agent even when the log's own rows answer (it may
+            cite a row's trial lines). A `question` always asks the agent,
+            and so does every call when CASTOR_NIM_TRIAGE_DEEP=1.
 
     Returns:
         A verdict line and "log:LINE - what failed - line N: evidence"
@@ -666,7 +674,9 @@ def nim_triage_log(
         replaced any that is not with "cause not shown". It proves where
         the text is, not that it explains the failure. Or a bracketed
         error. In JSON mode, one JSON object (errors are
-        {"error": ..., "message": ...}).
+        {"error": ..., "message": ...}). An answer read from the rows ends
+        with a "[castor: ...]" line; in JSON its `verdict` is null (take
+        it from `totals`) and `agent.steps` is 0.
     """
     if format not in ROLE_FORMATS:
         return ROLE_FORMAT_ERROR
@@ -676,7 +686,8 @@ def nim_triage_log(
     steps = max_steps or NIM_TRIAGE_STEPS
     label = str(log.relative_to(root))
     dispatch = _dispatch_triage_json if format == "json" else _dispatch_triage
-    return dispatch(task, root, model, steps, label, log)
+    rows_first = _rows_first(deep, question)
+    return dispatch(task, root, model, steps, label, log, rows_first)
 
 
 @mcp.tool()
@@ -687,6 +698,7 @@ def nim_triage_log_start(
     model: str | None = None,
     max_steps: int | None = None,
     format: str = "text",  # noqa: A002 (the tool arg is named format)
+    deep: bool = False,
 ) -> str:
     """Start nim_triage_log in the background; collect it with castor_poll.
 
@@ -698,6 +710,8 @@ def nim_triage_log_start(
         max_steps: See nim_triage_log.
         format: See nim_triage_log. A JSON job's response is the JSON
             object, including an error object (the job still reads "done").
+        deep: See nim_triage_log. A log its own rows answer is done by
+            the first poll.
 
     Returns:
         A message with the job id to pass to castor_poll, or a bracketed
@@ -715,6 +729,7 @@ def nim_triage_log_start(
         "max_steps": max_steps or NIM_TRIAGE_STEPS,
         "label": str(log.relative_to(root)),
         "log": log,
+        "rows_first": _rows_first(deep, question),
     }
     dispatch = _dispatch_triage_json if format == "json" else _dispatch_triage
     return _start_agent_job("NIM log triage", kwargs, dispatch)
@@ -1005,6 +1020,15 @@ def _cause_evidence(
 # How a log marks a reason it cut short.
 _CUT_OFF_MARKS = ("...", "…")
 
+# The last line of a text answer Castor read from the log's own rows.
+NIM_TRIAGE_ROWS_FOOTER = (
+    "[castor: read from the log's own rows, no NIM request; "
+    "deep=True asks the agent]"
+)
+
+# The agent stats of an answer no agent wrote.
+_NO_AGENT = {"model": None, "steps": 0, "seconds": 0}
+
 
 def _row_reason_part(quote: str, row: VerdictRow, log: _TriageLog) -> str:
     """The part of a quote of a row's line that is the row's reason.
@@ -1115,16 +1139,33 @@ def _triage_json(
         failure's cause checked against the log (see `_cause_evidence`).
     """
     log = _TriageLog.read(lines, fmt)
-    _, markers = _triage_hits(lines, fmt)
     body = _answer_lines(answer)
+    return _triage_object(
+        label,
+        log,
+        _triage_verdict(body),
+        _triage_failures(body, label, log),
+        {k: stats.get(k) for k in ("model", "steps", "seconds")},
+    )
+
+
+def _triage_object(
+    label: str,
+    log: _TriageLog,
+    verdict: str | None,
+    failures: list[dict],
+    agent: dict,
+) -> dict:
+    """The JSON triage answer: Castor's parse of the log plus a reading."""
+    _, markers = _triage_hits(log.lines, log.fmt)
     return {
         "log": label,
-        "verdict": _triage_verdict(body),
-        "totals": _verdict_totals(lines, fmt),
+        "verdict": verdict,
+        "totals": _verdict_totals(log.lines, log.fmt),
         "rows": _rows_json(log.rows),
-        "failures": _triage_failures(body, label, log),
+        "failures": failures,
         "markers": markers,
-        "agent": {k: stats.get(k) for k in ("model", "steps", "seconds")},
+        "agent": agent,
     }
 
 
@@ -1158,6 +1199,126 @@ def _triage_text(answer: str, label: str, log: _TriageLog) -> str:
     )
 
 
+def _states_whole_reason(row: VerdictRow, fmt: LogFormat) -> bool:
+    """True when a row's own detail says why, and the log did not cut it."""
+    reason = _squeeze(_row_reason(row, fmt))
+    if reason.endswith(_CUT_OFF_MARKS):
+        return False
+
+    return len(reason) >= NIM_TRIAGE_QUOTE_MIN
+
+
+def _rows_that_answer(log: _TriageLog) -> list[VerdictRow] | None:
+    """The failing rows, when the log's own rows answer a triage.
+
+    They do when every failing row states a whole reason and nothing else
+    in the log is a marker hit (the totals line aside). A row with no
+    reason, a reason the log cut off, an error outside the rows or a
+    marker in a row's trial lines all need the agent's reading.
+
+    Returns:
+        The FAIL and NOT ASSESSED rows, or None when the agent is needed
+        (also when the log has no failing row).
+    """
+    failing = [row for row in log.rows if row.status != "PASS"]
+    if not failing:
+        return None
+    if not all(_states_whole_reason(row, log.fmt) for row in failing):
+        return None
+
+    hits, _ = _triage_hits(log.lines, log.fmt)
+    own = {row.line for row in failing}
+    if any(n not in own and not _cites_totals(n, log) for n in hits):
+        return None
+
+    return failing
+
+
+def _rows_first(deep: bool, question: str | None) -> bool:
+    """True when a triage may be answered from the log's own rows.
+
+    Not when the caller wants the agent (`deep`, or a `question` only it
+    can answer), and not when CASTOR_NIM_TRIAGE_DEEP=1 turns this off.
+    """
+    if deep or (question and question.strip()):
+        return False
+
+    return os.environ.get("CASTOR_NIM_TRIAGE_DEEP", "").strip() != "1"
+
+
+def _rows_reading(
+    cwd: str, log: Path
+) -> tuple[_TriageLog, list[VerdictRow]] | None:
+    """The parsed log and its failing rows, when those rows answer it."""
+    lines, fmt = _read_triage_log(cwd, log)
+    parsed = _TriageLog.read(lines, fmt)
+    rows = _rows_that_answer(parsed)
+    return None if rows is None else (parsed, rows)
+
+
+def _row_failure(row: VerdictRow, fmt: LogFormat) -> dict:
+    """A failing row as a failure object; its cause is its own reason."""
+    return {
+        "row": row.name,
+        "log_line": row.line,
+        "line_exists": True,
+        "what": f"{row.status} {row.name}",
+        "cause_hint": _squeeze(_row_reason(row, fmt)),
+        "cause_shown": True,
+        "cause_source": "row",
+        "cause_line": row.line,
+    }
+
+
+def _rows_triage_json(
+    label: str, log: _TriageLog, rows: list[VerdictRow]
+) -> dict:
+    """The JSON answer Castor reads from the rows, with no agent.
+
+    `verdict` is the agent's to state, so it is null here; `totals` gives
+    the verdict, and `agent.steps` 0 says no request was made.
+    """
+    failures = [_row_failure(row, log.fmt) for row in rows]
+    return _triage_object(label, log, None, failures, dict(_NO_AGENT))
+
+
+def _counted_verdict(
+    totals: dict[str, int] | None, rows: list[VerdictRow]
+) -> str:
+    """The verdict line the log's own counts give: its totals, else rows."""
+    if totals is None:
+        fail = sum(1 for row in rows if row.status == "FAIL")
+        counts = {"fail": fail, "not_assessed": len(rows) - fail}
+        source = "counted from the log's rows"
+    else:
+        counts, source = totals, "the log's totals"
+
+    if counts["fail"] > 0:
+        verdict = "failed"
+    elif counts["not_assessed"] > 0:
+        verdict = "inconclusive"
+    else:
+        verdict = "passed"
+
+    numbers = ", ".join(
+        f"{key.replace('_', ' ')} {count}" for key, count in counts.items()
+    )
+    return f"Verdict: {verdict} ({source}: {numbers})"
+
+
+def _rows_triage_text(
+    label: str, log: _TriageLog, rows: list[VerdictRow]
+) -> str:
+    """The text answer Castor reads from the rows, in the agent's layout."""
+    items = [
+        f"{label}:{row.line} - {row.status} {row.name} "
+        f"- line {row.line}: {_squeeze(_row_reason(row, log.fmt))}"
+        for row in rows
+    ]
+    verdict = _counted_verdict(_verdict_totals(log.lines, log.fmt), rows)
+    return "\n".join([verdict, *items, NIM_TRIAGE_ROWS_FOOTER])
+
+
 def _read_triage_log(cwd: str, log: Path) -> tuple[list[str], LogFormat]:
     """The log's lines and the project's log format."""
     data = _read_bytes(log) or b""
@@ -1172,8 +1333,17 @@ def _dispatch_triage(
     max_steps: int | None,
     label: str,
     log: Path,
+    rows_first: bool = False,
 ) -> str:
-    """Run the triage agent and return its answer with causes checked."""
+    """Run the triage agent and return its answer with causes checked.
+
+    With `rows_first`, a log its own rows answer is read by Castor and the
+    agent is not asked.
+    """
+    reading = _rows_reading(cwd, log) if rows_first else None
+    if reading is not None:
+        return _rows_triage_text(label, *reading)
+
     text = _dispatch_nim_agent(task, cwd, model, max_steps)
     if text.startswith("["):
         return text
@@ -1188,8 +1358,19 @@ def _dispatch_triage_json(
     max_steps: int | None,
     label: str,
     log: Path,
+    rows_first: bool = False,
 ) -> str:
-    """Run the triage agent and return its answer as a JSON object string."""
+    """Run the triage agent and return its answer as a JSON object string.
+
+    With `rows_first`, a log its own rows answer is read by Castor and the
+    agent is not asked.
+    """
+    reading = _rows_reading(cwd, log) if rows_first else None
+    if reading is not None:
+        return json.dumps(
+            _rows_triage_json(label, *reading), ensure_ascii=False
+        )
+
     text, stats = _run_nim_agent(task, cwd, model, max_steps)
     if text.startswith("["):
         return json.dumps(_nim_error_json(text), ensure_ascii=False)

@@ -1066,6 +1066,7 @@ def _run_triage(root: Path, log: str) -> dict:
             NIM_TRIAGE_STEPS,
             _dispatch_triage_json,
             _role_bad_input,
+            _rows_first,
             _triage_task,
         )
 
@@ -1074,7 +1075,13 @@ def _run_triage(root: Path, log: str) -> dict:
             return json.loads(_role_bad_input(error, "json"))
         label = str(path.relative_to(cwd))
         text = _dispatch_triage_json(
-            task, cwd, None, NIM_TRIAGE_STEPS, label, path
+            task,
+            cwd,
+            None,
+            NIM_TRIAGE_STEPS,
+            label,
+            path,
+            _rows_first(False, None),
         )
         return json.loads(text)
     except Exception as exc:  # triage is a bonus; the run result stands

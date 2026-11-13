@@ -687,7 +687,7 @@ def test_triage_runs_only_on_fail_or_not_assessed(
     calls = []
     reply = {"value": json.dumps({"verdict": "failed", "rows": []})}
 
-    def fake(task, cwd, model, max_steps, label, log):
+    def fake(task, cwd, model, max_steps, label, log, rows_first):
         calls.append((label, str(log)))
         return reply["value"]
 
@@ -723,6 +723,26 @@ def test_triage_runs_only_on_fail_or_not_assessed(
         "retry_after_s": 5,
         "message": "x",
     }
+
+
+def test_triage_reads_stated_rows_without_the_agent(
+    project, fast, started, monkeypatch
+):
+    def no_agent(*args, **kwargs):
+        raise AssertionError("the agent was asked")
+
+    monkeypatch.setattr(server, "_run_nim_agent", no_agent)
+    reason = "billed twice, want once"
+    (project / "fail.log").write_text(
+        f"{_row('FAIL', 'tops: b', reason)}\n@case 1700000001 FAIL tops: b\n"
+    )
+    _script(project / "t" / "fail.sh", "echo 'log: fail.log'\n")
+    out = _poll_json(
+        _start(project, started, ["t/fail.sh"], triage=True)["run"]
+    )
+    triage = out["triage"]
+    assert triage["agent"]["steps"] == 0 and triage["verdict"] is None
+    assert [f["cause_hint"] for f in triage["failures"]] == [reason]
 
 
 def test_attach_after_finish_leaves_the_result(project, fast, started):

@@ -72,5 +72,7 @@ its own Castor) poll one run, only one watches it.
 `totals`, `rows` (FAIL and NOT ASSESSED rows, from the printed log when it
 resolves inside the root, else from the console), `table` (the last
 `--- verdicts ---` block), `log`, `flags`, `overdue`, `triage` (phase 1's
-triage JSON when a row failed and `triage=True`, or an error object) and
+triage JSON when a row failed and `triage=True`, or an error object; read
+from the log's own rows with no NIM request when each failing row states
+its reason, see `docs/nim.md`) and
 `pid` for `stopped` / `gave_up`.

@@ -361,6 +361,20 @@ it wins when the two disagree. There is no confidence or owner
 field: a self-rated number is not calibrated, and triage reads no code, so it
 cannot say whose bug it is.
 
+Triage answers from the log's own rows when it can. When every FAIL or NOT
+ASSESSED row states a whole reason and nothing else in the log is a failure
+marker, Castor returns those rows at once and makes no NIM request. Each
+`failures` item then has `what` set to the row's status and name and
+`cause_source` "row", `agent.steps` is 0 and `verdict` is null (take it from
+`totals`); the text form states the verdict the totals give and ends with a
+`[castor: ...]` line. Measured on NQC's guns logs (2026-11-13): this covers
+176 of the 180 logs with a failing row. On a sample of 35 of them the agent
+returned the row's own reason for 72 of 78 rows, kept no cause for 4 and
+cited a trial line for 2 (both a "timed out" line just above the row), at a
+median of 21 s a log. Pass `deep=True` when a row's reason is a dump of state
+and its trial lines may say more; a `question` always asks the agent, and
+`CASTOR_NIM_TRIAGE_DEEP=1` on the server turns the shortcut off.
+
 Triage causes are bound to the log. The agent must answer `line N: <text
 copied from line N>`, and Castor keeps the cause only when that text is on
 line N and is either the row's stated reason (the words after its name, not
