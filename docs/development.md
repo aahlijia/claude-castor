@@ -32,6 +32,19 @@
   long it took. It prints counts only (no prompt text, file contents or
   command arguments). Count turns first: on 2026-11-13 a subagent turn re-read
   about 123k tokens, roughly ten times what a 100-line read brings back.
+- To check that scout finds what implementers need (the brief pack's gate),
+  run `uv run --with httpx --with fastmcp python scripts/pack_replay.py
+  --repo PATH [--agent-type NAME] [--limit 20] [--files]`. It rebuilds each
+  recent implementer's task from its transcript (the prompt plus the brief
+  file it names), runs `nim_scout(text="inline")` on the repo as it is now,
+  and reports how many of the tracked files the implementer read before its
+  first edit the pack holds. Reads include `cat`, `head`, `tail`, `sed -n` and
+  `awk` in Bash, since NQC implementers read that way far more than with
+  Read; reads in a deleted lane beside the repo count too. The bar is 60% of
+  files; under 40%, stop. Results go to `~/.cache/claude-castor/pack-replay/`,
+  and `--results FILE` resumes a run or re-reports it with no new requests.
+  It spends free-tier requests and sends each task's text to NVIDIA, as any
+  scout call does.
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands the `castor` package depends on. After an intended
   agy upgrade, update `castor/agy/cli.py`, then refresh with `--update-snapshot`.

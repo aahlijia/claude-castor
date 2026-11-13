@@ -92,7 +92,8 @@ which imports NIM inside the function so runs work without it.
 Tests: `tests/test_agy.py` (agy against a fake subprocess), `tests/test_nim.py`
 (NIM against a local stub server), `tests/test_run.py` (run tier, compare,
 `log_format`), `tests/test_nim_eval.py` (the eval script),
-`tests/test_separation.py` (the import rules). Most read and patch names through
+`tests/test_usage_audit.py` and `tests/test_pack_replay.py` (the transcript
+scripts), `tests/test_separation.py` (the import rules). Most read and patch names through
 `castor._namespace.view()`, so a patch reaches every module that imported the
 name.
 
