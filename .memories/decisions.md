@@ -21,139 +21,36 @@ accepted that; plain trust and settings allow-rules rejected);
 `PRINT_TIMEOUT` stays 300 s (Claude Code's MCP tool timeout is far longer
 and `gemini_index` needs ~2 min; 45 s rejected).
 
-### 2026-11-02: NIM default model is nemotron-3-ultra-550b-a55b
-- **Why:** `meta/llama-3.3-70b-instruct` reached end of life 2026-08-26 and
-  returns 410. Ultra answered live on the free tier, scores highest of the
-  usable models on Artificial Analysis (about 47.7 vs DeepSeek V4.1 Flash 45,
-  GLM and MiniMax 42; sources conflict), and handled tool calls in 2 to 3 s.
-- **Rejected:** Kimi K2.6 (strongest open model but 404 for this account),
-  Nemotron 3 Super (404), DeepSeek V4.1 Flash and gpt-oss-20b (timed out or ran
-  100+ s per step), GLM-5.3-Flash (95 to 116 s per step).
-- **Superseded 2026-11-02:** agent roles moved to Nemotron 3.5 Super first,
-  then plain calls too (see "Plain NIM calls default to Nemotron 3.5 Super").
-
-### 2026-11-02: Several NIM keys rotate; limiter and cooldown are per key
-- **Why:** the limit is account-wide, so more accounts is the only way past
-  40 req/min. Env `NVIDIA_API_KEYS`; a 429 cools only that key and the retry
-  moves to another at once; a 401/402 retires a key for the session unless it is
-  the last usable one (single-key setups keep their normal error).
-- **Rejected:** model fallback chains for throughput (limit is per account, not
-  per model); a global cooldown (one limited key would stall the rest).
-
-### 2026-11-02: nim_agent is read-only; roles are thin wrappers
-- **Why:** NIM has no filesystem, so Castor runs grep/read_range/list_dir for it,
-  confined to `cwd` with secrets and `.git` denied. The bulk-reading savings come
-  first and carry no write risk. Every `path:line` is checked against the files.
-- **Rejected for now:** write access. The audit in the NQC repo
-  (`docs/drafts/fable-token-usage.md`) puts 56% of cost in implementers, so
-  writes could save more, but rework can erase it and Unity work needs the Editor.
-  Plan: patch-file output only, Editor-free tasks only, after the review pilot.
-- **Rejected:** replacing the agy first-pass review with `nim_first_pass_review`
-  before measuring its hit rate.
-
-### 2026-11-02: Agent reasoning budgets are 1024 per tool step, 6144 for the answer
-- **Why:** Nemotron 3 Ultra's reasoning is unbounded: tool steps sometimes ran
-  4,000 tokens (80 s) and one answer outran the 180 s timeout. Tool steps only
-  pick the next lookup. On the same review request, a 2,048 or 0 budget made the
-  answer claim a false bug that the unbounded run avoided, so the answer keeps
-  6,144. Sent as `reasoning_budget`, only to `nvidia/nemotron*` models.
-- **Rejected:** thinking off everywhere (11 s vs 79 s, but worse reviews);
-  raising timeouts instead (slower, still unbounded).
-
-### 2026-11-02: No self-verification pass for nim_first_pass_review
-- **Why:** asked to verify a review's findings against the code, Nemotron
-  refuted 1 of 5 known-false findings and "confirmed" a deadlock that isn't one
-  (a lock taken twice in sequence). Across 3 reviews after the prompt fixes,
-  roughly half the findings were false and severity ran high. The review stays
-  a lead generator that Claude must verify.
-- **Rejected:** more prompt rules (the concrete-input format and severity rules
-  were only partly followed).
-
-### 2026-11-02: nim_first_pass_review is an occasional extra, not a pipeline step
-- **Why:** the NQC pilot ran it on 5 reviewed diffs (game logic, networked
-  code, harness checks, one mostly clean diff) with an NQC focus block. 25
-  leads: 5 confirmed, all repeats of Claude findings (Minor or Important); 12
-  refuted; 8 n/a. It caught 0 of 3 known findings: it called C449's test that
-  can't pass fine, called bagsync.sh's fail-open check correct (the opposite of
-  the bug), and missed a shared-stair-flight Critical while raising a false
-  one. The focus block didn't stop false Criticals. NQC removed the first pass
-  from its overnight workflow and kept NIM for log triage and summaries.
-  Nemotron 3 Ultra is the strongest model these keys can call, so retry only
-  with a stronger model.
-- **Rejected:** finishing the planned 15 reviews (each refuted lead costs
-  reviewer tokens, and 5 reviews already showed nothing unique); more prompt
-  rules (tried in castor before, partly followed).
-
-### 2026-11-02: Agent roles default to Nemotron 3.5 Super; no split-model default
-- **Why:** scored with `scripts/nim_eval.py` (3 castor cases plus the 5 NQC
-  pilot diffs, 15 NQC runs per model). On NQC, Ultra and 3.5 Super had the same
-  lead precision (14%), recall 17% and 12%, and 3 of 12 must-catch hits each, but
-  3.5 Super took 80 s per review against 203 s. Both got full marks on the
-  castor scout, triage and planted-bug cases; 3.5 Super did them in 10 to 30 s.
-  A set `CASTOR_NIM_MODEL` is still followed (self-hosted setups).
-- **Rejected:** Mistral Large 4 (every request timed out at 180 s on the free
-  tier); fast step model plus Ultra answer (Lightning or 3.5 Super steps scored
-  12 to 13% precision, no better, and still slow); deciding on one run (3.5
-  Super first looked twice as precise as Ultra, then matched it over three).
-
-### 2026-11-02: Reviews get Castor-built context and quote-checked citations
-- **Why:** against the old code on the same NQC diffs (Ultra), recall rose from
-  10% to 17%, must-catch hits from 0 of 4 to 3 of 12, failures from 1 in 5 to 0
-  in 15, and time fell from 336 s to 203 s (80 s on 3.5 Super). Precision did not
-  move (12% to 14%): the model still invents bugs on real diffs, so the first
-  pass stays an occasional extra. Quote checks catch wrong-line citations (about
-  1 in 4 quotes on NQC answers did not match their line).
-- **Rejected:** narrow cross-checked questions (not worth building until the
-  remaining problem is shown to be precision the model could fix); caching role
-  results (repeat runs are rare).
-
-### 2026-11-02: Plain NIM calls default to Nemotron 3.5 Super
-- **Why:** `scripts/nim_eval.py` plain roles (3 explain cases with known
-  causes, 3 docs with known key points; 2 runs each, response cache off).
-  Super recall 44/48, must 16/18; Ultra 39/48, must 14/18 (missed GEMINI.md's
-  "NIM is not an agent" and CLAUDE.md's "agy replaces the Gemini CLI" in both
-  runs). The decision rule (keep Ultra only if its recall is higher on both
-  roles by more than its own run spread) did not hold on either role.
-  Results: `~/.cache/claude-castor/eval/results-20261102-212138.json`.
-- **Speed is load-dependent, not settled:** in that eval (21:00 local) Super
-  averaged 75 s per call against Ultra's 16 s. The day's usage log says that
-  hour was the exception: Super ran 127 tokens/s at 19:00 and 93 at 20:00, then
-  29 at 21:00; Ultra ran 35 to 59 all day. GEMINI.md tells Claude to pass Ultra
-  when Super is crawling.
-- **Rejected:** keeping Ultra on that hour's latency alone (one hour against a
-  day of logs showing Super faster per token).
-
-### 2026-11-02: Review steps stay at 8
-- **Why:** the nim-performance design's gate for cutting `NIM_REVIEW_STEPS`
-  to 4 was "must-catch must not drop". At 4 steps (2 runs, 3.5 Super) NQC
-  must-catch fell from 2/8 to 0/8, though lead precision rose from 9% to 17%
-  (both scored with SCORING_VERSION 2; the 8-step file was rescored).
-  Time could not be judged: NIM was slow that hour (168 s median at 4 steps
-  vs 70 s at 8 earlier). Castor's planted-bug case was 2/2 both ways.
-  Results: `results-20261102-213502.json` (4 steps),
-  `results-20261102-200125.json` (8 steps).
-- **Rejected:** 4 steps on precision alone (two runs is noise-level, and a
-  missed must is the costlier error); re-running until it passes.
-
-
-### 2026-11-02: Log triage follows the log's own verdict when it has one
-- **Why:** the real NQC hallway log has 258 harness Tracebacks but its table
-  says `fail 0`; the design's marker rule ("failed" on any hard marker) called
-  it failed. Now the log's verdict or totals decide; otherwise "failed" on hard
-  markers, "inconclusive" when only NOT ASSESSED matched. Both live runs gave
-  "inconclusive" with all 7 NOT ASSESSED rows.
-- **Rejected:** the design's marker-only verdict.
-
-### 2026-11-02: Summarize parts are 120k chars on their own thread pool
-- **Why:** at the design's 240k chars, each part's summary covered only its
-  first third. Parts run on a 4-worker pool of their own so a full job pool
-  can't block them. Summary requests get 6,144 tokens with 1,024 thinking (at
-  4,096 the JSON was cut off).
-- **Rejected:** 240k parts; running parts on the shared job pool.
-
-### 2026-11-02: Unity skip dirs are NIM-agent-only
-- **Why:** the design put `Library`, `Temp`, `obj` in the shared `SKIP_DIRS`,
-  but it also ruled out agy-path changes. They live in `NIM_AGENT_SKIP_DIRS`.
+2026-11-02 (NIM backend): the first default model was Nemotron 3 Ultra after
+`meta/llama-3.3-70b-instruct` reached end of life (Kimi K2.6 and Nemotron 3
+Super return 404 for this account; DeepSeek V4.1 Flash, gpt-oss-20b and
+GLM-5.3-Flash were too slow). Agent roles, then plain calls, moved to Nemotron
+3.5 Super the same day on `scripts/nim_eval.py` scores (same precision and
+must-catch as Ultra at 80 s against 203 s per review; plain recall 44/48
+against 39/48). Speed is load-dependent by the hour, so GEMINI.md says to pass
+Ultra when Super crawls; Mistral Large 4 and split step/answer models were
+rejected. Several keys rotate through `NVIDIA_API_KEYS` with the limiter and
+cooldown per key (the 40 req/min limit is per account; model fallback chains
+and a global cooldown rejected). `nim_agent` is read-only (Castor runs
+grep/read_range/list_dir confined to `cwd`, secrets and `.git` denied, every
+`path:line` checked) and roles are thin wrappers; write access was deferred.
+Reasoning budgets are 1,024 per tool step and 6,144 for the answer, sent only
+to `nvidia/nemotron*` (its reasoning is unbounded; a 2,048 or 0 answer budget
+produced a false bug; thinking off everywhere rejected).
+`nim_first_pass_review` has no self-verification pass (Nemotron refuted 1 of 5
+known-false findings) and is an occasional extra, not a pipeline step: the NQC
+pilot on 5 diffs gave 25 leads, 5 confirmed (all repeats of Claude findings),
+12 refuted, 0 of 3 known findings caught, so NQC dropped it from its overnight
+workflow; retry only with a stronger model. Reviews get Castor-built context
+and quote-checked citations (recall 10% to 17%, must-catch 0 of 4 to 3 of 12,
+precision unchanged near 14%). Review steps stay at 8 (at 4, must-catch fell
+from 2/8 to 0/8). Log triage follows the log's own verdict or totals when it
+has one, else "failed" on hard markers and "inconclusive" when only NOT
+ASSESSED matched (the NQC hallway log has 258 harness Tracebacks under `fail
+0`). Summarize parts are 120k chars on their own 4-worker pool with 6,144
+answer tokens (240k parts covered only their first third). Unity skip dirs
+(`Library`, `Temp`, `obj`) live in `NIM_AGENT_SKIP_DIRS`, not the shared
+`SKIP_DIRS`.
 
 ### 2026-11-03: dekko agent tools stay on by default (0b gate passed)
 - **Why:** `scripts/nim_eval.py`, Nemotron 3.5 Super, scout/review/triage cases
@@ -527,3 +424,50 @@ and `gemini_index` needs ~2 min; 45 s rejected).
 - **Rejected:** a prompt nudge to prefer trial lines (Super then cited the line just
   above each row, e.g. `wait_until:`); a deterministic row-detail fallback (duplicates
   `rows[].detail`). Super never cited NQC's line 387 for T5 in 7 live runs.
+- **Scored 2026-11-13:** `nim_eval` on `castor-triage-pytest`, Super, 9 runs
+  (`results-20261113-072644.json`, `results-20261113-072845.json`). Citation scores
+  match the old baseline (4/4 leads, must 2/2, 2.3 steps). Checked by hand through
+  `_triage_json`: verdict, counts and warning right 9/9; 36 items, 30 causes kept, none
+  invented; 16 on a real cause line (130, 139, 166), 14 are pytest's clipped summary
+  reason ("AssertionEr", "json.decoder.JSONDe", source "row"), 6 dropped. In 3 of 9
+  runs the clipped reason was the only cause shown. The 6 pre-change Super runs
+  paraphrased but pointed at the real cause lines in 5 of 6.
+
+### 2026-11-13: nim_eval scores the causes triage keeps (scoring version 7) (user)
+- **Why:** the triage score could not see the 5355822 change. It read citations only
+  at the start of a line (`warning` never scored, `summary-counts` scored by proximity),
+  ignored the checked causes and ran triage with 8 steps.
+- **How:** a triage lead cites its log anywhere in the line, as `path:line` or a bare
+  "line N". A triage row carries `causes` (items, kept, row, log), `cause_hit` and
+  `cause_known`, from the server's own `_triage_json`, scored against `cause_lines` in
+  the case; printed per run and as a second summary line. `--rescore` adds it to saved
+  runs. Triage uses `NIM_TRIAGE_STEPS`. (a380b76, 953de10)
+- **Rejected:** adding keywords alone (they lowered the score without making it truer).
+
+### 2026-11-13: Triage on a pytest log: one row per failure, with its error (user)
+- **Why:** pytest clips its summary to `AssertionEr...`, which passed as a "row" cause
+  (the only cause in 4 of 12 runs). The real error sat far above, reachable only by
+  grep, and each failure was listed twice (`-v` progress line and summary line).
+- **How:** a row reason ending in "..." or "…" is not evidence, and the prompt sends
+  the agent to the whole error (5526bec). A pytest row gets its part of the FAILURES
+  output as its block, for triage only (`_triage_rows`; `_verdict_rows` is unchanged, so
+  compare and explain-row are too). The progress line folds into its summary row and is
+  no marker hit. One line keeps one item, the first with a backed cause. An item citing
+  the totals line is left out of `failures` (5d205e2).
+- **Scored:** Super, 12 runs each, pytest case, real cause found: 16/24 before, 10/24
+  with the check alone, 20/24 with the prompt line (twice), 24/24 with the FAILURES
+  part in context (kept 24/24, 2.0 steps, 16 s against 37 s). Context for 284 NQC guns
+  logs is byte-identical to before; 9 of 9 "row" causes on NQC's log after 5526bec.
+- **Rejected:** giving pytest rows a block in `_verdict_rows` (compare would diff
+  tracebacks holding object addresses); a Castor-side fallback that picks the `E` line
+  itself (not needed once the agent is shown it).
+
+### 2026-11-13: Triage `verdict` is the one the answer states, else null (user)
+- **Why:** with no `Verdict:` line the parser took the first verdict word in the opening
+  line, so "no row failed, 9 not assessed" then "inconclusive" parsed as failed (1 of 6
+  NQC runs on old develop, 1 of 9 on the branch).
+- **How:** a labelled verdict wins anywhere, then a line that is only a verdict, then the
+  opening sentence if it names one verdict and does not open with a count. Otherwise
+  null; `totals` comes from the log and wins a disagreement. Checked on 48 saved pytest
+  answers and 10 fresh NQC answers. (8659125)
+- **Rejected:** deriving `verdict` from `totals` (it would stop being the agent's).

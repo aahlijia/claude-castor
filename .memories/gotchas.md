@@ -101,6 +101,18 @@
   "non-empty"). One run per model is noise (Super looked twice as precise as
   Ultra, then matched it over three). Spot-check hits, repeat runs, re-score
   with `--rescore` after editing cases.
+  Triage numbers from before scoring version 7 (a380b76) are not comparable:
+  that scorer read only citations at the start of a line, never the checked
+  causes, and ran triage with 8 steps. Keywords that name only the test miss
+  an answer that describes the failure in words. Compare prompt variants in
+  the same hour: the same code found the real cause 16/24, then 10/24 an
+  hour later.
+- **Checking a triage change against NQC without spending requests.**
+  `_triage_context` is deterministic, so hash the context each checkout builds
+  for the 284 logs under `no-questions-cleaning/Library/guns*/guns-*.log` and
+  compare (load each checkout with `nim_eval.load_server`, one per process).
+  Lane worktrees such as `nqc-lane2` are deleted when NQC wraps up, so a log
+  under one can vanish mid-session; use the main checkout's logs.
 - **Agent grep reads the git index, cached 60 s per root.** A file created
   mid-run is missed until the cache expires or `_nim_reset_state()`; tests
   that add files after a first grep must reset. Outside git it still walks
@@ -184,4 +196,6 @@
 - **`/save` inside a worktree misses the real memory.** `current_state.md` and
   `session_log.md` are git-ignored, so a worktree has neither and the script reports
   "never saved", and its `gotchas.md` is only the last committed copy. Save to the
-  main checkout's `.memories/`.
+  main checkout's `.memories/`. A session inside a worktree (EnterWorktree) cannot
+  do that: Edit refuses the main checkout's path and Bash refuses compound commands.
+  Leave the worktree first (ExitWorktree keep), then write the notes.
