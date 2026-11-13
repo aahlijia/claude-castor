@@ -24,6 +24,14 @@
   log line) and how many known causes (`cause_lines` in the case) a kept
   cause reaches. Cases for private repos stay outside
   this repo (the NQC set is `~/.cache/claude-castor/eval/nqc-cases.json`).
+- To see what a change could save, or did, run `python3 scripts/usage_audit.py
+  [--days 30] [--project NAME]`. It reads Claude Code's own transcripts under
+  `~/.claude/projects` and reports turns, context per turn and token weight
+  for main sessions and subagents, what each tool put into context, Bash
+  output by first command, and how often each Castor tool was called and how
+  long it took. It prints counts only (no prompt text, file contents or
+  command arguments). Count turns first: on 2026-11-13 a subagent turn re-read
+  about 123k tokens, roughly ten times what a 100-line read brings back.
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands the `castor` package depends on. After an intended
   agy upgrade, update `castor/agy/cli.py`, then refresh with `--update-snapshot`.
