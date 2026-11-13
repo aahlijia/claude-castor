@@ -234,6 +234,11 @@ def _is_totals_line(text: str, fmt: LogFormat = DEFAULT_LOG_FORMAT) -> bool:
     return fmt.totals_re is not None and bool(fmt.totals_re.match(text))
 
 
+def _states_totals(text: str, fmt: LogFormat = DEFAULT_LOG_FORMAT) -> bool:
+    """True when `text` is the suite totals line or pytest's own."""
+    return _is_totals_line(text, fmt) or bool(_PYTEST_TOTALS_RE.search(text))
+
+
 def _unstamped_status(text: str, fmt: LogFormat) -> str | None:
     """A verdict line's status (padded to the name column), else None."""
     head = text[: fmt.name_start]
