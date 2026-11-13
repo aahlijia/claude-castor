@@ -153,7 +153,8 @@
     "must": true,
     "window": 2,
     "keywords": [
-     "test_default_model_is_old"
+     "test_default_model_is_old",
+     "assert"
     ],
     "cause_lines": [
      [
@@ -183,7 +184,8 @@
     "must": true,
     "window": 2,
     "keywords": [
-     "test_parse_config"
+     "test_parse_config",
+     "json"
     ],
     "cause_lines": [
      [
