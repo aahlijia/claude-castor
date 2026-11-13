@@ -19,7 +19,10 @@
   precision, recall of known findings, must-catch hits, time and steps.
   `--rescore results.json` re-scores saved answers after editing cases. A
   match needs the right file and lines and one of the finding's keywords;
-  line proximity alone overstated hits. Cases for private repos stay outside
+  line proximity alone overstated hits. Triage runs add a second line:
+  how many causes Castor's check kept (from a row's own reason or another
+  log line) and how many known causes (`cause_lines` in the case) a kept
+  cause reaches. Cases for private repos stay outside
   this repo (the NQC set is `~/.cache/claude-castor/eval/nqc-cases.json`).
 - Before a release, run `python3 scripts/check_agy_surface.py` to catch drift in
   the agy flags and subcommands the `castor` package depends on. After an intended

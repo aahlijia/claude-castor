@@ -6,9 +6,10 @@ row explainer), where its code comes from,
 and the findings, ranges, log lines or key points a good answer holds. The
 script runs every case under every model configuration. Agent answers are
 scored by their path:line citations (lead precision, recall, must-catch
-hits); plain answers by keywords alone (recall of known causes or key
-points); edit patches by applying them and comparing the resulting files
-with those of the reference diff.
+hits); triage answers also by the causes Castor's own check keeps and
+whether one sits on a known cause line; plain answers by keywords alone
+(recall of known causes or key points); edit patches by applying them and
+comparing the resulting files with those of the reference diff.
 
     uv run --with httpx --with fastmcp python scripts/nim_eval.py \\
         scripts/eval/cases.json \\
@@ -50,6 +51,9 @@ Case fields (JSON list of objects):
     expected                   [{id, locations: [{file, lines: [a, b]}],
                                  keywords, window, must}]; plain roles use
                                  keywords only
+    expected[].cause_lines     triage: [[a, b], ...], the log lines that
+                               show why the item failed. Castor's check of
+                               the answer's causes is scored against them
 Relative paths are resolved against the cases file. The response cache is
 off during a run, so repeated runs are independent.
 """
@@ -76,6 +80,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 CITE_RE = re.compile(r"([\w./-]+\.\w+):(\d+)(?:-(\d+))?")
+# "line 181" or "lines 129-130": how a triage answer cites its one log.
+BARE_LINE_RE = re.compile(r"\blines?\s+(\d+)(?:\s*-\s*(\d+))?", re.IGNORECASE)
 # A lead opens with its citation after list or emphasis markers; a line
 # that only cites evidence in passing is part of the lead above it.
 LEAD_PREFIX_RE = re.compile(r"^[\s>#*_`\-\d.)]*")
@@ -91,10 +97,14 @@ DEFAULT_WINDOW = 10
 # under dekko=off is "needs dekko", left out of the correct K/N count.
 # 5: a failed repair run or a stalled answer is an error row as well.
 # 6: explain_row role scored by Verdict code site and Reading word.
-SCORING_VERSION = 6
+# 7: a triage lead cites its log anywhere in the line (as path:line or a
+# bare "line N"), and a triage row carries the causes Castor kept and the
+# known cause lines they reach.
+SCORING_VERSION = 7
 ROLE_STEPS = {
     "review": "NIM_REVIEW_STEPS",
     "scout": "NIM_SCOUT_STEPS",
+    "triage": "NIM_TRIAGE_STEPS",
     "edit": "NIM_EDIT_STEPS",
 }
 # Plain tool calls: no agent loop, scored by keywords over the whole answer.
@@ -490,6 +500,9 @@ def _run_agent_case(case: dict, config: dict, server: ModuleType) -> dict:
         stats = {}
     seconds = round(time.monotonic() - started, 1)
     result = score(case, text)
+    if case["role"] == "triage":
+        result.update(triage_causes(case, cwd, text, server))
+
     result.update(
         scoring=SCORING_VERSION,
         case=case["name"],
@@ -894,7 +907,9 @@ def leads(text: str, role: str) -> list[str]:
     """Answer lines that cite path:line, before the footer.
 
     A review's "No issues found." ends its leads: what follows is the list
-    of things it checked, not findings.
+    of things it checked, not findings. A triage answer states totals and
+    warnings in a sentence that ends with its citation, often as a bare
+    "line N", so there a line citing either form anywhere is a lead.
     """
     found: list[str] = []
     for line in text.splitlines():
@@ -902,24 +917,48 @@ def leads(text: str, role: str) -> list[str]:
             break
         if role == "review" and "no issues found" in line.lower():
             break
-        body = LEAD_PREFIX_RE.sub("", line, count=1)
-        if CITE_RE.match(body):
+        if _cites(line, role):
             found.append(line)
     return found
 
 
-def matches(line: str, expected: dict) -> bool:
+def _cites(line: str, role: str) -> bool:
+    """True when an answer line counts as citing path:line for its role."""
+    if role == "triage":
+        return bool(CITE_RE.search(line) or BARE_LINE_RE.search(line))
+
+    body = LEAD_PREFIX_RE.sub("", line, count=1)
+    return CITE_RE.match(body) is not None
+
+
+def citations(line: str, log: str | None = None) -> list[tuple[str, str, str]]:
+    """Every (path, first line, last line or "") a lead cites.
+
+    Args:
+        line: One answer line.
+        log: A triage case's log. A triage answer has one file to cite,
+            so its bare "line N" and "lines N-M" count as citing `log`.
+    """
+    cited = CITE_RE.findall(line)
+    if log is not None:
+        cited += [(log, a, b) for a, b in BARE_LINE_RE.findall(line)]
+
+    return cited
+
+
+def matches(line: str, expected: dict, log: str | None = None) -> bool:
     """True when a lead names an expected item's location and substance.
 
     The location is a file (and line window when known); when the item
     lists keywords, the lead must also contain one, so a lead near the
-    right lines about something else does not count.
+    right lines about something else does not count. `log` is a triage
+    case's log, for leads that cite it by line number alone.
     """
     keywords = [k.lower() for k in expected.get("keywords", [])]
     if keywords and not any(k in line.lower() for k in keywords):
         return False
     window = expected.get("window", DEFAULT_WINDOW)
-    for path, start, end in CITE_RE.findall(line):
+    for path, start, end in citations(line, log):
         name = Path(path).name
         a, b = int(start), int(end or start)
         for loc in expected.get("locations", []):
@@ -936,10 +975,11 @@ def matches(line: str, expected: dict) -> bool:
 def score(case: dict, text: str) -> dict:
     """Leads, how many hit an expected item, and which items were hit."""
     found = leads(text, case["role"])
+    log = case.get("log") if case["role"] == "triage" else None
     hit: set[str] = set()
     matched = 0
     for line in found:
-        ids = [e["id"] for e in case["expected"] if matches(line, e)]
+        ids = [e["id"] for e in case["expected"] if matches(line, e, log)]
         matched += bool(ids)
         hit.update(ids)
     musts = {e["id"] for e in case["expected"] if e.get("must")}
@@ -951,6 +991,66 @@ def score(case: dict, text: str) -> dict:
         "must_hit": sorted(hit & musts),
         "musts": len(musts),
     }
+
+
+def triage_failures(
+    case: dict, cwd: Path, text: str, server: ModuleType
+) -> list[dict] | None:
+    """Castor's checked reading of the items in a triage answer.
+
+    Args:
+        case: The triage case; `log` is relative to `cwd`.
+        cwd: The case's code, as the agent saw it.
+        text: The agent's answer.
+        server: The server under test.
+
+    Returns:
+        The `failures` of the server's JSON triage answer, or None when
+        the answer is an error or the server has no such check (a copy
+        from before causes were bound to log text).
+    """
+    read = getattr(server, "_read_triage_log", None)
+    parse = getattr(server, "_triage_json", None)
+    if read is None or parse is None or text.startswith("["):
+        return None
+
+    lines, fmt = read(str(cwd), cwd / case["log"])
+    return parse(text, {}, case["log"], lines, fmt)["failures"]
+
+
+def score_causes(case: dict, failures: list[dict]) -> dict:
+    """How many causes Castor kept, and which known causes they reach.
+
+    A known cause is an expected item with `cause_lines`. It is found
+    when a kept cause sits on one of those lines, whichever item cited
+    it, so a row's own clipped reason does not count as finding it.
+    """
+    kept = [f for f in failures if f.get("cause_shown")]
+    known = [e for e in case["expected"] if e.get("cause_lines")]
+    cited = {f["cause_line"] for f in kept if f.get("cause_line")}
+    found = [
+        e["id"]
+        for e in known
+        if any(a <= n <= b for a, b in e["cause_lines"] for n in cited)
+    ]
+    return {
+        "causes": {
+            "items": len(failures),
+            "kept": len(kept),
+            "row": sum(f.get("cause_source") == "row" for f in kept),
+            "log": sum(f.get("cause_source") == "log" for f in kept),
+        },
+        "cause_hit": sorted(found),
+        "cause_known": len(known),
+    }
+
+
+def triage_causes(
+    case: dict, cwd: Path, text: str, server: ModuleType
+) -> dict:
+    """The cause score of a triage answer; {} when it cannot be checked."""
+    failures = triage_failures(case, cwd, text, server)
+    return {} if failures is None else score_causes(case, failures)
 
 
 def summarize(results: list[dict], label: str) -> str:
@@ -972,16 +1072,46 @@ def summarize(results: list[dict], label: str) -> str:
 
 def _summarize_main(results: list[dict], label: str) -> str:
     """The review, scout, triage and edit lines ("" when there are none)."""
-    edits = [
-        r for r in results if r["config"] == label and r.get("role") == "edit"
-    ]
-    rows = [r for r in results if r["config"] == label and "leads" in r]
+    mine = [r for r in results if r["config"] == label]
+    edits = [r for r in mine if r.get("role") == "edit"]
+    rows = [r for r in mine if "leads" in r]
+    caused = [r for r in rows if "causes" in r]
+    lines = []
+    if rows:
+        lines.append(summarize_rows(rows, label))
+    if caused:
+        lines.append(summarize_causes(caused, label))
     if edits:
-        edit_line = summarize_edit(edits, label)
-        if not rows:
-            return edit_line
-        return summarize_rows(rows, label) + "\n" + edit_line
-    return summarize_rows(rows, label) if rows else ""
+        lines.append(summarize_edit(edits, label))
+
+    return "\n".join(lines)
+
+
+def summarize_causes(rows: list[dict], label: str) -> str:
+    """The triage line: causes Castor kept, and known causes they reach."""
+    total = {
+        key: sum(r["causes"][key] for r in rows)
+        for key in ("items", "kept", "row", "log")
+    }
+    found = sum(len(r["cause_hit"]) for r in rows)
+    known = sum(r["cause_known"] for r in rows)
+    return (
+        f"{label:<24} triage causes kept {total['kept']}/{total['items']} "
+        f"(row {total['row']}, log {total['log']})  "
+        f"real cause found {found}/{known}"
+    )
+
+
+def _causes_note(row: dict) -> str:
+    """One run's cause score for its report line ("" without one)."""
+    if "causes" not in row:
+        return ""
+
+    causes = row["causes"]
+    return (
+        f" causes kept {causes['kept']}/{causes['items']} "
+        f"found {len(row['cause_hit'])}/{row['cause_known']}"
+    )
 
 
 def explain_row_bars(n: int) -> dict[str, int]:
@@ -1081,11 +1211,14 @@ def summarize_rows(rows: list[dict], label: str) -> str:
     )
 
 
-def rescore(path: Path, cases: list[dict]) -> None:
+def rescore(
+    path: Path, cases: list[dict], server: ModuleType | None = None
+) -> None:
     """Score saved answers again, write them back in place, and report.
 
     Run it after editing the cases or the scorer; rows whose case is not
-    given keep their old scores.
+    given keep their old scores. A triage row gets its cause score only
+    when `server` is given, since that check is the server's.
     """
     by_name = {c["name"]: c for c in cases}
     results = json.loads(path.read_text())
@@ -1100,19 +1233,29 @@ def rescore(path: Path, cases: list[dict]) -> None:
     for r in results:
         case = by_name.get(r.get("case"))
         if case and "answer" in r:
-            if case["role"] == "edit":
-                _rescore_edit(r, case)
-                continue
-            if case["role"] == "explain_row":
-                scored = score_explain_row(r["answer"], case)
-                r.update(scored, role="explain_row")
-                r["scoring"] = SCORING_VERSION
-                continue
-            scorer = score_plain if case["role"] in PLAIN_ROLES else score
-            r.update(scorer(case, r["answer"]), role=case["role"])
-            r["scoring"] = SCORING_VERSION
+            _rescore_row(r, case, server)
     path.write_text(json.dumps(results, indent=1))
     report(results, sorted({r["config"] for r in results}))
+
+
+def _rescore_row(row: dict, case: dict, server: ModuleType | None) -> None:
+    """Score one saved answer again, in place."""
+    role = case["role"]
+    if role == "edit":
+        _rescore_edit(row, case)
+        return
+
+    if role == "explain_row":
+        row.update(score_explain_row(row["answer"], case), role=role)
+    else:
+        scorer = score_plain if role in PLAIN_ROLES else score
+        row.update(scorer(case, row["answer"]), role=role)
+
+    if role == "triage" and server is not None:
+        cwd = snapshot_with_log(case, server)
+        row.update(triage_causes(case, cwd, row["answer"], server))
+
+    row["scoring"] = SCORING_VERSION
 
 
 def _rescore_edit(row: dict, case: dict) -> None:
@@ -1178,7 +1321,8 @@ def report(results: list[dict], labels: list[str]) -> None:
         print(
             f"{r['config']:<24} {r['case']:<22} leads {r['leads']:>2} "
             f"matched {r['matched']:>2} hit {','.join(r['hit']) or '-'} "
-            f"{r['seconds']:.0f}s{' FAILED' if r['failed'] else ''}"
+            f"{r['seconds']:.0f}s{_causes_note(r)}"
+            f"{' FAILED' if r['failed'] else ''}"
         )
     print()
     for label in labels:
@@ -1259,7 +1403,7 @@ def main() -> None:
         print_tasks(cases, args.print_tasks.expanduser(), server)
         return
     if args.rescore:
-        rescore(args.rescore, cases)
+        rescore(args.rescore, cases, server)
         return
     configs = [parse_config(c) for c in args.config] or [
         {"label": "default", "model": None}

@@ -1097,3 +1097,194 @@ def test_print_tasks_records_a_failing_case_and_goes_on(tmp_path):
     assert [e["name"] for e in index] == ["b", "h"]
     assert "error" in index[0] and "task_file" not in index[0]
     assert "task_file" in index[1]
+
+
+TRIAGE_CASE = {
+    "name": "t",
+    "role": "triage",
+    "dir": ".",
+    "log": "run.log",
+    "expected": [
+        {
+            "id": "boom",
+            "must": True,
+            "window": 0,
+            "keywords": ["test_a"],
+            "locations": [{"file": "run.log", "lines": [3, 3]}],
+            "cause_lines": [[2, 2]],
+        },
+        {
+            "id": "counts",
+            "window": 0,
+            "keywords": ["1 passed"],
+            "locations": [{"file": "run.log", "lines": [4, 4]}],
+        },
+    ],
+}
+TRIAGE_LOG = (
+    "collected 2 items\n"
+    "ValueError: boom happened here\n"
+    "FAILED tests/test_x.py::test_a - ValueEr...\n"
+    "1 failed, 1 passed in 0.1s\n"
+)
+TRIAGE_ANSWER = (
+    "Verdict: failed\n"
+    "- Tests: 1 failed, 1 passed (run.log:4).\n"
+    "- run.log:3 - test_a failed - line 2: ValueError: boom happened here\n"
+)
+
+
+def _triage_dir(tmp_path: Path) -> dict:
+    (tmp_path / "run.log").write_text(TRIAGE_LOG)
+    return {**TRIAGE_CASE, "_base": str(tmp_path)}
+
+
+def _triage_server(seen: dict) -> SimpleNamespace:
+    """The real triage checks around an agent that answers from a string."""
+    real = _real_server()
+
+    def run_agent(_task, _cwd, _model, steps, *_rest):
+        seen["steps"] = steps
+        return TRIAGE_ANSWER, {"steps": 2}
+
+    return SimpleNamespace(
+        _dekko_override=contextvars.ContextVar("o", default=None),
+        _triage_task=real._triage_task,
+        _read_triage_log=real._read_triage_log,
+        _triage_json=real._triage_json,
+        _run_nim_agent=run_agent,
+        NIM_TRIAGE_STEPS=3,
+    )
+
+
+def test_triage_leads_cite_anywhere_in_the_line():
+    line = "- Tests: 1 failed, 1 passed (run.log:4)."
+    assert nim_eval.leads(f"prose\n{line}\n", "triage") == [line]
+    assert nim_eval.leads(f"prose\n{line}\n", "review") == []
+
+
+def test_triage_score_credits_an_answer_cited_at_the_line_end():
+    result = nim_eval.score(TRIAGE_CASE, TRIAGE_ANSWER)
+    assert result["hit"] == ["boom", "counts"]
+    assert result["leads"] == 2 and result["matched"] == 2
+
+
+def test_triage_bare_line_number_cites_the_cases_log():
+    answer = "- Tests: 1 failed, 1 passed (line 4).\n"
+    assert nim_eval.leads(answer, "triage") == [answer.strip()]
+    assert nim_eval.leads(answer, "review") == []
+    assert nim_eval.score(TRIAGE_CASE, answer)["hit"] == ["counts"]
+
+
+def test_match_reads_a_bare_line_number_only_when_given_the_log():
+    counts = TRIAGE_CASE["expected"][1]
+    lead = "- Tests: 1 failed, 1 passed (lines 3-4)."
+    assert nim_eval.matches(lead, counts, "run.log")
+    assert not nim_eval.matches(lead, counts)
+    assert not nim_eval.matches("- 1 passed (line 9).", counts, "run.log")
+
+
+def test_score_causes_counts_kept_causes_and_known_cause_lines():
+    failures = [
+        {"cause_shown": True, "cause_source": "log", "cause_line": 2},
+        {"cause_shown": True, "cause_source": "row", "cause_line": 3},
+        {"cause_shown": False, "cause_source": None, "cause_line": None},
+    ]
+    assert nim_eval.score_causes(TRIAGE_CASE, failures) == {
+        "causes": {"items": 3, "kept": 2, "row": 1, "log": 1},
+        "cause_hit": ["boom"],
+        "cause_known": 1,
+    }
+    only_row = nim_eval.score_causes(TRIAGE_CASE, failures[1:])
+    assert only_row["cause_hit"] == [] and only_row["cause_known"] == 1
+
+
+def test_triage_failures_are_castors_checked_reading(tmp_path):
+    case = _triage_dir(tmp_path)
+    server = _triage_server({})
+    kept = nim_eval.triage_failures(case, tmp_path, TRIAGE_ANSWER, server)
+    assert [f["cause_line"] for f in kept] == [2]
+    invented = "- run.log:3 - test_a failed - line 2: the disk was full\n"
+    dropped = nim_eval.triage_failures(case, tmp_path, invented, server)
+    assert [f["cause_shown"] for f in dropped] == [False]
+
+
+def test_triage_failures_none_for_a_server_without_the_check(tmp_path):
+    case = _triage_dir(tmp_path)
+    old = SimpleNamespace()
+    assert nim_eval.triage_failures(case, tmp_path, TRIAGE_ANSWER, old) is None
+
+
+def test_run_case_triage_uses_the_triage_step_budget(tmp_path):
+    seen: dict = {}
+    nim_eval.run_case(_triage_dir(tmp_path), CONFIG, _triage_server(seen))
+    assert seen["steps"] == 3
+
+
+def test_run_case_triage_row_carries_the_cause_score(tmp_path):
+    row = nim_eval.run_case(_triage_dir(tmp_path), CONFIG, _triage_server({}))
+    assert row["causes"] == {"items": 1, "kept": 1, "row": 0, "log": 1}
+    assert row["cause_hit"] == ["boom"] and row["cause_known"] == 1
+
+
+def test_rescore_adds_the_cause_score_to_a_saved_triage_row(tmp_path):
+    case = _triage_dir(tmp_path)
+    saved = tmp_path / "results.json"
+    row = {
+        "case": "t",
+        "config": "a",
+        "answer": TRIAGE_ANSWER,
+        "seconds": 1.0,
+        "quotes": [0, 0],
+        "steps": 2,
+        "failed": False,
+    }
+    saved.write_text(json.dumps([row]))
+    nim_eval.rescore(saved, [case], _triage_server({}))
+    rescored = json.loads(saved.read_text())[0]
+    assert rescored["cause_hit"] == ["boom"]
+    assert rescored["causes"]["kept"] == 1
+
+
+def _triage_row(kept: int, found: list[str]) -> dict:
+    return {
+        "config": "a",
+        "case": "t",
+        "role": "triage",
+        "leads": 4,
+        "matched": 4,
+        "hit": ["boom"],
+        "known": 2,
+        "must_hit": ["boom"],
+        "musts": 1,
+        "quotes": [0, 0],
+        "seconds": 3.0,
+        "steps": 2,
+        "failed": False,
+        "causes": {"items": 4, "kept": kept, "row": 1, "log": kept - 1},
+        "cause_hit": found,
+        "cause_known": 1,
+    }
+
+
+def test_summary_adds_a_causes_line_for_triage_rows():
+    rows = [_triage_row(4, ["boom"]), _triage_row(2, [])]
+    lines = nim_eval.summarize(rows, "a").splitlines()
+    assert "recall 2/4" in lines[0]
+    assert lines[1].endswith(
+        "triage causes kept 6/8 (row 2, log 4)  real cause found 1/2"
+    )
+
+
+def test_summary_has_no_causes_line_without_a_cause_score():
+    row = _triage_row(4, ["boom"])
+    for key in ("causes", "cause_hit", "cause_known"):
+        del row[key]
+
+    assert len(nim_eval.summarize([row], "a").splitlines()) == 1
+
+
+def test_report_shows_each_triage_runs_causes(capsys):
+    nim_eval.report([_triage_row(4, ["boom"])], ["a"])
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first.endswith("3s causes kept 4/4 found 1/1")
