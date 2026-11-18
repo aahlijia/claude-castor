@@ -351,8 +351,9 @@ def nim_scout(
         text: Where the text of the ranges goes. "none" (default): only
             the bullets. "inline": the text follows the bullets, for when
             you will use it yourself. "file": the text goes to a pack
-            under `cwd`/.castor/packs/ and the answer names it, for a
-            brief another agent reads; it never enters your context.
+            under `cwd`/.castor/packs/ and the answer names it. Don't
+            build a brief around a pack: packs held a third of the files
+            implementers read (2026-11-13); cite ranges in the brief.
         text_tokens: Budget for that text (default 6000, 1000 to 20000).
             Ranges are taken in the scout's order; one that does not fit
             stays a pointer.
