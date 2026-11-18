@@ -28,8 +28,11 @@
   [--days 30] [--project NAME]`. It reads Claude Code's own transcripts under
   `~/.claude/projects` and reports turns, context per turn and token weight
   for main sessions and subagents, what each tool put into context, Bash
-  output by first command, and how often each Castor tool was called and how
-  long it took. It prints counts only (no prompt text, file contents or
+  output by first command, subagents by agent type (runs, turns, the turn of
+  the first edit and the reads before it, weight), and how often each Castor
+  tool was called and how long it took. Reads count `cat`, `head`, `sed` and
+  the like in Bash; edits count `sed -i` and Python that writes a file, since
+  NQC implementers edit that way more than with Edit. It prints counts only (no prompt text, file contents or
   command arguments). Count turns first: on 2026-11-13 a subagent turn re-read
   about 123k tokens, roughly ten times what a 100-line read brings back.
 - To check that scout finds what implementers need (the brief pack's gate),
