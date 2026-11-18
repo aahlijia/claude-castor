@@ -7,3 +7,6 @@ uv.lock
 .serena/
 .docs/
 .DS_Store
+
+# Project memory (session-memory plugin): local only, never committed
+.memories/
