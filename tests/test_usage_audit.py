@@ -256,3 +256,34 @@ def test_report_lists_subagents_by_type(projects):
     text = usage_audit.render(_audit(projects), days=30)
     assert "Subagents by type" in text
     assert "impl" in text and "(no type)" in text
+
+
+@pytest.mark.parametrize(
+    ("name", "command", "write"),
+    [
+        ("Edit", "", True),
+        ("Bash", "sed -i '' 's/a/b/' f.cs", True),
+        ("Bash", "perl -pi -e 's/a/b/' f.cs", True),
+        ("Bash", "git apply fix.diff", True),
+        ("Bash", "python3 - <<'EOF'\nopen(p, 'w').write(s)\nEOF", True),
+        ("Bash", "python3 - <<'EOF'\nPath(p).write_text(s)\nEOF", True),
+        ("Bash", "python3 - <<'EOF'\nprint(open(p).read())\nEOF", False),
+        ("Bash", "sed -n '1,9p' f.cs > /dev/null", False),
+        ("Read", "", False),
+    ],
+)
+def test_is_write(name, command, write):
+    assert usage_audit.is_write(name, command) is write
+
+
+def test_a_bash_write_is_the_first_edit(tmp_path):
+    path = _write(
+        tmp_path / "s" / "subagents" / "agent-b.jsonl",
+        [
+            _turn("b1", [("v1", "Read", {"file_path": "f.cs"})]),
+            _turn("b2", [("v2", "Bash", {"command": "sed -i '' x f.cs"})]),
+            _turn("b3", [("v3", "Read", {"file_path": "g.cs"})]),
+        ],
+    )
+    (run,) = usage_audit.audit([path]).kinds["(no type)"]
+    assert (run.first_edit, run.reads_before) == (2, 1)

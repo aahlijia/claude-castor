@@ -382,7 +382,9 @@ def _calls_before_edit(recs: list[dict]) -> list[tuple[dict, str]] | None:
         for block in usage_audit._blocks(rec):
             if block.get("type") != "tool_use":
                 continue
-            if block.get("name") in usage_audit.EDIT_TOOLS:
+            args = block.get("input")
+            command = args.get("command", "") if isinstance(args, dict) else ""
+            if usage_audit.is_write(str(block.get("name")), str(command)):
                 return calls
             calls.append((block, str(rec.get("cwd") or "")))
     return None

@@ -55,6 +55,13 @@ EDIT_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 # Shell commands that print a file; NQC implementers read this way.
 READERS = frozenset({"cat", "nl", "head", "tail", "sed", "awk"})
 
+# A Bash line that changes a file in place: NQC implementers edit mostly
+# through Python heredocs that write a file back, and `sed -i`.
+_BASH_WRITE_RE = re.compile(
+    r"\b(?:sed|perl)\s+-[a-zA-Z]*i|\bgit\s+apply\b|\bapply_patch\b"
+    r"|\.write_text\(|\bopen\([^)]*[\"'][wa]\+?[\"']"
+)
+
 CASTOR_PREFIX = "mcp__claude-castor__"
 
 # `cd dir &&`, `VAR=value` and an opening bracket before the real command.
@@ -299,6 +306,20 @@ def is_read(name: str, command: str) -> bool:
     return name == "Bash" and command_head(command) in READERS
 
 
+def is_write(name: str, command: str) -> bool:
+    """True for an edit tool call or a Bash line that changes a file.
+
+    shortcut: shell redirects (`> file`) are not counted, since most go to
+    /dev/null or scratch and heredoc text looks like them; and a Python
+    write to a scratch file counts. Parse the redirect targets if that
+    starts to matter.
+    """
+    if name in EDIT_TOOLS:
+        return True
+
+    return name == "Bash" and _BASH_WRITE_RE.search(command) is not None
+
+
 def result_chars(content: Any) -> int:
     """Characters of text in a tool result (a string or text blocks)."""
     if isinstance(content, str):
@@ -362,7 +383,7 @@ def _count_call(block: dict, rec: dict, side: Side, scan: _Scan) -> None:
     side.calls[name] += 1
     args = block.get("input")
     command = str(args.get("command", "")) if isinstance(args, dict) else ""
-    if name in EDIT_TOOLS and scan.first_edit is None:
+    if is_write(name, command) and scan.first_edit is None:
         scan.first_edit = scan.turns
         scan.reads_before = scan.reads
     elif is_read(name, command):
