@@ -138,12 +138,14 @@ class AgentRun:
         weight: Its token weight.
         first_edit: The turn of its first edit; None if it never edited.
         reads_before: Read calls and Bash reads before that edit.
+        weight_after: Its token weight in the turns after that edit.
     """
 
     turns: int
     weight: float
     first_edit: int | None
     reads_before: int
+    weight_after: float
 
 
 @dataclass
@@ -192,6 +194,7 @@ class _Scan:
     reads: int = 0
     first_edit: int | None = None
     reads_before: int = 0
+    weight_after: float = 0.0
 
 
 def transcripts(
@@ -373,6 +376,8 @@ def _count_turn(rec: dict, side: Side, scan: _Scan) -> None:
     side.turns += 1
     scan.turns += 1
     scan.weight += weight(usage)
+    if scan.first_edit is not None:
+        scan.weight_after += weight(usage)
     for key in WEIGHTS:
         side.tokens[key] += usage.get(key) or 0
 
@@ -434,7 +439,11 @@ def _scan_transcript(path: Path, report: Audit) -> None:
         pool.weight += scan.weight
         report.kinds[agent_type(path) or "(no type)"].append(
             AgentRun(
-                scan.turns, scan.weight, scan.first_edit, scan.reads_before
+                scan.turns,
+                scan.weight,
+                scan.first_edit,
+                scan.reads_before,
+                scan.weight_after,
             )
         )
 
@@ -512,19 +521,22 @@ def _kind_lines(report: Audit) -> list[str]:
     )
     lines = [
         "Subagents by type (medians; first edit and reads before it are"
-        " over the runs that edit)",
+        " over the runs that edit; after: weight spent after the first edit)",
         f"  {'type':28} {'runs':>6} {'edit':>5} {'turns':>6} "
-        f"{'1st edit':>9} {'reads':>6} {'weight':>8} {'share':>7}",
+        f"{'1st edit':>9} {'reads':>6} {'weight':>8} {'after':>6} "
+        f"{'share':>7}",
     ]
     for kind, runs in by_weight[:TOP_ROWS]:
         edits = [run for run in runs if run.first_edit is not None]
         own = sum(run.weight for run in runs)
+        after = sum(run.weight_after for run in runs)
         lines.append(
             f"  {kind[:28]:28} {len(runs):>6,} {len(edits):>5,} "
             f"{_median([run.turns for run in runs]):>6} "
             f"{_median([run.first_edit or 0 for run in edits]):>9} "
             f"{_median([run.reads_before for run in edits]):>6} "
-            f"{own / 1e6:>7.1f}M {_share(own, total):>7}"
+            f"{own / 1e6:>7.1f}M {_share(after, own):>6} "
+            f"{_share(own, total):>7}"
         )
     return lines
 

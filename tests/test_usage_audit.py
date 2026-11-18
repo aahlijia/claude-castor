@@ -282,8 +282,11 @@ def test_a_bash_write_is_the_first_edit(tmp_path):
         [
             _turn("b1", [("v1", "Read", {"file_path": "f.cs"})]),
             _turn("b2", [("v2", "Bash", {"command": "sed -i '' x f.cs"})]),
-            _turn("b3", [("v3", "Read", {"file_path": "g.cs"})]),
+            _turn(
+                "b3", [("v3", "Read", {"file_path": "g.cs"})], input_tokens=9
+            ),
         ],
     )
     (run,) = usage_audit.audit([path]).kinds["(no type)"]
     assert (run.first_edit, run.reads_before) == (2, 1)
+    assert run.weight_after == 9
