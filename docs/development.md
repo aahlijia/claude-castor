@@ -29,7 +29,8 @@
   `~/.claude/projects` and reports turns, context per turn and token weight
   for main sessions and subagents, what each tool put into context, Bash
   output by first command, subagents by agent type (runs, turns, the turn of
-  the first edit and the reads before it, weight), and how often each Castor
+  the first edit and the reads before it, weight and the share of it spent
+  after that edit), and how often each Castor
   tool was called and how long it took. Reads count `cat`, `head`, `sed` and
   the like in Bash; edits count `sed -i` and Python that writes a file, since
   NQC implementers edit that way more than with Edit. It prints counts only (no prompt text, file contents or
