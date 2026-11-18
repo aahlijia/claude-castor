@@ -198,3 +198,61 @@ def test_main_prints_the_report(projects, capsys):
 def test_an_empty_root_reports_nothing_to_read(tmp_path, capsys):
     usage_audit.main(["--root", str(tmp_path)])
     assert "No transcripts" in capsys.readouterr().out
+
+
+def test_agent_type_comes_from_the_meta_file(tmp_path):
+    path = _write(tmp_path / "agent-a.jsonl", [])
+    assert usage_audit.agent_type(path) is None
+    (tmp_path / "agent-a.meta.json").write_text('{"agentType": "nqc-impl"}')
+    assert usage_audit.agent_type(path) == "nqc-impl"
+
+
+@pytest.mark.parametrize(
+    ("name", "command", "read"),
+    [
+        ("Read", "", True),
+        ("Bash", "cd /repo; sed -n '1,9p' f.py", True),
+        ("Bash", "cat f.py | head -5", True),
+        ("Bash", "grep -n x f.py | head", False),
+        ("Grep", "", False),
+    ],
+)
+def test_is_read(name, command, read):
+    assert usage_audit.is_read(name, command) is read
+
+
+def test_subagents_are_grouped_by_type(projects):
+    sub = projects / "proj-a" / "s1" / "subagents"
+    (sub / "agent-edits.meta.json").write_text('{"agentType": "impl"}')
+    _write(
+        sub / "agent-slow.jsonl",
+        [
+            _turn(
+                "s1",
+                [
+                    ("u1", "Bash", {"command": "cd /x; sed -n '1,9p' f.py"}),
+                    ("u2", "Grep", {"pattern": "x"}),
+                ],
+            ),
+            _turn("s2", [("u3", "Read", {"file_path": "f.py"})]),
+            _turn("s3", [("u4", "Edit", {"file_path": "f.py"})]),
+            _turn("s4", [("u5", "Read", {"file_path": "g.py"})]),
+        ],
+    )
+    (sub / "agent-slow.meta.json").write_text('{"agentType": "impl"}')
+    kinds = _audit(projects).kinds
+    impl = sorted(kinds["impl"], key=lambda run: run.turns)
+    assert [(r.turns, r.first_edit, r.reads_before) for r in impl] == [
+        (1, 1, 0),
+        (4, 3, 2),
+    ]
+    (untyped,) = kinds["(no type)"]
+    assert untyped.first_edit is None
+
+
+def test_report_lists_subagents_by_type(projects):
+    sub = projects / "proj-a" / "s1" / "subagents"
+    (sub / "agent-edits.meta.json").write_text('{"agentType": "impl"}')
+    text = usage_audit.render(_audit(projects), days=30)
+    assert "Subagents by type" in text
+    assert "impl" in text and "(no type)" in text

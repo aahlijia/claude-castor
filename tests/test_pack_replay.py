@@ -513,10 +513,3 @@ def test_the_script_runs_from_the_command_line():
         check=False,
     )
     assert done.returncode == 0 and "--agent-type" in done.stdout
-
-
-def test_agent_type_comes_from_the_meta_file(tmp_path):
-    path = _write_jsonl(tmp_path / "agent-a.jsonl", [])
-    assert pack_replay.agent_type(path) is None
-    (tmp_path / "agent-a.meta.json").write_text('{"agentType": "nqc-impl"}')
-    assert pack_replay.agent_type(path) == "nqc-impl"

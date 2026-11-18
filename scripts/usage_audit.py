@@ -52,6 +52,9 @@ WEIGHT_LABELS = {
 
 EDIT_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 
+# Shell commands that print a file; NQC implementers read this way.
+READERS = frozenset({"cat", "nl", "head", "tail", "sed", "awk"})
+
 CASTOR_PREFIX = "mcp__claude-castor__"
 
 # `cd dir &&`, `VAR=value` and an opening bracket before the real command.
@@ -120,6 +123,23 @@ class Pool:
 
 
 @dataclass
+class AgentRun:
+    """One subagent transcript.
+
+    Attributes:
+        turns: Model calls it made.
+        weight: Its token weight.
+        first_edit: The turn of its first edit; None if it never edited.
+        reads_before: Read calls and Bash reads before that edit.
+    """
+
+    turns: int
+    weight: float
+    first_edit: int | None
+    reads_before: int
+
+
+@dataclass
 class Audit:
     """Everything read from a set of transcripts.
 
@@ -130,6 +150,7 @@ class Audit:
         bash_chars: Characters of Bash output by that command.
         editing: Subagents that called Edit, Write or NotebookEdit.
         reading: Subagents that never did.
+        kinds: Each subagent run, by the agent type its meta file names.
     """
 
     main: Side = field(default_factory=Side)
@@ -138,6 +159,9 @@ class Audit:
     bash_chars: Counter = field(default_factory=Counter)
     editing: Pool = field(default_factory=Pool)
     reading: Pool = field(default_factory=Pool)
+    kinds: dict[str, list[AgentRun]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
 
 @dataclass
@@ -158,7 +182,9 @@ class _Scan:
     pending: dict[str, _Call] = field(default_factory=dict)
     turns: int = 0
     weight: float = 0.0
-    edits: bool = False
+    reads: int = 0
+    first_edit: int | None = None
+    reads_before: int = 0
 
 
 def transcripts(
@@ -189,6 +215,18 @@ def transcripts(
 def is_subagent(path: Path) -> bool:
     """True for a subagent's transcript file."""
     return "subagents" in path.parts or path.name.startswith("agent-")
+
+
+def agent_type(path: Path) -> str | None:
+    """The agent type a subagent's meta file records, if there is one."""
+    meta = path.with_suffix(".meta.json")
+    try:
+        data = json.loads(meta.read_text())
+    except (OSError, ValueError):
+        return None
+
+    kind = data.get("agentType") if isinstance(data, dict) else None
+    return str(kind) if kind else None
 
 
 def records(path: Path) -> Iterator[dict]:
@@ -246,6 +284,19 @@ def command_head(command: str) -> str:
     rest = _positionals(words[1:], _VALUE_FLAGS[first])
     keep = 2 if first == "uv" and rest[:1] == ["run"] else 1
     return " ".join([first, *rest[:keep]])[:HEAD_CHARS]
+
+
+def is_read(name: str, command: str) -> bool:
+    """True for a Read call or a Bash line that prints a file.
+
+    shortcut: a Bash line is judged by its first command, so `sed -i`
+    counts and a reader after `;` or `&&` does not; pack_replay's
+    bash_reads parses the whole line if exact files are ever needed.
+    """
+    if name == "Read":
+        return True
+
+    return name == "Bash" and command_head(command) in READERS
 
 
 def result_chars(content: Any) -> int:
@@ -309,13 +360,16 @@ def _count_call(block: dict, rec: dict, side: Side, scan: _Scan) -> None:
     """Count a tool call and remember it until its result arrives."""
     name = tool_name(str(block.get("name", "?")))
     side.calls[name] += 1
-    if name in EDIT_TOOLS:
-        scan.edits = True
-
     args = block.get("input")
-    command = args.get("command", "") if isinstance(args, dict) else ""
+    command = str(args.get("command", "")) if isinstance(args, dict) else ""
+    if name in EDIT_TOOLS and scan.first_edit is None:
+        scan.first_edit = scan.turns
+        scan.reads_before = scan.reads
+    elif is_read(name, command):
+        scan.reads += 1
+
     scan.pending[str(block.get("id"))] = _Call(
-        name, side, _seconds(rec.get("timestamp")), str(command)
+        name, side, _seconds(rec.get("timestamp")), command
     )
 
 
@@ -352,10 +406,16 @@ def _scan_transcript(path: Path, report: Audit) -> None:
             elif block.get("type") == "tool_result":
                 _count_result(block, rec, report, scan)
     if subagent:
-        pool = report.editing if scan.edits else report.reading
+        edits = scan.first_edit is not None
+        pool = report.editing if edits else report.reading
         pool.count += 1
         pool.turns += scan.turns
         pool.weight += scan.weight
+        report.kinds[agent_type(path) or "(no type)"].append(
+            AgentRun(
+                scan.turns, scan.weight, scan.first_edit, scan.reads_before
+            )
+        )
 
 
 def audit(paths: Iterable[Path]) -> Audit:
@@ -412,6 +472,38 @@ def _subagent_lines(report: Audit) -> list[str]:
         lines.append(
             f"  {label:18} {pool.count:>6,}   avg {turns:>3} turns   "
             f"{_share(pool.weight, total)} of all weight"
+        )
+    return lines
+
+
+def _median(values: list[int]) -> str:
+    """The median of `values`, rounded, or "-" when there are none."""
+    return f"{statistics.median(values):.0f}" if values else "-"
+
+
+def _kind_lines(report: Audit) -> list[str]:
+    """Runs, turns, first edit and token weight for each agent type."""
+    total = weight(report.main.tokens) + weight(report.sub.tokens)
+    by_weight = sorted(
+        report.kinds.items(),
+        key=lambda item: sum(run.weight for run in item[1]),
+        reverse=True,
+    )
+    lines = [
+        "Subagents by type (medians; first edit and reads before it are"
+        " over the runs that edit)",
+        f"  {'type':28} {'runs':>6} {'edit':>5} {'turns':>6} "
+        f"{'1st edit':>9} {'reads':>6} {'weight':>8} {'share':>7}",
+    ]
+    for kind, runs in by_weight[:TOP_ROWS]:
+        edits = [run for run in runs if run.first_edit is not None]
+        own = sum(run.weight for run in runs)
+        lines.append(
+            f"  {kind[:28]:28} {len(runs):>6,} {len(edits):>5,} "
+            f"{_median([run.turns for run in runs]):>6} "
+            f"{_median([run.first_edit or 0 for run in edits]):>9} "
+            f"{_median([run.reads_before for run in edits]):>6} "
+            f"{own / 1e6:>7.1f}M {_share(own, total):>7}"
         )
     return lines
 
@@ -479,6 +571,7 @@ def render(report: Audit, days: int) -> str:
     sections = (
         _weight_lines(report),
         _subagent_lines(report),
+        _kind_lines(report),
         _tool_lines(report),
         _bash_lines(report),
         _castor_lines(report),

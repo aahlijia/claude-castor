@@ -704,18 +704,6 @@ def score(
     )
 
 
-def agent_type(path: Path) -> str | None:
-    """The agent type its meta file records, if there is one."""
-    meta = path.with_suffix(".meta.json")
-    try:
-        data = json.loads(meta.read_text())
-    except (OSError, ValueError):
-        return None
-
-    kind = data.get("agentType") if isinstance(data, dict) else None
-    return str(kind) if kind else None
-
-
 def implementers(
     paths: list[Path], kind: str | None, limit: int
 ) -> list[Implementer]:
@@ -729,7 +717,7 @@ def implementers(
     for path in newest:
         if len(found) >= limit:
             break
-        if kind and agent_type(path) != kind:
+        if kind and usage_audit.agent_type(path) != kind:
             continue
         one = read_implementer(path)
         if one is not None:
